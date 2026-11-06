@@ -88,8 +88,10 @@ userspace/          on-device: bring-up initramfs, installer
 ## Quickstart
 
 ```sh
-# 1. M0: pull the stock firmware apart (AP tar from SamMobile/SamFirm for LUC or KOO)
-tools/extract-firmware.sh ~/fw/F711N*.tar.md5
+# 1. M0: get the stock firmware, then pull it apart
+tools/fetch-firmware.sh --list                  # F711NKSSFKZH5 for LUC right now
+tools/fetch-firmware.sh                         # about 8 GB into .cache/fw
+tools/extract-firmware.sh .cache/fw/AP_*.tar.md5
 
 # 2. M0: record the device state before touching anything (needs adb)
 tools/evidence.sh

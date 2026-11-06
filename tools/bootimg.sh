@@ -5,7 +5,7 @@
 # The header fields come from the stock image's own mkbootimg arguments (written by
 # tools/extract-firmware.sh to out/boot/mkbootimg_args), because ABL matches on the
 # board string and the offsets. The ASCII trailer "SEANDROIDENFORCE" is appended the
-# same way LineageOS and postmarketOS do for Samsung devices; without it ABL
+# same way LineageOS and Nura do for Samsung devices; without it ABL
 # reports a bogus SEAndroid state.
 
 set -euo pipefail

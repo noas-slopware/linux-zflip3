@@ -5,12 +5,14 @@ give it the device.
 
 | script | stage | what it does |
 |---|---|---|
+| `fetch-firmware.sh` | M0 | download the stock firmware through Samsung's FUS (samloader-rs) |
 | `extract-firmware.sh` | M0 | AP tar → `boot.img`, `dtbo.img`, decompiled DTS, stock `mkbootimg` args |
 | `evidence.sh` | M0 | read-only dump of props, cmdline, partitions, battery into `evidence/device/` |
 | `fetch-kernel.sh` | M1 | download and verify the pinned mainline, optionally apply `patches/linux/` |
 | `build-initramfs.sh` | M1 | static busybox initramfs with the USB console init |
 | `bootimg.sh` | M1 | pack kernel + initramfs + dtb with the stock header, append `SEANDROIDENFORCE` |
 | `flash.sh` | M1 | tar for Odin and flash one partition through download mode |
+| `phone-usb.sh` | all | find the phone among the USB/IP devices and attach it |
 | `build-rootfs.sh` | M3 | Arch Linux Ports aarch64 rootfs from the drzee.net bootstrap tarball |
 
 ## Conventions
