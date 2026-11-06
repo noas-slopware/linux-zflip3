@@ -1,0 +1,19 @@
+# Raw material that must not be committed.
+.cache/
+out/
+downstream/
+
+# Device and firmware dumps. Keep the small summaries in evidence/, not the blobs.
+evidence/raw/
+evidence/device/*
+!evidence/device/.gitkeep
+
+# Build products.
+*.img
+*.img.lz4
+*.tar
+*.tar.md5
+*.cpio
+*.cpio.gz
+*.zst
+*.dtb

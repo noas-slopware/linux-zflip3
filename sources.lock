@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: MIT
+# Pinned upstream sources. Every tool sources this file; override on the command line.
+#
+# `linux` is fetched from cdn.kernel.org and verified against that directory's
+# sha256sums.asc, so the checksum does not need to be pinned here by hand.
+
+# Mainline base for patches/linux/.
+LINUX_VERSION=7.3.1
+LINUX_SERIES=v7.x
+
+# Arch Linux Ports aarch64 bootstrap (drzee.net, ARMv8.2+).
+# `latest` is a stable symlink; set ARCH_TARBALL to a dated file to pin it.
+ARCH_TARBALL=archlinux-bootstrap-latest-aarch64.tar.zst
+ARCH_TARBALL_URL=https://arch-linux-repo.drzee.net/arch/tarballs/os/aarch64
+
+# Arch Linux Ports package repositories (ARMv8.2+, which the Kryo 680 supports).
+ARCH_REPO_CORE=https://arch-linux-repo.drzee.net/arch/core/os/aarch64
+ARCH_REPO_EXTRA=https://arch-linux-repo.drzee.net/arch/extra/os/aarch64
+ARCH_REPO_FORGE=https://arch-linux-repo.drzee.net/arch/forge/os/aarch64
+
+# Device constants (from the stock firmware in M0; tools print an error if unset).
+B2Q_MODEL=SM-F711N
+B2Q_CODENAME=b2q
+# 96 MB boot and recovery partitions.
+B2Q_BOOT_PART_SIZE=100663296
