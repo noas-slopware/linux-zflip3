@@ -47,27 +47,37 @@ mkdir -p "$OUT"
 log "reading $AP"
 members=$(tar -tf "$AP")
 
-extract_member() {
-  local base=$1 cand m=""
-  for cand in "$base" "$base.lz4" "$base.md5" "$base.lz4.md5"; do
-    if printf '%s\n' "$members" | grep -Fqx -- "$cand"; then m=$cand; break; fi
-  done
-  if [ -z "$m" ]; then
-    warn "$base is not in this archive"
-    return 1
-  fi
-  log "extracting $m"
-  tar -xf "$AP" -C "$OUT" -- "$m"
-  case "$m" in
-    *.lz4) lz4 -d -f "$OUT/$m" "$OUT/$base" >/dev/null; rm -f "$OUT/$m" ;;
-    *) [ "$m" = "$base" ] || mv -f "$OUT/$m" "$OUT/$base" ;;
-  esac
-}
+wanted=(boot.img recovery.img dtbo.img vbmeta.img vendor_boot.img vbmeta_system.img)
+if [ "$WITH_SUPER" = 1 ]; then wanted+=(super.img); fi
 
-for base in boot.img recovery.img dtbo.img vbmeta.img; do
-  extract_member "$base" || true
+# One tar pass for everything: the AP tar is ~10 GB and a pass per member is painful.
+to_extract=()
+for base in "${wanted[@]}"; do
+  found=""
+  for cand in "$base" "$base.lz4" "$base.md5" "$base.lz4.md5"; do
+    if printf '%s\n' "$members" | grep -Fqx -- "$cand"; then found=$cand; break; fi
+  done
+  if [ -n "$found" ]; then
+    to_extract+=("$found")
+  else
+    warn "$base is not in this archive"
+  fi
 done
-if [ "$WITH_SUPER" = 1 ]; then extract_member super.img || true; fi
+[ "${#to_extract[@]}" -gt 0 ] || die "nothing to extract; is this an AP tar?"
+
+log "extracting ${#to_extract[@]} member(s) in one pass"
+tar -xf "$AP" -C "$OUT" -- "${to_extract[@]}"
+
+for m in "${to_extract[@]}"; do
+  case "$m" in
+    *.lz4)
+      base=${m%.lz4}
+      log "decompressing $m"
+      lz4 -d -f "$OUT/$m" "$OUT/$base" >/dev/null
+      rm -f "$OUT/$m"
+      ;;
+  esac
+done
 
 [ -f "$OUT/boot.img" ] || die "no boot.img came out of $AP; is this an AP tar?"
 
@@ -76,6 +86,20 @@ rm -rf "${OUT:?}/boot"
 mkdir -p "$OUT/boot" "$OUT/dts"
 unpack_bootimg --boot_img "$OUT/boot.img" --out "$OUT/boot" | tee "$OUT/boot/header.txt"
 unpack_bootimg --boot_img "$OUT/boot.img" --format mkbootimg > "$OUT/boot/mkbootimg_args"
+
+if [ -f "$OUT/vendor_boot.img" ]; then
+  log "unpacking vendor_boot.img"
+  rm -rf "${OUT:?}/vendor_boot"
+  mkdir -p "$OUT/vendor_boot"
+  unpack_bootimg --boot_img "$OUT/vendor_boot.img" --out "$OUT/vendor_boot" \
+    | tee "$OUT/vendor_boot/header.txt"
+  unpack_bootimg --boot_img "$OUT/vendor_boot.img" --format mkbootimg \
+    > "$OUT/vendor_boot/mkbootimg_args"
+  if [ -f "$OUT/vendor_boot/dtb" ]; then
+    dtc -I dtb -O dts -o "$OUT/dts/vendor_boot.dts" "$OUT/vendor_boot/dtb" 2>/dev/null || \
+      warn "could not decompile vendor_boot's dtb"
+  fi
+fi
 
 if [ -f "$OUT/boot/dtb" ]; then
   dtc -I dtb -O dts -o "$OUT/dts/boot.dts" "$OUT/boot/dtb" 2>/dev/null || {

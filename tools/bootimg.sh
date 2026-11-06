@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
-# Pack a kernel + initramfs + dtb into a Samsung boot or recovery image.
+# Pack a kernel, initramfs and dtb into Samsung boot / recovery / vendor_boot images.
 #
-# The header fields come from the stock image's own mkbootimg arguments (written by
-# tools/extract-firmware.sh to out/boot/mkbootimg_args), because ABL matches on the
-# board string and the offsets. The ASCII trailer "SEANDROIDENFORCE" is appended the
-# same way LineageOS and Nura do for Samsung devices; without it ABL
-# reports a bogus SEAndroid state.
+# This firmware uses boot header v3 and puts the device tree in the *vendor_boot*
+# partition, not in boot.img. So M1 needs two images:
+#
+#   boot.img         header v3, kernel + our initramfs, no dtb
+#   vendor_boot.img  header v3, our dtb + (optionally) a vendor ramdisk
+#
+# Header fields come from the stock images' own mkbootimg arguments, so the board
+# string (SRPUC29A015 on this build) and the offsets are never guessed. boot.img and
+# recovery.img get the ASCII trailer SEANDROIDENFORCE, the same way LineageOS and Nura
+# do for Samsung devices; vendor_boot does not.
 
 set -euo pipefail
 . "$(dirname -- "${BASH_SOURCE[0]}")/lib.sh"
@@ -14,24 +19,26 @@ load_sources
 
 usage() {
   cat <<'EOF'
-usage: bootimg.sh --kernel Image --out IMG [options]
+usage: bootimg.sh (--kernel IMAGE --out IMG | --vendor --dtb DTB --out IMG) [options]
 
-  --kernel PATH        kernel Image (required)
-  --ramdisk PATH       initramfs cpio (optional but you want one)
-  --dtb PATH           device tree blob (optional if the stock image has none)
-  --cmdline STRING     override the kernel command line
+  --kernel PATH        kernel Image (boot and recovery images)
+  --ramdisk PATH       initramfs cpio
+  --dtb PATH           device tree blob (required for --vendor)
+  --vendor             build a vendor_boot image instead of a boot image
+  --cmdline STRING     override the command line
   --board STRING       override the board string
   --stock-args PATH    mkbootimg args from the stock image
-                       (default: out/boot/mkbootimg_args)
+                       (default: evidence/raw/{boot,vendor_boot}/mkbootimg_args)
   --out PATH           output image (required)
-  --no-trailer         do not append SEANDROIDENFORCE (you almost never want this)
+  --trailer / --no-trailer
+                       force or suppress the SEANDROIDENFORCE trailer
+                       (default: on for boot/recovery, off for vendor_boot)
   --print-args         print the mkbootimg invocation and exit
 EOF
 }
 
-KERNEL=""; RAMDISK=""; DTB=""; CMDLINE=""; BOARD=""
-ARGS_FILE="$REPO_ROOT/out/boot/mkbootimg_args"
-OUT=""; TRAILER=1; PRINT=0
+KERNEL=""; RAMDISK=""; DTB=""; CMDLINE=""; BOARD=""; OUT=""
+ARGS_FILE=""; VENDOR=0; TRAILER=""; PRINT=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -43,17 +50,26 @@ while [ $# -gt 0 ]; do
     --board) BOARD=${2:?}; shift 2 ;;
     --stock-args) ARGS_FILE=${2:?}; shift 2 ;;
     --out) OUT=${2:?}; shift 2 ;;
+    --vendor) VENDOR=1; shift ;;
+    --trailer) TRAILER=1; shift ;;
     --no-trailer) TRAILER=0; shift ;;
     --print-args) PRINT=1; shift ;;
     *) die "unknown option: $1 (try --help)" ;;
   esac
 done
 
-[ -n "$KERNEL" ] || { usage >&2; exit 1; }
 [ -n "$OUT" ] || { usage >&2; exit 1; }
-[ -f "$KERNEL" ] || die "no such kernel: $KERNEL"
-[ -n "$DTB" ] || die "b2q boots with header v2, which requires --dtb; ABL needs the device tree in the boot image"
-[ -f "$DTB" ] || die "no such dtb: $DTB"
+if [ "$VENDOR" = 1 ]; then
+  [ -n "$DTB" ] || die "--vendor needs --dtb: that is where ABL reads the device tree on this firmware"
+  [ -f "$DTB" ] || die "no such dtb: $DTB"
+  ARGS_FILE=${ARGS_FILE:-$REPO_ROOT/evidence/raw/vendor_boot/mkbootimg_args}
+  TRAILER=${TRAILER:-0}
+else
+  [ -n "$KERNEL" ] || { usage >&2; exit 1; }
+  [ -f "$KERNEL" ] || die "no such kernel: $KERNEL"
+  ARGS_FILE=${ARGS_FILE:-$REPO_ROOT/evidence/raw/boot/mkbootimg_args}
+  TRAILER=${TRAILER:-1}
+fi
 [ -z "$RAMDISK" ] || [ -f "$RAMDISK" ] || die "no such ramdisk: $RAMDISK"
 need mkbootimg sha256sum
 
@@ -65,23 +81,38 @@ if [ -f "$ARGS_FILE" ]; then
   while [ $# -gt 0 ]; do
     case "$1" in
       # drop what we replace, keep everything else verbatim and in order
-      --kernel|--ramdisk|--dtb|--recovery_dtbo|--recovery_acpio|--cmdline) shift 2 ;;
+      --kernel|--ramdisk|--dtb|--cmdline|--vendor_ramdisk|--vendor_cmdline) shift 2 ;;
       *) args+=("$1"); shift ;;
     esac
   done
 else
-  warn "no stock args at $ARGS_FILE; falling back to b2q header v2 defaults"
-  args=(--header_version 2 --pagesize 4096
+  warn "no stock args at $ARGS_FILE; falling back to header v3 defaults"
+  args=(--header_version 3 --pagesize 4096
         --kernel_offset 0x00008000 --ramdisk_offset 0x02000000
         --tags_offset 0x01e00000 --dtb_offset 0x01f00000)
 fi
 
 [ -n "$BOARD" ] && args+=(--board "$BOARD")
-[ -n "$CMDLINE" ] && args+=(--cmdline "$CMDLINE")
+if [ -n "$CMDLINE" ]; then
+  if [ "$VENDOR" = 1 ]; then args+=(--vendor_cmdline "$CMDLINE"); else args+=(--cmdline "$CMDLINE"); fi
+fi
+[ -n "$DTB" ] && args+=(--dtb "$DTB")
 
-cmd=(mkbootimg "${args[@]}" --kernel "$KERNEL" -o "$OUT")
-[ -n "$RAMDISK" ] && cmd+=(--ramdisk "$RAMDISK")
-[ -n "$DTB" ] && cmd+=(--dtb "$DTB")
+if [ "$VENDOR" = 1 ]; then
+  # mkbootimg insists on a vendor ramdisk. The stock one holds vendor modules; ours has
+  # nothing to put there, and the kernel's initramfs rides in boot.img instead.
+  if [ -z "$RAMDISK" ]; then
+    empty_dir=$(mktemp -d)
+    RAMDISK=$(mktemp)
+    ( cd "$empty_dir" && find . | cpio -o -H newc --quiet ) | gzip -9 > "$RAMDISK"
+    trap 'rm -rf "$empty_dir" "$RAMDISK"' EXIT
+    log "built an empty vendor ramdisk ($(stat -c%s "$RAMDISK") bytes)"
+  fi
+  cmd=(mkbootimg "${args[@]}" --vendor_boot "$OUT" --vendor_ramdisk "$RAMDISK")
+else
+  cmd=(mkbootimg "${args[@]}" --kernel "$KERNEL" -o "$OUT")
+  [ -n "$RAMDISK" ] && cmd+=(--ramdisk "$RAMDISK")
+fi
 
 if [ "$PRINT" = 1 ]; then
   printf '%q ' "${cmd[@]}"; echo
@@ -97,8 +128,8 @@ fi
 size=$(stat -c%s "$OUT")
 log "$OUT: $size bytes ($(sha256sum "$OUT" | cut -d' ' -f1))"
 if [ "$size" -gt "$B2Q_BOOT_PART_SIZE" ]; then
-  die "image is larger than the $B2Q_BOOT_PART_SIZE byte boot partition"
+  die "image is larger than the ${B2Q_BOOT_PART_SIZE}-byte partition"
 fi
 if [ "$size" -gt $((B2Q_BOOT_PART_SIZE * 95 / 100)) ]; then
-  warn "image is within 5% of the partition size; trim the initramfs"
+  warn "image is within 5% of the partition size; trim the ramdisk"
 fi
