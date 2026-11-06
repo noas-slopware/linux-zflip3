@@ -68,7 +68,9 @@ The chip has no factory addresses. Samsung keeps them on `efs` (sda6):
   address and unmounts it again.
 - Bluetooth: without a public address, `hci0` stays unconfigured and bluetoothd does not
   see it ("No default controller available"). A udev rule starts `b2q-bt-addr.service`,
-  which runs `btmgmt --index 0 public-addr` before `bluetooth.service`.
+  which runs `btmgmt --index 0 public-addr` before `bluetooth.service`. hci0 registers
+  about a second before its firmware download finishes and it accepts the address, so
+  the first attempt fails with `Invalid Index` and the service retries.
 - Wi-Fi: the permanent address ath11k reports is a Qualcomm placeholder (`00:03:7f:…`).
   `b2q-wifi-mac.service` writes `/run/NetworkManager/conf.d/10-b2q-wifi-mac.conf` with
   `wifi.cloned-mac-address` for `driver:ath11k_pci` before NetworkManager starts.
