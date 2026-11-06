@@ -58,5 +58,5 @@ if [ -n "$EXTRA" ]; then
 fi
 
 mkdir -p "$(dirname -- "$OUT")"
-( cd "$STAGE" && find . -print0 | cpio --null -o -H newc --quiet | gzip -9 ) > "$OUT"
+( cd "$STAGE" && find . -print0 | cpio --null -o -H newc --owner=0:0 --reproducible --quiet | gzip -9 ) > "$OUT"
 log "$OUT: $(stat -c%s "$OUT") bytes"

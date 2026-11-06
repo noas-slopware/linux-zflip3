@@ -61,13 +61,15 @@ log "sha256 $(sha256sum "$CACHE/$TARBALL" | cut -d' ' -f1)  $TARBALL"
 
 log "extracting to $DEST"
 STAGE=$(mktemp -d "$CACHE/rootfs.XXXXXX")
-tar --zstd -xf "$CACHE/$TARBALL" -C "$STAGE"
-entries=("$STAGE"/*)
-[ "${#entries[@]}" -eq 1 ] && [ -d "${entries[0]}" ] || {
+tar --zstd --numeric-owner --xattrs --xattrs-include='*' -xf "$CACHE/$TARBALL" -C "$STAGE"
+# The bootstrap tarball also ships version and pkglist.aarch64.txt at the top level,
+# so pick the single directory rather than assuming the archive has one entry.
+mapfile -t roots < <(find "$STAGE" -mindepth 1 -maxdepth 1 -type d)
+[ "${#roots[@]}" -eq 1 ] || {
   rm -rf "$STAGE"
-  die "expected exactly one top-level directory in $TARBALL"
+  die "expected exactly one top-level directory in $TARBALL, found ${#roots[@]}"
 }
-mv "${entries[0]}" "$DEST"
+mv "${roots[0]}" "$DEST"
 rm -rf "$STAGE"
 [ "$KEEP" = 1 ] || rm -f "$CACHE/$TARBALL"
 
@@ -99,6 +101,8 @@ if [ "$DO_CHROOT" = 0 ]; then
   log "unpacked only (--no-chroot)"
   exit 0
 fi
+
+[ "$(id -u)" -eq 0 ] || die "chrooting needs root; re-run as root, or unpack with --no-chroot"
 
 if [ ! -e /proc/sys/fs/binfmt_misc/qemu-aarch64 ]; then
   cat >&2 <<'EOF'

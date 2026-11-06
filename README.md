@@ -97,10 +97,12 @@ tools/evidence.sh
 # 3. build a kernel from the pinned base plus patches/linux
 tools/fetch-kernel.sh --apply --build
 
-# 4. pack it into a recovery image (uses out/boot/mkbootimg_args from step 1)
+# 4. pack the bring-up initramfs and a recovery image
+#    (a static aarch64 busybox is needed; see the script's header)
+tools/build-initramfs.sh --busybox /path/to/busybox --out out/initramfs.cpio.gz
 tools/bootimg.sh --kernel .cache/linux-*/arch/arm64/boot/Image \
-                 --dtb out/dtbo/entry.0 --ramdisk out/initramfs.cpio.gz \
-                 --out out/recovery.img
+                 --dtb .cache/linux-*/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dtb \
+                 --ramdisk out/initramfs.cpio.gz --out out/recovery.img
 
 # 5. flash it to the recovery slot
 B2Q_UNLOCKED=1 tools/flash.sh --image out/recovery.img --partition recovery

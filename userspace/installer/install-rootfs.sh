@@ -49,7 +49,6 @@ done
 
 [ -f "$BOOTIMG" ] || { echo "error: --boot is required" >&2; exit 1; }
 [ -n "$ROOTFS" ] || [ -n "$STREAM_PORT" ] || { echo "error: give --rootfs or --stream" >&2; exit 1; }
-[ -d "$ROOT_PART" ] || [ -e "$ROOT_PART" ] || { echo "error: no $ROOT_PART; not on the phone?" >&2; exit 1; }
 
 echo "root: $ROOT_PART -> $MOUNT"
 echo "home: $HOME_PART -> $MOUNT/home"
@@ -57,9 +56,12 @@ echo "boot: $BOOTIMG"
 if [ "$DRY" = 1 ]; then
   echo
   echo "DRY RUN. This would mkfs.ext4 both partitions and destroy Android."
+  [ -e "$ROOT_PART" ] || echo "(Note: $ROOT_PART does not exist here: not on the phone.)"
   echo "Re-run with --yes-wipe when that is what you want."
   exit 0
 fi
+
+[ -e "$ROOT_PART" ] || { echo "error: no $ROOT_PART; not on the phone?" >&2; exit 1; }
 
 echo
 echo "Wiping Android in 10 seconds. Ctrl-C to stop."
