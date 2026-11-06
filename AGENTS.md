@@ -63,3 +63,21 @@ stale busid, so re-listing and retrying does not help.
   `adb connect <ip>:5555`.
 - **Download mode (`04e8:685d`):** a single bulk interface that does not churn, so usbip attach
   is worth trying there when flashing. If it still fails, run `odin4` on the desktop.
+
+## adb lives on the Proxmox host, not here
+
+The phone is plugged into `yuruyuri-san-hai` (192.168.0.6, Debian 13), so run adb there rather
+than dragging the device over USB/IP:
+
+```sh
+ssh yuifunami@192.168.0.6 "sg plugdev -c 'adb devices -l'"
+ssh yuifunami@192.168.0.6 "sg plugdev -c 'adb -s R5CR81C9MZD shell getprop'"
+```
+
+`adb` and `android-sdk-platform-tools-common` are installed there; `yuifunami` was added to
+`plugdev` on 2026-11-06, but the existing login session does not have it yet, hence `sg plugdev`.
+A new login gets it without `sg`. Her shell on that host is fish, so wrap anything POSIX in
+`bash -c` or keep it to single commands.
+
+Serial: `R5CR81C9MZD`. There is a second device on that host, `2G0YC1ZF860R38`, with no udev
+rules — not this project, leave it alone.

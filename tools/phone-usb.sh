@@ -77,12 +77,25 @@ case "$cmd" in
     [ "$found" = 1 ] || echo "no 04e8 device on the USB/IP host"
     ;;
   bind)
-    read -r busid id desc < <(phone_line) || true
-    [ -n "${busid:-}" ] || die "no phone on the USB/IP host (try: $0 status)"
-    log "binding $busid ($id, $desc)"
-    usbip-helper bind "$busid"
-    sleep 2
-    adb devices -l
+    # The phone re-enumerates on its own (flaky port), so a busid can be stale by the
+    # time the attach runs. Re-list and retry instead of trusting one snapshot.
+    for attempt in 1 2 3 4 5 6; do
+      read -r busid id desc < <(phone_line) || true
+      if [ -z "${busid:-}" ]; then
+        warn "attempt $attempt: no phone on the USB/IP host"
+        sleep 2; continue
+      fi
+      log "attempt $attempt: binding $busid ($id)"
+      usbip-helper bind "$busid" >/dev/null 2>&1 || true
+      sleep 1
+      if lsusb -d "$id" >/dev/null 2>&1; then
+        log "attached: $(lsusb -d "$id")"
+        adb devices -l
+        exit 0
+      fi
+      sleep 2
+    done
+    die "could not attach the phone after 6 attempts (it keeps re-enumerating)"
     ;;
   unbind)
     read -r busid _ _ < <(phone_line) || true
