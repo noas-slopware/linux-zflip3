@@ -1,0 +1,53 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# PID 1 of the bring-up initramfs. Runs from tools/build-initramfs.sh.
+#
+# There is no UART on this board, so the only console is the USB gadget serial port.
+# g_serial is built into the M1 kernel, which makes /dev/ttyGS0 appear as soon as the
+# USB controller binds. Everything before that goes to the kernel log, which reaches
+# the same port once it exists.
+
+/bin/busybox --install -s /bin
+
+mount -t proc     proc     /proc
+mount -t sysfs    sys      /sys
+mount -t devtmpfs devtmpfs /dev
+mkdir -p /dev/pts && mount -t devpts devpts /dev/pts
+
+echo
+echo "=== linux-zflip3 bring-up initramfs ==="
+echo "kernel: $(uname -r)"
+echo "cmdline: $(cat /proc/cmdline)"
+echo "storage:"
+for d in /sys/block/*; do
+  [ -e "$d/device" ] || continue
+  echo "  /dev/$(basename "$d") $(cat "$d/size" 2>/dev/null) sectors"
+done
+
+# Anything the previous boot left in pstore is worth more than anything else here.
+if mount -t pstore pstore /sys/fs/pstore 2>/dev/null; then
+  if [ -n "$(ls -A /sys/fs/pstore 2>/dev/null)" ]; then
+    echo "--- pstore from an earlier boot ---"
+    for f in /sys/fs/pstore/*; do
+      echo "## $f"
+      cat "$f"
+    done
+    echo "--- end pstore ---"
+  fi
+fi
+
+echo "waiting for the USB serial console (ttyGS0) ..."
+i=0
+while [ ! -c /dev/ttyGS0 ]; do
+  i=$((i + 1))
+  [ "$i" -gt 60 ] && break
+  sleep 1
+done
+
+if [ -c /dev/ttyGS0 ]; then
+  echo "ttyGS0 up after ${i}s; handing the shell to it"
+  exec setsid /bin/sh -c '/bin/sh -i </dev/ttyGS0 >/dev/ttyGS0 2>&1'
+fi
+
+echo "no ttyGS0 after ${i}s: g_serial is missing from the kernel config, or USB never bound"
+exec /bin/sh -i
