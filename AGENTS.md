@@ -43,3 +43,23 @@ Unlocking the bootloader itself (and the wipe it forces) has not happened yet.
 
 Do not flash anything without `B2Q_UNLOCKED=1`, and never without the stock 4-file firmware
 saved first.
+
+## USB/IP does not work for this phone in Android
+
+The phone resets its USB gadget as soon as `usbip bind` detaches its interfaces. On the host:
+
+```
+usbip-host 7-3.2: stub up
+usbip-host 7-3.2: USB disconnect, device number 44
+usb 7-3.2: new high-speed USB device number 45 ...
+```
+
+After that `7-3.2/driver` is `usb`, not `usbip-host`, usbipd has no export, and `usbip attach`
+fails with "Device not found" no matter how fresh the busid is. It is not the cable and not a
+stale busid, so re-listing and retrying does not help.
+
+- **Android / adb:** use wireless debugging on the LAN instead. This VM is 192.168.0.154/24,
+  the phone and the desktop are on the same subnet: `adb pair <ip>:<port> <code>`, then
+  `adb connect <ip>:5555`.
+- **Download mode (`04e8:685d`):** a single bulk interface that does not churn, so usbip attach
+  is worth trying there when flashing. If it still fails, run `odin4` on the desktop.
