@@ -13,17 +13,36 @@ tree), and Samsung ignores the AOSP slot and BCB interfaces anyway. `boot` and `
 are two independent 96 MB (`100663296` byte) partitions, which is why `recovery` makes a
 good second kernel slot.
 
-## What the image has to look like
+## What the images have to look like
 
-- **Android boot header v2**, with an appended DTB (`--dtb`). v2 without a DTB is rejected
-  by `mkbootimg` itself.
-- **The stock board string.** `ABL` matches on it. `tools/extract-firmware.sh` saves the
-  stock image's `mkbootimg` arguments to `out/boot/mkbootimg_args`, and `tools/bootimg.sh`
-  reuses them verbatim, so the board string, page size, base and all four offsets are never
-  guessed.
-- **`SEANDROIDENFORCE` appended as raw ASCII.** Samsung's ABL complains about the SEAndroid
-  state otherwise. LineageOS does exactly this (`bootimg.mk`), and postmarketOS's initfs
-  has a flag for it.
+This firmware uses **boot header v3 and keeps the device tree in `vendor_boot`**. Measured
+from the stock AP tar:
+
+| image | header | contents |
+|---|---|---|
+| `boot.img` | v3 | kernel, ramdisk, command line, **no dtb** |
+| `vendor_boot.img` | v3 | **dtb (1.4 MB)**, vendor ramdisk, `board = SRPUC29A015` |
+| `dtbo.img` | - | 7 overlays, 24 MiB, every panel definition lives here |
+
+So M1 is two images, not one:
+
+```sh
+tools/bootimg.sh --kernel Image --ramdisk initramfs.cpio.gz --out boot.img
+tools/bootimg.sh --vendor --dtb b2q.dtb --out vendor_boot.img
+tools/flash.sh --image boot.img --partition boot
+tools/flash.sh --image vendor_boot.img --partition vendor_boot
+```
+
+`boot.img` and `recovery.img` get the ASCII trailer `SEANDROIDENFORCE`; `vendor_boot` does
+not, matching what the stock images and LineageOS do.
+
+The board string is **`SRPUC29A015`** on this build, not the `SRPUC03A002` the old
+LineageOS tree hardcodes. `tools/bootimg.sh` takes it from the stock image's own
+`mkbootimg` arguments rather than from a constant.
+
+The dtb in `vendor_boot` is only the platform: it has no panel nodes. Panel variants live
+in the dtbo overlays and the phone picks one at runtime from the panel ID, so our board
+DTS has to do the same, or the panel driver has to be told which panel it is.
 
 ## Flashing
 
