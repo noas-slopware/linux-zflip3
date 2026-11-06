@@ -6,7 +6,7 @@ Samsung.
 
 **Status: scaffold. No device bring-up yet.** Anything marked *expected* below comes from the
 stock firmware's own device tree and has not been seen working on the unit. The roadmap and the
-reasoning behind each step live on the `docs` branch ([`docs/plan.md`](../docs/plan.md)).
+reasoning behind each step live on the `docs` branch ([`docs/plan.md`](https://github.com/noas-slopware/linux-zflip3/blob/docs/docs/plan.md)).
 
 ## The device
 
