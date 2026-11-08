@@ -1,0 +1,140 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Fri, 6 Nov 2026 22:55:12 +0900
+Subject: [PATCH 10/10] misc: add MAX77705 USB-C data switch driver
+
+The MAX77705's Type-C block owns a switch on the USB-C D+/D- lines and
+keeps whatever state the previous stage left. After a warm reboot of the
+Galaxy Z Flip3 it is open (CONTROL1 reads 0x3f), so fastboot never
+connects until the cable is re-plugged. Close it to USB at probe through
+the block's opcode mailbox (CONTROL1_WRITE), as Samsung's vendor driver
+does when it detects a USB cable.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+---
+ board/qualcomm/b2q.config |  1 +
+ drivers/misc/Kconfig      |  8 +++++
+ drivers/misc/Makefile     |  1 +
+ drivers/misc/max77705.c   | 70 +++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 80 insertions(+)
+ create mode 100644 drivers/misc/max77705.c
+
+diff --git a/board/qualcomm/b2q.config b/board/qualcomm/b2q.config
+index b2af1812..0bf89d94 100644
+--- a/board/qualcomm/b2q.config
++++ b/board/qualcomm/b2q.config
+@@ -3,3 +3,4 @@
+ CONFIG_CLK_QCOM_SM8350=y
+ CONFIG_PINCTRL_QCOM_SM8350=y
+ CONFIG_ENV_DEFAULT_ENV_TEXT_FILE="board/qualcomm/b2q.env"
++CONFIG_MAX77705=y
+diff --git a/drivers/misc/Kconfig b/drivers/misc/Kconfig
+index 44415f24..00778999 100644
+--- a/drivers/misc/Kconfig
++++ b/drivers/misc/Kconfig
+@@ -83,6 +83,14 @@ config GATEWORKS_SC
+ 	  boards to provide a boot watchdog, power control, temperature monitor,
+ 	  voltage ADCs, and EEPROM.
+ 
++config MAX77705
++	bool "Maxim MAX77705 USB-C data switch"
++	depends on DM_I2C && MISC
++	help
++	  Route the USB-C D+/D- lines to the SoC through the MAX77705's Type-C
++	  block, which otherwise keeps them open after a warm reboot, so USB
++	  gadgets (fastboot) do not connect until the cable is re-plugged.
++
+ config QCOM_GENI
+ 	bool "Qualcomm Generic Interface (GENI) driver"
+ 	depends on MISC
+diff --git a/drivers/misc/Makefile b/drivers/misc/Makefile
+index e2170212..a8485f26 100644
+--- a/drivers/misc/Makefile
++++ b/drivers/misc/Makefile
+@@ -65,6 +65,7 @@ obj-$(CONFIG_QFW_MMIO) += qfw_mmio.o
+ obj-$(CONFIG_QFW_SMBIOS) += qfw_smbios.o
+ obj-$(CONFIG_SANDBOX) += qfw_sandbox.o
+ endif
++obj-$(CONFIG_MAX77705) += max77705.o
+ obj-$(CONFIG_QCOM_GENI) += qcom_geni.o
+ obj-$(CONFIG_$(PHASE_)ROCKCHIP_EFUSE) += rockchip-efuse.o
+ obj-$(CONFIG_$(PHASE_)ROCKCHIP_OTP) += rockchip-otp.o
+diff --git a/drivers/misc/max77705.c b/drivers/misc/max77705.c
+new file mode 100644
+index 00000000..860ee704
+--- /dev/null
++++ b/drivers/misc/max77705.c
+@@ -0,0 +1,70 @@
++// SPDX-License-Identifier: GPL-2.0+
++/*
++ * Maxim MAX77705: route the USB-C D+/D- lines to the SoC.
++ *
++ * The MAX77705's Type-C block owns a switch on the connector's data lines.
++ * It sits at its own I2C address and is set through the block firmware's
++ * opcode mailbox: the opcode and its data go to OPCODE_WRITE onwards, and a
++ * write to OPCODE_WRITE_END executes the command. The switch keeps whatever
++ * state the previous boot stage left, which after a warm reboot is open, so
++ * the USB gadget never connects until the cable is re-plugged.
++ */
++
++#include <dm.h>
++#include <i2c.h>
++#include <dm/device_compat.h>
++
++#define MAX77705_USBC_I2C_ADDR		0x25
++#define MAX77705_USBC_OPCODE_WRITE	0x21
++#define MAX77705_USBC_OPCODE_WRITE_END	0x41
++#define MAX77705_USBC_OP_CONTROL1_WRITE	0x06
++
++/*
++ * CONTROL1: NoBCComp [7], RCPS [6], D+ switch [5:3], D- switch [2:0].
++ * USB (1) routes the lines to the AP while the firmware still applies its
++ * BC1.2 detection result.
++ */
++#define MAX77705_USBC_SW_USB		0x1
++#define MAX77705_USBC_CONTROL1(sw)	(((sw) << 3) | (sw))
++
++static int max77705_probe(struct udevice *dev)
++{
++	u8 cmd[] = { MAX77705_USBC_OP_CONTROL1_WRITE,
++		     MAX77705_USBC_CONTROL1(MAX77705_USBC_SW_USB) };
++	u8 end = 0;
++	struct udevice *usbc;
++	int ret;
++
++	ret = i2c_get_chip(dev_get_parent(dev), MAX77705_USBC_I2C_ADDR, 1, &usbc);
++	if (ret)
++		return ret;
++
++	ret = dm_i2c_write(usbc, MAX77705_USBC_OPCODE_WRITE, cmd, sizeof(cmd));
++	if (!ret)
++		ret = dm_i2c_write(usbc, MAX77705_USBC_OPCODE_WRITE_END, &end, 1);
++	if (ret)
++		dev_warn(dev, "failed to route USB data lines: %d\n", ret);
++
++	return 0;
++}
++
++static int max77705_bind(struct udevice *dev)
++{
++	/* The switch has to be set before anything uses USB, not on demand. */
++	dev_or_flags(dev, DM_FLAG_PROBE_AFTER_BIND);
++
++	return 0;
++}
++
++static const struct udevice_id max77705_ids[] = {
++	{ .compatible = "maxim,max77705" },
++	{ }
++};
++
++U_BOOT_DRIVER(max77705) = {
++	.name		= "max77705",
++	.id		= UCLASS_MISC,
++	.of_match	= max77705_ids,
++	.bind		= max77705_bind,
++	.probe		= max77705_probe,
++};
+-- 
+2.56.0
+

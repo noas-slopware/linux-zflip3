@@ -1,0 +1,61 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Fri, 6 Nov 2026 22:36:59 +0900
+Subject: [PATCH 08/10] usb: dwc3: generic: find qcom,select-utmi-as-pipe-clk
+ on the controller node
+
+mach-snapdragon's USB fixup writes the property to the dwc3 controller
+node. With the older DT layout that node is a child of the glue node,
+which is the only place the glue driver looked, so high-speed-only
+controllers (no SS PHY driver) never got the UTMI clock as their pipe
+clock and failed to enable ep0.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+---
+ drivers/usb/dwc3/dwc3-generic.c | 23 ++++++++++++++++++++++-
+ 1 file changed, 22 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/usb/dwc3/dwc3-generic.c b/drivers/usb/dwc3/dwc3-generic.c
+index 3f6e3d40..acf9cab0 100644
+--- a/drivers/usb/dwc3/dwc3-generic.c
++++ b/drivers/usb/dwc3/dwc3-generic.c
+@@ -501,6 +501,27 @@ static void dwc3_qcom_select_utmi_clk(void __iomem *qscratch_base)
+ 			  PIPE_UTMI_CLK_DIS);
+ }
+ 
++/*
++ * mach-snapdragon's USB fixup puts "qcom,select-utmi-as-pipe-clk" on the dwc3
++ * controller node. With the flattened DT that is the glue node itself; with the
++ * older layout it is a child of the glue node, so look there as well.
++ */
++static bool dwc3_qcom_utmi_as_pipe_clk(struct udevice *dev)
++{
++	ofnode child;
++
++	if (dev_read_bool(dev, "qcom,select-utmi-as-pipe-clk"))
++		return true;
++
++	ofnode_for_each_subnode(child, dev_ofnode(dev)) {
++		if (ofnode_device_is_compatible(child, "snps,dwc3") &&
++		    ofnode_read_bool(child, "qcom,select-utmi-as-pipe-clk"))
++			return true;
++	}
++
++	return false;
++}
++
+ static void dwc3_qcom_glue_configure(struct udevice *dev, int index,
+ 				     enum usb_dr_mode mode)
+ {
+@@ -518,7 +539,7 @@ static void dwc3_qcom_glue_configure(struct udevice *dev, int index,
+ 		return;
+ 	}
+ 
+-	if (dev_read_bool(dev, "qcom,select-utmi-as-pipe-clk"))
++	if (dwc3_qcom_utmi_as_pipe_clk(dev))
+ 		dwc3_qcom_select_utmi_clk(qscratch_base);
+ 
+ 	if (mode != USB_DR_MODE_HOST)
+-- 
+2.56.0
+

@@ -1,0 +1,156 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Fri, 6 Nov 2026 22:36:58 +0900
+Subject: [PATCH 02/10] pinctrl: qcom: add SM8350 TLMM driver
+
+203 GPIOs plus ufs_reset and the sdc2 pins, at the offsets Linux
+pinctrl-sm8350.c uses.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+---
+ drivers/pinctrl/qcom/Kconfig          |   7 ++
+ drivers/pinctrl/qcom/Makefile         |   1 +
+ drivers/pinctrl/qcom/pinctrl-sm8350.c | 101 ++++++++++++++++++++++++++
+ 3 files changed, 109 insertions(+)
+ create mode 100644 drivers/pinctrl/qcom/pinctrl-sm8350.c
+
+diff --git a/drivers/pinctrl/qcom/Kconfig b/drivers/pinctrl/qcom/Kconfig
+index 0bea461f..a6ec87a8 100644
+--- a/drivers/pinctrl/qcom/Kconfig
++++ b/drivers/pinctrl/qcom/Kconfig
+@@ -172,6 +172,13 @@ config PINCTRL_QCOM_SM8250
+ 	  Say Y here to enable support for pinctrl on the Snapdragon SM8250 SoC,
+ 	  as well as the associated GPIO driver.
+ 
++config PINCTRL_QCOM_SM8350
++	bool "Qualcomm SM8350 Pinctrl"
++	select PINCTRL_QCOM
++	help
++	  Say Y here to enable support for pinctrl on the Snapdragon SM8350 SoC,
++	  as well as the associated GPIO driver.
++
+ config PINCTRL_QCOM_SM8550
+ 	bool "Qualcomm SM8550 Pinctrl"
+ 	default y if PINCTRL_QCOM_GENERIC
+diff --git a/drivers/pinctrl/qcom/Makefile b/drivers/pinctrl/qcom/Makefile
+index 87cb128c..a8000bbb 100644
+--- a/drivers/pinctrl/qcom/Makefile
++++ b/drivers/pinctrl/qcom/Makefile
+@@ -23,6 +23,7 @@ obj-$(CONFIG_PINCTRL_QCOM_SM6350) += pinctrl-sm6350.o
+ obj-$(CONFIG_PINCTRL_QCOM_SM7150) += pinctrl-sm7150.o
+ obj-$(CONFIG_PINCTRL_QCOM_SM8150) += pinctrl-sm8150.o
+ obj-$(CONFIG_PINCTRL_QCOM_SM8250) += pinctrl-sm8250.o
++obj-$(CONFIG_PINCTRL_QCOM_SM8350) += pinctrl-sm8350.o
+ obj-$(CONFIG_PINCTRL_QCOM_SM8550) += pinctrl-sm8550.o
+ obj-$(CONFIG_PINCTRL_QCOM_SM8650) += pinctrl-sm8650.o
+ obj-$(CONFIG_PINCTRL_QCOM_X1E80100) += pinctrl-x1e80100.o
+diff --git a/drivers/pinctrl/qcom/pinctrl-sm8350.c b/drivers/pinctrl/qcom/pinctrl-sm8350.c
+new file mode 100644
+index 00000000..a3b74741
+--- /dev/null
++++ b/drivers/pinctrl/qcom/pinctrl-sm8350.c
+@@ -0,0 +1,101 @@
++// SPDX-License-Identifier: GPL-2.0+
++/*
++ * Qualcomm SM8350 pinctrl (TLMM layout from Linux pinctrl-sm8350.c)
++ *
++ * Based on pinctrl-sm8550.c, (C) Copyright 2024 Linaro Ltd.
++ *
++ */
++
++#include <dm.h>
++
++#include "pinctrl-qcom.h"
++
++#define MAX_PIN_NAME_LEN 32
++static char pin_name[MAX_PIN_NAME_LEN] __section(".data");
++
++static const struct pinctrl_function msm_pinctrl_functions[] = {
++	{"gpio", 0},
++	{"qup18", 1},
++	{"pcie0_clkreqn", 1},
++};
++
++#define SDC_QDSD_PINGROUP(pg_name, ctl, pull, drv)	\
++	{					        \
++		.name = pg_name,			\
++		.ctl_reg = ctl,				\
++		.io_reg = 0,				\
++		.pull_bit = pull,			\
++		.drv_bit = drv,				\
++		.oe_bit = -1,				\
++		.in_bit = -1,				\
++		.out_bit = -1,				\
++	}
++
++#define UFS_RESET(pg_name, ctl, io)			\
++	{					        \
++		.name = pg_name,			\
++		.ctl_reg = ctl,				\
++		.io_reg = io,				\
++		.pull_bit = 3,				\
++		.drv_bit = 0,				\
++		.oe_bit = -1,				\
++		.in_bit = -1,				\
++		.out_bit = 0,				\
++	}
++
++static const struct msm_special_pin_data msm_special_pins_data[] = {
++	[0] = UFS_RESET("ufs_reset", 0xd8000, 0xd8004),
++	[1] = SDC_QDSD_PINGROUP("sdc2_clk", 0xcf000, 14, 6),
++	[2] = SDC_QDSD_PINGROUP("sdc2_cmd", 0xcf000, 11, 3),
++	[3] = SDC_QDSD_PINGROUP("sdc2_data", 0xcf000, 9, 0),
++};
++
++static const char *sm8350_get_function_name(struct udevice *dev,
++						 unsigned int selector)
++{
++	return msm_pinctrl_functions[selector].name;
++}
++
++static const char *sm8350_get_pin_name(struct udevice *dev,
++					unsigned int selector)
++{
++	if (selector >= 203 && selector <= 206)
++		snprintf(pin_name, MAX_PIN_NAME_LEN,
++			 msm_special_pins_data[selector - 203].name);
++	else
++		snprintf(pin_name, MAX_PIN_NAME_LEN, "gpio%u", selector);
++
++	return pin_name;
++}
++
++static int sm8350_get_function_mux(__maybe_unused unsigned int pin,
++				   unsigned int selector)
++{
++	return msm_pinctrl_functions[selector].val;
++}
++
++static struct msm_pinctrl_data sm8350_data = {
++	.pin_data = {
++		.pin_count = 207,
++		.special_pins_start = 203,
++		.special_pins_data = msm_special_pins_data,
++	},
++	.functions_count = ARRAY_SIZE(msm_pinctrl_functions),
++	.get_function_name = sm8350_get_function_name,
++	.get_function_mux = sm8350_get_function_mux,
++	.get_pin_name = sm8350_get_pin_name,
++};
++
++static const struct udevice_id msm_pinctrl_ids[] = {
++	{ .compatible = "qcom,sm8350-tlmm", .data = (ulong)&sm8350_data },
++	{ /* Sentinel */ }
++};
++
++U_BOOT_DRIVER(pinctrl_sm8350) = {
++	.name		= "pinctrl_sm8350",
++	.id		= UCLASS_NOP,
++	.of_match	= msm_pinctrl_ids,
++	.ops		= &msm_pinctrl_ops,
++	.bind		= msm_pinctrl_bind,
++};
++
+-- 
+2.56.0
+

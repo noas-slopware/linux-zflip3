@@ -1,0 +1,29 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Fri, 6 Nov 2026 22:36:58 +0900
+Subject: [PATCH 06/10] phy: qcom: qmp-ufs: add SM8350
+
+The SM8350 tables are already here for sa8775p, whose configuration is
+SM8350's (Linux sm8350_ufsphy_cfg): same tables, clocks and registers.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+---
+ drivers/phy/qcom/phy-qcom-qmp-ufs.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/drivers/phy/qcom/phy-qcom-qmp-ufs.c b/drivers/phy/qcom/phy-qcom-qmp-ufs.c
+index 3df88189..67dc1e63 100644
+--- a/drivers/phy/qcom/phy-qcom-qmp-ufs.c
++++ b/drivers/phy/qcom/phy-qcom-qmp-ufs.c
+@@ -1747,6 +1747,8 @@ static const struct udevice_id qmp_ufs_ids[] = {
+ 	{ .compatible = "qcom,sm7150-qmp-ufs-phy", .data = (ulong)&sm7150_ufsphy_cfg },
+ 	{ .compatible = "qcom,sm8150-qmp-ufs-phy", .data = (ulong)&sm8150_ufsphy_cfg },
+ 	{ .compatible = "qcom,sm8250-qmp-ufs-phy", .data = (ulong)&sm8250_ufsphy_cfg },
++	/* sa8775p's configuration is SM8350's: same tables, clocks and register layout */
++	{ .compatible = "qcom,sm8350-qmp-ufs-phy", .data = (ulong)&sa8775p_ufsphy_cfg },
+ 	{ .compatible = "qcom,qcs8300-qmp-ufs-phy", .data = (ulong)&sa8775p_ufsphy_cfg },
+ 	{ .compatible = "qcom,sm8550-qmp-ufs-phy", .data = (ulong)&sm8550_ufsphy_cfg },
+ 	{ .compatible = "qcom,sm8650-qmp-ufs-phy", .data = (ulong)&sm8650_ufsphy_cfg },
+-- 
+2.56.0
+

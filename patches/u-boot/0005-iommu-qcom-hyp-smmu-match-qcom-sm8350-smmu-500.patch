@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Fri, 6 Nov 2026 22:36:58 +0900
+Subject: [PATCH 05/10] iommu: qcom-hyp-smmu: match qcom,sm8350-smmu-500
+
+The SM8350 apps SMMU has no qcom,smmu-500 fallback compatible, so every
+device behind it failed to find its IOMMU (-ENODEV) and never probed.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+---
+ drivers/iommu/qcom-hyp-smmu.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/drivers/iommu/qcom-hyp-smmu.c b/drivers/iommu/qcom-hyp-smmu.c
+index 5b37c21f..bafc34fc 100644
+--- a/drivers/iommu/qcom-hyp-smmu.c
++++ b/drivers/iommu/qcom-hyp-smmu.c
+@@ -392,6 +392,7 @@ static const struct udevice_id qcom_smmu500_ids[] = {
+ 	{ .compatible = "qcom,sc7280-smmu-500" },
+ 	{ .compatible = "qcom,sdm845-smmu-500" },
+ 	{ .compatible = "qcom,sm6350-smmu-500" },
++	{ .compatible = "qcom,sm8350-smmu-500" },
+ 	{ .compatible = "qcom,smmu-500", },
+ 	{ /* sentinel */ }
+ };
+-- 
+2.56.0
+

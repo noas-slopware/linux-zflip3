@@ -1,0 +1,26 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Fri, 6 Nov 2026 22:36:58 +0900
+Subject: [PATCH 07/10] gpio: qcom_spmi: add PM8350 and PM8350C
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+---
+ drivers/gpio/qcom_spmi_gpio.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/drivers/gpio/qcom_spmi_gpio.c b/drivers/gpio/qcom_spmi_gpio.c
+index 3efee206..e63b76e2 100644
+--- a/drivers/gpio/qcom_spmi_gpio.c
++++ b/drivers/gpio/qcom_spmi_gpio.c
+@@ -748,6 +748,8 @@ static const struct udevice_id qcom_spmi_pmic_gpio_ids[] = {
+ 	{ .compatible = "qcom,pm660l-gpio" },
+ 	{ .compatible = "qcom,pm7325-gpio" },
+ 	{ .compatible = "qcom,pm7550-gpio" },
++	{ .compatible = "qcom,pm8350-gpio" },
++	{ .compatible = "qcom,pm8350c-gpio" },
+ 	{ .compatible = "qcom,pm8550-gpio" },
+ 	{ .compatible = "qcom,pm8550b-gpio" },
+ 	{ .compatible = "qcom,pm8550ve-gpio" },
+-- 
+2.56.0
+

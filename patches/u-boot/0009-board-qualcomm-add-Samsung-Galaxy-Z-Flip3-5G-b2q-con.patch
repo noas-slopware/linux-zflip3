@@ -1,0 +1,95 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Fri, 6 Nov 2026 22:36:59 +0900
+Subject: [PATCH 09/10] board: qualcomm: add Samsung Galaxy Z Flip3 5G (b2q)
+ config
+
+Used with qcom_defconfig and qcom-phone.config. U-Boot is chain-loaded
+by Samsung's ABL from boot and boots Linux, an Android boot image, from
+the recovery partition; if that fails it falls back to fastboot.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+---
+ board/qualcomm/b2q.config |  5 ++++
+ board/qualcomm/b2q.env    | 57 +++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 62 insertions(+)
+ create mode 100644 board/qualcomm/b2q.config
+ create mode 100644 board/qualcomm/b2q.env
+
+diff --git a/board/qualcomm/b2q.config b/board/qualcomm/b2q.config
+new file mode 100644
+index 00000000..b2af1812
+--- /dev/null
++++ b/board/qualcomm/b2q.config
+@@ -0,0 +1,5 @@
++# Samsung Galaxy Z Flip3 5G (SM8350), chain-loaded by Samsung's ABL.
++# Use with qcom_defconfig and qcom-phone.config.
++CONFIG_CLK_QCOM_SM8350=y
++CONFIG_PINCTRL_QCOM_SM8350=y
++CONFIG_ENV_DEFAULT_ENV_TEXT_FILE="board/qualcomm/b2q.env"
+diff --git a/board/qualcomm/b2q.env b/board/qualcomm/b2q.env
+new file mode 100644
+index 00000000..ffaf16b7
+--- /dev/null
++++ b/board/qualcomm/b2q.env
+@@ -0,0 +1,57 @@
++bootdelay=0
++bootretry=1
++stdin=serial,button-kbd
++stdout=serial,vidconsole
++stderr=serial,vidconsole
++
++# Fastboot is keen to use the address from kconfig, but we
++# allocate its buffer at runtime.
++fastboot=fastboot -l $fastboot_addr_r usb 0
++
++# Always probe for UFS storage, though it should be done by board code.
++preboot=scsi scan
++
++# Shortcut to enable USB serial gadget and disable bootretry
++serial_gadget=setenv stdin serial,button-kbd,usbacm; \
++	setenv stdout serial,vidconsole,usbacm; \
++	setenv stderr serial,vidconsole,usbacm; \
++	setenv bootretry -1; \
++	echo Enabled U-Boot console serial gadget
++
++# bootretry will run this command over and over, if we fail once
++# then bail out to the boot menu instead (with a pause to read
++# the error message)
++# b2q: Linux lives as an Android boot image (kernel + initramfs + dtb)
++# in the "recovery" partition, which U-Boot reads from UFS LUN 0 and boots. If
++# that fails, fall back to fastboot, so a host can always "fastboot boot" a new
++# kernel. Holding Volume Down while U-Boot starts opens the menu instead.
++linux_part=recovery
++bootlinux=part start scsi 0 ${linux_part} linux_start && \
++	part size scsi 0 ${linux_part} linux_size && \
++	scsi read ${fastboot_addr_r} ${linux_start} ${linux_size} && \
++	bootm ${fastboot_addr_r}
++bootcmd=run bootlinux; echo Booting Linux failed, starting fastboot; run fastboot; pause; run menucmd
++
++# When entering the menu (either from button press or failed boot)
++# remap bootcmd so it will re-open the menu and we won't get stuck
++# at the console with no way to type
++menucmd=setenv bootcmd run menucmd; bootmenu -1
++
++# Pause is used so the output can be read on the display
++bootmenu_0=Boot=bootefi bootmgr; pause
++bootmenu_1=Enable serial console gadget=run serial_gadget
++bootmenu_2=Enable USB mass storage=echo "Press any key to exit UMS mode"; ums 0 scsi 0
++bootmenu_3=Enable fastboot mode=echo "Press any key to exit fastboot mode"; run fastboot
++# Disabling bootretry means we'll just drop the shell
++bootmenu_4=Drop to shell=setenv bootretry -1
++bootmenu_5=Reset device=reset
++bootmenu_6=Dump clocks=clk dump; pause
++bootmenu_7=Dump environment=printenv; pause
++bootmenu_8=Board info=bdinfo; pause
++bootmenu_9=Dump bootargs=fdt addr $fdt_addr_r; fdt print /chosen bootargs; pause
++bootmenu_10=Power off=poweroff
++
++# Allow holding the volume down button while U-Boot loads to enter
++# the boot menu
++button_cmd_0_name=Volume Down
++button_cmd_0=run menucmd
+-- 
+2.56.0
+

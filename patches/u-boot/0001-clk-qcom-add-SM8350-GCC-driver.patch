@@ -1,0 +1,395 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Fri, 6 Nov 2026 22:36:58 +0900
+Subject: [PATCH 01/10] clk/qcom: add SM8350 GCC driver
+
+Gate, reset, GDSC and RCG tables for USB, UFS, QUP and PCIe0, taken from
+Linux drivers/clk/qcom/gcc-sm8350.c, plus rate setting for the USB30
+primary master, mock UTMI and PHY aux clocks.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+---
+ drivers/clk/qcom/Kconfig        |   8 +
+ drivers/clk/qcom/Makefile       |   1 +
+ drivers/clk/qcom/clock-sm8350.c | 338 ++++++++++++++++++++++++++++++++
+ 3 files changed, 347 insertions(+)
+ create mode 100644 drivers/clk/qcom/clock-sm8350.c
+
+diff --git a/drivers/clk/qcom/Kconfig b/drivers/clk/qcom/Kconfig
+index 9ad233c8..c873713c 100644
+--- a/drivers/clk/qcom/Kconfig
++++ b/drivers/clk/qcom/Kconfig
+@@ -150,6 +150,14 @@ config CLK_QCOM_SM8250
+ 	  on the Snapdragon SM8250 SoC. This driver supports the clocks
+ 	  and resets exposed by the GCC hardware block.
+ 
++config CLK_QCOM_SM8350
++	bool "Qualcomm SM8350 GCC"
++	select CLK_QCOM
++	help
++	  Say Y here to enable support for the Global Clock Controller
++	  on the Snapdragon SM8350 SoC. This driver supports the clocks
++	  and resets exposed by the GCC hardware block.
++
+ config CLK_QCOM_SM8550
+ 	bool "Qualcomm SM8550 GCC"
+ 	select CLK_QCOM
+diff --git a/drivers/clk/qcom/Makefile b/drivers/clk/qcom/Makefile
+index c0d95a63..14e782a2 100644
+--- a/drivers/clk/qcom/Makefile
++++ b/drivers/clk/qcom/Makefile
+@@ -22,6 +22,7 @@ obj-$(CONFIG_CLK_QCOM_SM6350) += clock-sm6350.o
+ obj-$(CONFIG_CLK_QCOM_SM7150) += clock-sm7150.o
+ obj-$(CONFIG_CLK_QCOM_SM8150) += clock-sm8150.o
+ obj-$(CONFIG_CLK_QCOM_SM8250) += clock-sm8250.o
++obj-$(CONFIG_CLK_QCOM_SM8350) += clock-sm8350.o
+ obj-$(CONFIG_CLK_QCOM_SM8550) += clock-sm8550.o
+ obj-$(CONFIG_CLK_QCOM_SM8650) += clock-sm8650.o
+ obj-$(CONFIG_CLK_QCOM_X1E80100) += clock-x1e80100.o
+diff --git a/drivers/clk/qcom/clock-sm8350.c b/drivers/clk/qcom/clock-sm8350.c
+new file mode 100644
+index 00000000..404dd7cc
+--- /dev/null
++++ b/drivers/clk/qcom/clock-sm8350.c
+@@ -0,0 +1,338 @@
++// SPDX-License-Identifier: BSD-3-Clause
++/*
++ * Clock driver for the Qualcomm SM8350 global clock controller.
++ *
++ * The gate, reset, GDSC and RCG tables are taken from Linux
++ * drivers/clk/qcom/gcc-sm8350.c. Only USB, UFS, QUP and PCIe0 are covered:
++ * that is what U-Boot drives on this SoC.
++ */
++
++#include <clk-uclass.h>
++#include <dm.h>
++#include <linux/delay.h>
++#include <asm/io.h>
++#include <linux/bug.h>
++#include <linux/bitops.h>
++#include <dt-bindings/clock/qcom,gcc-sm8350.h>
++
++#include "clock-qcom.h"
++
++/* bi_tcxo: the 38.4 MHz RPMh XO divided by two */
++#define TCXO_RATE	19200000
++
++static const struct freq_tbl ftbl_gcc_usb30_prim_master_clk_src[] = {
++	F(66666667, CFG_CLK_SRC_GPLL0_EVEN, 4.5, 0, 0),
++	F(133333333, CFG_CLK_SRC_GPLL0, 4.5, 0, 0),
++	F(200000000, CFG_CLK_SRC_GPLL0, 3, 0, 0),
++	F(240000000, CFG_CLK_SRC_GPLL0, 2.5, 0, 0),
++	{ }
++};
++
++static ulong sm8350_set_rate(struct clk *clk, ulong rate)
++{
++	struct msm_clk_priv *priv = dev_get_priv(clk->dev);
++	const struct freq_tbl *freq;
++
++	switch (clk->id) {
++	case GCC_USB30_PRIM_MASTER_CLK:
++		freq = qcom_find_freq(ftbl_gcc_usb30_prim_master_clk_src, rate);
++		clk_rcg_set_rate_mnd(priv->base, 0xf020,
++				     freq->pre_div, freq->m, freq->n, freq->src, 8);
++		return freq->freq;
++	case GCC_USB30_PRIM_MOCK_UTMI_CLK:
++		clk_rcg_set_rate(priv->base, 0xf038, 0, 0);
++		return TCXO_RATE;
++	case GCC_USB3_PRIM_PHY_AUX_CLK_SRC:
++		clk_rcg_set_rate(priv->base, 0xf064, 0, 0);
++		return TCXO_RATE;
++	default:
++		return 0;
++	}
++}
++
++static const struct gate_clk sm8350_clks[] = {
++	GATE_CLK(GCC_AGGRE_NOC_PCIE_0_AXI_CLK, 0x52000, 0x00001000),
++	GATE_CLK(GCC_AGGRE_NOC_PCIE_1_AXI_CLK, 0x52000, 0x00000800),
++	GATE_CLK(GCC_AGGRE_NOC_PCIE_TBU_CLK, 0x52000, 0x00040000),
++	GATE_CLK(GCC_AGGRE_UFS_CARD_AXI_CLK, 0x750cc, 0x00000001),
++	GATE_CLK(GCC_AGGRE_UFS_CARD_AXI_HW_CTL_CLK, 0x750cc, 0x00000002),
++	GATE_CLK(GCC_AGGRE_UFS_PHY_AXI_CLK, 0x770cc, 0x00000001),
++	GATE_CLK(GCC_AGGRE_UFS_PHY_AXI_HW_CTL_CLK, 0x770cc, 0x00000002),
++	GATE_CLK(GCC_AGGRE_USB3_PRIM_AXI_CLK, 0x0f080, 0x00000001),
++	GATE_CLK(GCC_AGGRE_USB3_SEC_AXI_CLK, 0x10080, 0x00000001),
++	GATE_CLK(GCC_CFG_NOC_USB3_PRIM_AXI_CLK, 0x0f07c, 0x00000001),
++	GATE_CLK(GCC_CFG_NOC_USB3_SEC_AXI_CLK, 0x1007c, 0x00000001),
++	GATE_CLK(GCC_DDRSS_PCIE_SF_TBU_CLK, 0x52000, 0x00080000),
++	GATE_CLK(GCC_PCIE_0_AUX_CLK, 0x52008, 0x00000008),
++	GATE_CLK(GCC_PCIE_0_CFG_AHB_CLK, 0x52008, 0x00000004),
++	GATE_CLK(GCC_PCIE_0_CLKREF_EN, 0x8c004, 0x00000001),
++	GATE_CLK(GCC_PCIE_0_MSTR_AXI_CLK, 0x52008, 0x00000002),
++	GATE_CLK(GCC_PCIE_0_PIPE_CLK, 0x52008, 0x00000010),
++	GATE_CLK(GCC_PCIE_0_SLV_AXI_CLK, 0x52008, 0x00000001),
++	GATE_CLK(GCC_PCIE_0_SLV_Q2A_AXI_CLK, 0x52008, 0x00000020),
++	GATE_CLK(GCC_QUPV3_WRAP0_CORE_2X_CLK, 0x52008, 0x00000200),
++	GATE_CLK(GCC_QUPV3_WRAP0_CORE_CLK, 0x52008, 0x00000100),
++	GATE_CLK(GCC_QUPV3_WRAP0_S0_CLK, 0x52008, 0x00000400),
++	GATE_CLK(GCC_QUPV3_WRAP0_S1_CLK, 0x52008, 0x00000800),
++	GATE_CLK(GCC_QUPV3_WRAP0_S2_CLK, 0x52008, 0x00001000),
++	GATE_CLK(GCC_QUPV3_WRAP0_S3_CLK, 0x52008, 0x00002000),
++	GATE_CLK(GCC_QUPV3_WRAP0_S4_CLK, 0x52008, 0x00004000),
++	GATE_CLK(GCC_QUPV3_WRAP0_S5_CLK, 0x52008, 0x00008000),
++	GATE_CLK(GCC_QUPV3_WRAP0_S6_CLK, 0x52008, 0x00010000),
++	GATE_CLK(GCC_QUPV3_WRAP0_S7_CLK, 0x52008, 0x00020000),
++	GATE_CLK(GCC_QUPV3_WRAP1_CORE_2X_CLK, 0x52008, 0x00040000),
++	GATE_CLK(GCC_QUPV3_WRAP1_CORE_CLK, 0x52008, 0x00080000),
++	GATE_CLK(GCC_QUPV3_WRAP1_S0_CLK, 0x52008, 0x00400000),
++	GATE_CLK(GCC_QUPV3_WRAP1_S1_CLK, 0x52008, 0x00800000),
++	GATE_CLK(GCC_QUPV3_WRAP1_S2_CLK, 0x52008, 0x01000000),
++	GATE_CLK(GCC_QUPV3_WRAP1_S3_CLK, 0x52008, 0x02000000),
++	GATE_CLK(GCC_QUPV3_WRAP1_S4_CLK, 0x52008, 0x04000000),
++	GATE_CLK(GCC_QUPV3_WRAP1_S5_CLK, 0x52008, 0x08000000),
++	GATE_CLK(GCC_QUPV3_WRAP2_CORE_2X_CLK, 0x52010, 0x00000008),
++	GATE_CLK(GCC_QUPV3_WRAP2_CORE_CLK, 0x52010, 0x00000001),
++	GATE_CLK(GCC_QUPV3_WRAP2_S0_CLK, 0x52010, 0x00000010),
++	GATE_CLK(GCC_QUPV3_WRAP2_S1_CLK, 0x52010, 0x00000020),
++	GATE_CLK(GCC_QUPV3_WRAP2_S2_CLK, 0x52010, 0x00000040),
++	GATE_CLK(GCC_QUPV3_WRAP2_S3_CLK, 0x52010, 0x00000080),
++	GATE_CLK(GCC_QUPV3_WRAP2_S4_CLK, 0x52010, 0x00000100),
++	GATE_CLK(GCC_QUPV3_WRAP2_S5_CLK, 0x52010, 0x00000200),
++	GATE_CLK(GCC_QUPV3_WRAP_0_M_AHB_CLK, 0x52008, 0x00000040),
++	GATE_CLK(GCC_QUPV3_WRAP_0_S_AHB_CLK, 0x52008, 0x00000080),
++	GATE_CLK(GCC_QUPV3_WRAP_1_M_AHB_CLK, 0x52008, 0x00100000),
++	GATE_CLK(GCC_QUPV3_WRAP_1_S_AHB_CLK, 0x52008, 0x00200000),
++	GATE_CLK(GCC_QUPV3_WRAP_2_M_AHB_CLK, 0x52010, 0x00000004),
++	GATE_CLK(GCC_QUPV3_WRAP_2_S_AHB_CLK, 0x52010, 0x00000002),
++	GATE_CLK(GCC_UFS_1_CLKREF_EN, 0x8c000, 0x00000001),
++	GATE_CLK(GCC_UFS_CARD_AHB_CLK, 0x75018, 0x00000001),
++	GATE_CLK(GCC_UFS_CARD_AXI_CLK, 0x75010, 0x00000001),
++	GATE_CLK(GCC_UFS_CARD_AXI_HW_CTL_CLK, 0x75010, 0x00000002),
++	GATE_CLK(GCC_UFS_CARD_ICE_CORE_CLK, 0x75064, 0x00000001),
++	GATE_CLK(GCC_UFS_CARD_ICE_CORE_HW_CTL_CLK, 0x75064, 0x00000002),
++	GATE_CLK(GCC_UFS_CARD_PHY_AUX_CLK, 0x7509c, 0x00000001),
++	GATE_CLK(GCC_UFS_CARD_PHY_AUX_HW_CTL_CLK, 0x7509c, 0x00000002),
++	GATE_CLK(GCC_UFS_CARD_RX_SYMBOL_0_CLK, 0x75020, 0x00000001),
++	GATE_CLK(GCC_UFS_CARD_RX_SYMBOL_1_CLK, 0x750b8, 0x00000001),
++	GATE_CLK(GCC_UFS_CARD_TX_SYMBOL_0_CLK, 0x7501c, 0x00000001),
++	GATE_CLK(GCC_UFS_CARD_UNIPRO_CORE_CLK, 0x7505c, 0x00000001),
++	GATE_CLK(GCC_UFS_CARD_UNIPRO_CORE_HW_CTL_CLK, 0x7505c, 0x00000002),
++	GATE_CLK(GCC_UFS_PHY_AHB_CLK, 0x77018, 0x00000001),
++	GATE_CLK(GCC_UFS_PHY_AXI_CLK, 0x77010, 0x00000001),
++	GATE_CLK(GCC_UFS_PHY_AXI_HW_CTL_CLK, 0x77010, 0x00000002),
++	GATE_CLK(GCC_UFS_PHY_ICE_CORE_CLK, 0x77064, 0x00000001),
++	GATE_CLK(GCC_UFS_PHY_ICE_CORE_HW_CTL_CLK, 0x77064, 0x00000002),
++	GATE_CLK(GCC_UFS_PHY_PHY_AUX_CLK, 0x7709c, 0x00000001),
++	GATE_CLK(GCC_UFS_PHY_PHY_AUX_HW_CTL_CLK, 0x7709c, 0x00000002),
++	GATE_CLK(GCC_UFS_PHY_RX_SYMBOL_0_CLK, 0x77020, 0x00000001),
++	GATE_CLK(GCC_UFS_PHY_RX_SYMBOL_1_CLK, 0x770b8, 0x00000001),
++	GATE_CLK(GCC_UFS_PHY_TX_SYMBOL_0_CLK, 0x7701c, 0x00000001),
++	GATE_CLK(GCC_UFS_PHY_UNIPRO_CORE_CLK, 0x7705c, 0x00000001),
++	GATE_CLK(GCC_UFS_PHY_UNIPRO_CORE_HW_CTL_CLK, 0x7705c, 0x00000002),
++	GATE_CLK(GCC_USB30_PRIM_MASTER_CLK, 0x0f010, 0x00000001),
++	GATE_CLK(GCC_USB30_PRIM_MOCK_UTMI_CLK, 0x0f01c, 0x00000001),
++	GATE_CLK(GCC_USB30_PRIM_SLEEP_CLK, 0x0f018, 0x00000001),
++	GATE_CLK(GCC_USB30_SEC_MASTER_CLK, 0x10010, 0x00000001),
++	GATE_CLK(GCC_USB30_SEC_MOCK_UTMI_CLK, 0x1001c, 0x00000001),
++	GATE_CLK(GCC_USB30_SEC_SLEEP_CLK, 0x10018, 0x00000001),
++	GATE_CLK(GCC_USB3_PRIM_PHY_AUX_CLK, 0x0f054, 0x00000001),
++	GATE_CLK(GCC_USB3_PRIM_PHY_COM_AUX_CLK, 0x0f058, 0x00000001),
++	GATE_CLK(GCC_USB3_PRIM_PHY_PIPE_CLK, 0x0f05c, 0x00000001),
++	GATE_CLK(GCC_USB3_SEC_CLKREF_EN, 0x8c010, 0x00000001),
++	GATE_CLK(GCC_USB3_SEC_PHY_AUX_CLK, 0x10054, 0x00000001),
++	GATE_CLK(GCC_USB3_SEC_PHY_COM_AUX_CLK, 0x10058, 0x00000001),
++	GATE_CLK(GCC_USB3_SEC_PHY_PIPE_CLK, 0x1005c, 0x00000001),
++};
++
++static int sm8350_enable(struct clk *clk)
++{
++	struct msm_clk_priv *priv = dev_get_priv(clk->dev);
++
++	switch (clk->id) {
++	case GCC_AGGRE_USB3_PRIM_AXI_CLK:
++		qcom_gate_clk_en(priv, GCC_USB30_PRIM_MASTER_CLK);
++		fallthrough;
++	case GCC_USB30_PRIM_MASTER_CLK:
++		qcom_gate_clk_en(priv, GCC_USB3_PRIM_PHY_AUX_CLK);
++		qcom_gate_clk_en(priv, GCC_USB3_PRIM_PHY_COM_AUX_CLK);
++		break;
++	}
++
++	return qcom_gate_clk_en(priv, clk->id);
++}
++
++static const struct qcom_reset_map sm8350_gcc_resets[] = {
++	[GCC_CAMERA_BCR] = { 0x26000 },
++	[GCC_DISPLAY_BCR] = { 0x27000 },
++	[GCC_GPU_BCR] = { 0x71000 },
++	[GCC_MMSS_BCR] = { 0xb000 },
++	[GCC_PCIE_0_BCR] = { 0x6b000 },
++	[GCC_PCIE_0_LINK_DOWN_BCR] = { 0x6c014 },
++	[GCC_PCIE_0_NOCSR_COM_PHY_BCR] = { 0x6c020 },
++	[GCC_PCIE_0_PHY_BCR] = { 0x6c01c },
++	[GCC_PCIE_0_PHY_NOCSR_COM_PHY_BCR] = { 0x6c028 },
++	[GCC_PCIE_1_BCR] = { 0x8d000 },
++	[GCC_PCIE_1_LINK_DOWN_BCR] = { 0x8e014 },
++	[GCC_PCIE_1_NOCSR_COM_PHY_BCR] = { 0x8e020 },
++	[GCC_PCIE_1_PHY_BCR] = { 0x8e01c },
++	[GCC_PCIE_1_PHY_NOCSR_COM_PHY_BCR] = { 0x8e000 },
++	[GCC_PCIE_PHY_CFG_AHB_BCR] = { 0x6f00c },
++	[GCC_PCIE_PHY_COM_BCR] = { 0x6f010 },
++	[GCC_PDM_BCR] = { 0x33000 },
++	[GCC_QUPV3_WRAPPER_0_BCR] = { 0x17000 },
++	[GCC_QUPV3_WRAPPER_1_BCR] = { 0x18000 },
++	[GCC_QUPV3_WRAPPER_2_BCR] = { 0x1e000 },
++	[GCC_QUSB2PHY_PRIM_BCR] = { 0x12000 },
++	[GCC_QUSB2PHY_SEC_BCR] = { 0x12004 },
++	[GCC_SDCC2_BCR] = { 0x14000 },
++	[GCC_SDCC4_BCR] = { 0x16000 },
++	[GCC_UFS_CARD_BCR] = { 0x75000 },
++	[GCC_UFS_PHY_BCR] = { 0x77000 },
++	[GCC_USB30_PRIM_BCR] = { 0xf000 },
++	[GCC_USB30_SEC_BCR] = { 0x10000 },
++	[GCC_USB3_DP_PHY_PRIM_BCR] = { 0x50008 },
++	[GCC_USB3_DP_PHY_SEC_BCR] = { 0x50014 },
++	[GCC_USB3_PHY_PRIM_BCR] = { 0x50000 },
++	[GCC_USB3_PHY_SEC_BCR] = { 0x5000c },
++	[GCC_USB3PHY_PHY_PRIM_BCR] = { 0x50004 },
++	[GCC_USB3PHY_PHY_SEC_BCR] = { 0x50010 },
++	[GCC_USB_PHY_CFG_AHB2PHY_BCR] = { 0x6a000 },
++	[GCC_VIDEO_BCR] = { 0x28000 },
++};
++
++static const struct qcom_power_map sm8350_gdscs[] = {
++	[PCIE_0_GDSC] = { 0x6b004 },
++	[PCIE_1_GDSC] = { 0x8d004 },
++	[UFS_CARD_GDSC] = { 0x75004 },
++	[UFS_PHY_GDSC] = { 0x77004 },
++	[USB30_PRIM_GDSC] = { 0xf004 },
++	[USB30_SEC_GDSC] = { 0x10004 },
++	[HLOS1_VOTE_MMNOC_MMU_TBU_HF0_GDSC] = { 0x7d050 },
++	[HLOS1_VOTE_MMNOC_MMU_TBU_HF1_GDSC] = { 0x7d058 },
++	[HLOS1_VOTE_MMNOC_MMU_TBU_SF0_GDSC] = { 0x7d054 },
++	[HLOS1_VOTE_MMNOC_MMU_TBU_SF1_GDSC] = { 0x7d06c },
++};
++
++static const phys_addr_t sm8350_rcg_addrs[] = {
++	0x00164004, // gcc_gp1_clk_src
++	0x00165004, // gcc_gp2_clk_src
++	0x00166004, // gcc_gp3_clk_src
++	0x0016b058, // gcc_pcie_0_aux_clk_src
++	0x0016b03c, // gcc_pcie_0_phy_rchng_clk_src
++	0x0018d058, // gcc_pcie_1_aux_clk_src
++	0x0018d03c, // gcc_pcie_1_phy_rchng_clk_src
++	0x00133010, // gcc_pdm2_clk_src
++	0x00117010, // gcc_qupv3_wrap0_s0_clk_src
++	0x00117140, // gcc_qupv3_wrap0_s1_clk_src
++	0x00117270, // gcc_qupv3_wrap0_s2_clk_src
++	0x001173a0, // gcc_qupv3_wrap0_s3_clk_src
++	0x001174d0, // gcc_qupv3_wrap0_s4_clk_src
++	0x00117600, // gcc_qupv3_wrap0_s5_clk_src
++	0x00117730, // gcc_qupv3_wrap0_s6_clk_src
++	0x00117860, // gcc_qupv3_wrap0_s7_clk_src
++	0x00118010, // gcc_qupv3_wrap1_s0_clk_src
++	0x00118140, // gcc_qupv3_wrap1_s1_clk_src
++	0x00118270, // gcc_qupv3_wrap1_s2_clk_src
++	0x001183a0, // gcc_qupv3_wrap1_s3_clk_src
++	0x001184d0, // gcc_qupv3_wrap1_s4_clk_src
++	0x00118600, // gcc_qupv3_wrap1_s5_clk_src
++	0x0011e010, // gcc_qupv3_wrap2_s0_clk_src
++	0x0011e140, // gcc_qupv3_wrap2_s1_clk_src
++	0x0011e270, // gcc_qupv3_wrap2_s2_clk_src
++	0x0011e3a0, // gcc_qupv3_wrap2_s3_clk_src
++	0x0011e4d0, // gcc_qupv3_wrap2_s4_clk_src
++	0x0011e600, // gcc_qupv3_wrap2_s5_clk_src
++	0x0011400c, // gcc_sdcc2_apps_clk_src
++	0x0011600c, // gcc_sdcc4_apps_clk_src
++	0x00175024, // gcc_ufs_card_axi_clk_src
++	0x0017506c, // gcc_ufs_card_ice_core_clk_src
++	0x001750a0, // gcc_ufs_card_phy_aux_clk_src
++	0x00175084, // gcc_ufs_card_unipro_core_clk_src
++	0x00177024, // gcc_ufs_phy_axi_clk_src
++	0x0017706c, // gcc_ufs_phy_ice_core_clk_src
++	0x001770a0, // gcc_ufs_phy_phy_aux_clk_src
++	0x00177084, // gcc_ufs_phy_unipro_core_clk_src
++	0x0010f020, // gcc_usb30_prim_master_clk_src
++	0x0010f038, // gcc_usb30_prim_mock_utmi_clk_src
++	0x00110020, // gcc_usb30_sec_master_clk_src
++	0x00110038, // gcc_usb30_sec_mock_utmi_clk_src
++	0x0010f064, // gcc_usb3_prim_phy_aux_clk_src
++	0x00110064, // gcc_usb3_sec_phy_aux_clk_src
++};
++
++static const char *const sm8350_rcg_names[] = {
++	"gcc_gp1_clk_src",
++	"gcc_gp2_clk_src",
++	"gcc_gp3_clk_src",
++	"gcc_pcie_0_aux_clk_src",
++	"gcc_pcie_0_phy_rchng_clk_src",
++	"gcc_pcie_1_aux_clk_src",
++	"gcc_pcie_1_phy_rchng_clk_src",
++	"gcc_pdm2_clk_src",
++	"gcc_qupv3_wrap0_s0_clk_src",
++	"gcc_qupv3_wrap0_s1_clk_src",
++	"gcc_qupv3_wrap0_s2_clk_src",
++	"gcc_qupv3_wrap0_s3_clk_src",
++	"gcc_qupv3_wrap0_s4_clk_src",
++	"gcc_qupv3_wrap0_s5_clk_src",
++	"gcc_qupv3_wrap0_s6_clk_src",
++	"gcc_qupv3_wrap0_s7_clk_src",
++	"gcc_qupv3_wrap1_s0_clk_src",
++	"gcc_qupv3_wrap1_s1_clk_src",
++	"gcc_qupv3_wrap1_s2_clk_src",
++	"gcc_qupv3_wrap1_s3_clk_src",
++	"gcc_qupv3_wrap1_s4_clk_src",
++	"gcc_qupv3_wrap1_s5_clk_src",
++	"gcc_qupv3_wrap2_s0_clk_src",
++	"gcc_qupv3_wrap2_s1_clk_src",
++	"gcc_qupv3_wrap2_s2_clk_src",
++	"gcc_qupv3_wrap2_s3_clk_src",
++	"gcc_qupv3_wrap2_s4_clk_src",
++	"gcc_qupv3_wrap2_s5_clk_src",
++	"gcc_sdcc2_apps_clk_src",
++	"gcc_sdcc4_apps_clk_src",
++	"gcc_ufs_card_axi_clk_src",
++	"gcc_ufs_card_ice_core_clk_src",
++	"gcc_ufs_card_phy_aux_clk_src",
++	"gcc_ufs_card_unipro_core_clk_src",
++	"gcc_ufs_phy_axi_clk_src",
++	"gcc_ufs_phy_ice_core_clk_src",
++	"gcc_ufs_phy_phy_aux_clk_src",
++	"gcc_ufs_phy_unipro_core_clk_src",
++	"gcc_usb30_prim_master_clk_src",
++	"gcc_usb30_prim_mock_utmi_clk_src",
++	"gcc_usb30_sec_master_clk_src",
++	"gcc_usb30_sec_mock_utmi_clk_src",
++	"gcc_usb3_prim_phy_aux_clk_src",
++	"gcc_usb3_sec_phy_aux_clk_src",
++};
++
++static struct msm_clk_data sm8350_gcc_data = {
++	.resets = sm8350_gcc_resets,
++	.num_resets = ARRAY_SIZE(sm8350_gcc_resets),
++	.clks = sm8350_clks,
++	.num_clks = ARRAY_SIZE(sm8350_clks),
++	.power_domains = sm8350_gdscs,
++	.num_power_domains = ARRAY_SIZE(sm8350_gdscs),
++
++	.enable = sm8350_enable,
++	.set_rate = sm8350_set_rate,
++
++	.dbg_rcg_addrs = sm8350_rcg_addrs,
++	.num_rcgs = ARRAY_SIZE(sm8350_rcg_addrs),
++	.dbg_rcg_names = sm8350_rcg_names,
++};
++
++static const struct udevice_id gcc_sm8350_of_match[] = {
++	{
++		.compatible = "qcom,gcc-sm8350",
++		.data = (ulong)&sm8350_gcc_data,
++	},
++	{ }
++};
++
++U_BOOT_DRIVER(gcc_sm8350) = {
++	.name		= "gcc_sm8350",
++	.id		= UCLASS_NOP,
++	.of_match	= gcc_sm8350_of_match,
++	.bind		= qcom_cc_bind,
++	.flags		= DM_FLAG_PRE_RELOC | DM_FLAG_DEFAULT_PD_CTRL_OFF,
++};
+-- 
+2.56.0
+
