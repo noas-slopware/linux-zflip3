@@ -4,9 +4,11 @@ Mainline-based Linux on the Samsung Galaxy Z Flip3 5G (`SM-F711N`, codename `b2q
 install tools and notes needed to run Arch Linux on it. Port by Noa Himesaka. Not affiliated with
 Samsung.
 
-**Status: scaffold. No device bring-up yet.** Anything marked *expected* below comes from the
-stock firmware's own device tree and has not been seen working on the unit. The roadmap and the
-reasoning behind each step live on the `docs` branch ([`docs/plan.md`](https://github.com/noas-slopware/linux-zflip3/blob/docs/docs/plan.md)).
+**Status: daily-usable bring-up.** Arch Linux Ports with Plasma Mobile runs from UFS with
+display, touch, Wi-Fi, Bluetooth, GPU, charging, speakers, cellular data, SMS, MMS and VoLTE
+calls. Not yet: waking from suspend for an incoming call or SMS, the earpiece, the cover
+display. [`STATE.md`](STATE.md) has the details. The roadmap and the reasoning behind each
+step live on the `docs` branch ([`docs/plan.md`](https://github.com/noas-slopware/linux-zflip3/blob/docs/docs/plan.md)).
 
 ## The device
 
@@ -19,27 +21,33 @@ unlockable.
 |---|---|
 | SoC | Qualcomm SM8350 (Snapdragon 888): 1x Cortex-X1, 3x A78, 4x A55, Adreno 660 |
 | RAM / storage | 8 GB, 128 or 256 GB UFS, **no microSD** |
-| Main display | 6.7" 1080x2640 foldable AMOLED, 120 Hz. *Expected* BOE panel with a Synaptics `sw43404` TDDI (display and touch in one chip), four timing sets, 2-encoder DSC |
+| Main display | 6.7" 1080x2640 foldable AMOLED, 120 Hz: Samsung S6E3HAD AMF670ZA01 (rev D on this unit), touch on a separate STMicroelectronics FTS9CU80F |
 | Cover display | 1.9" 260x512, DSI1 |
-| Wi-Fi / Bluetooth | *Expected* WCN6855 (`ath11k`) |
+| Wi-Fi / Bluetooth | QCA6390 over PCIe (`ath11k`), Bluetooth over UART |
 | Battery | 3300 mAh, dual cell |
-| Cellular | LG U+ never ran 3G, so this SIM is VoLTE-only. Out of scope |
+| Cellular | SM8350 modem (mpss) over QRTR/IPA. LG U+ never ran 3G, so calls and SMS are IMS only: VoLTE and SMS over IMS through our own userspace IMS stack (`userspace/imsd`) |
 | Boot chain | Stock Samsung ABL, unlockable. Non-A/B, 96 MB `boot` **and** `recovery`, Android boot header v2 with appended DTB |
 
 ## What works
 
-"Verified" means seen working on the unit, with the date. As of 2026-11-06, nothing is.
+"Verified" means seen working on the unit. Kernel 7.3.1 build #57, 2026-11-09.
 
 | Subsystem | Status |
 |---|---|
-| Boot (ABL → mainline kernel) | not yet, M1 |
-| USB device: gadget console, networking | not yet, M1–M2 |
-| UFS, rootfs | not yet, M2 |
-| Wi-Fi, GPU (a660/freedreno) | not yet, M2 |
-| Display (main and cover) | not yet, M4 |
-| Touchscreen | not yet, M4 |
-| Charging, audio | not yet, M5 |
-| Modem, VoLTE | out of scope |
+| Boot (ABL → U-Boot → mainline kernel) | verified |
+| USB device: gadget console, networking | verified |
+| UFS, rootfs (Arch Linux Ports aarch64) | verified |
+| Wi-Fi, Bluetooth, GPU (a660/freedreno) | verified |
+| Main display, touchscreen | verified (cover display not yet) |
+| Fold sensor: closing suspends, opening wakes | verified |
+| Charging, dual cells, fuel gauge | verified |
+| Speakers, microphones | verified (earpiece not yet) |
+| Cellular data (LG U+ LTE, IPv6 + CLAT) | verified |
+| IMS registration (ISIM AKA) | verified |
+| SMS send and receive, received while ModemManager or the phone was down | verified |
+| MMS send and receive (Spacebar) | verified |
+| VoLTE calls in and out, to and from other networks, AMR-WB / AMR-NB | verified |
+| Incoming call or SMS waking the phone from suspend | not yet: delivered at the next wake |
 
 ## Boot chain
 
@@ -80,7 +88,8 @@ partitions over USB.
 - Power and volume keys handled by Plasma Mobile (lock and sleep) instead of logind's poweroff.
 - Misc sensors (skipped for now).
 - Battery: AFC 9 V needs a test with a Samsung AFC brick; QC 2.0 and PPS not ported.
-- Cellular.
+- Cellular: an incoming call or SMS must wake the phone (the IPA wakeup source never fires),
+  call audio on the earpiece, DTMF, and the rest of the list in `STATE.md`.
 
 ### For the rootfs rebuild
 
@@ -88,8 +97,11 @@ Done by hand on the phone and not yet in `tools/build-rootfs.sh`; it goes in onc
 everything, cellular included, works:
 
 - packages beyond `ROOTFS_PACKAGES`: `mesa mesa-utils plasma-mobile plasma-login-manager
-  plasma-settings qmlkonsole bluedevil kscreen firefox feedbackd evtest i2c-tools` (plus the
-  Adreno zap shader), later `plasma-dialer spacebar` with cellular,
+  plasma-settings qmlkonsole bluedevil kscreen firefox feedbackd evtest i2c-tools plasma-dialer`
+  (plus the Adreno zap shader),
+- the cellular stack built on the phone: `b2q-imsd` from `userspace/imsd/packaging`,
+  ModemManager with `patches/modemmanager/`, Spacebar from `userspace/spacebar`, and
+  `opencore-amr` plus `vo-amrwbenc` for the call codecs,
 - user `mogumo` (groups wheel, video, audio, input, render), no password set by the
   build, and `plasmalogin.service` enabled; the autologin and `LockOnStart` files are
   already in `userspace/rootfs/etc/`, so the first screen is Plasma Mobile's lock screen,
@@ -111,14 +123,21 @@ everything, cellular included, works:
 
 | branch | contents |
 |---|---|
-| `senpai` | `patches/`, `tools/`, `userspace/` — the port |
+| `senpai` | `patches/`, `tools/`, `userspace/`: the port |
 | `docs` | write-ups: plan, boot chain, panel, storage, cellular, evidence policy |
 | `firmware` | vendor firmware extracted from the stock firmware before the wipe |
 
 ```
-patches/linux/      numbered series against sources.lock's LINUX_VERSION
-tools/              host-side: extract firmware, build kernel, pack and flash boot images
-userspace/          on-device: bring-up initramfs, installer
+patches/linux/           numbered series against sources.lock's LINUX_VERSION
+patches/u-boot/          SM8350 and b2q support for U-Boot
+patches/modemmanager/    b2q-imsd backend for voice and messaging
+patches/spacebar/        MMS send, own number and duplicate fixes
+patches/plasma-keyboard/ Korean composition, content types
+tools/                   host-side: extract firmware, build, pack, flash and install images
+userspace/installer/     bring-up initramfs and installer
+userspace/rootfs/        files the rootfs carries on top of the distribution
+userspace/imsd/          IMS bearer, IMS daemon (VoLTE, SMS, MMS) and the call audio bridge
+userspace/spacebar/      PKGBUILD for the patched Spacebar
 ```
 
 ## Quickstart
