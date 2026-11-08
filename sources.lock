@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: MIT
+# Pinned upstream sources. Every tool sources this file; override on the command line.
+#
+# `linux` is fetched from cdn.kernel.org and verified against that directory's
+# sha256sums.asc, so the checksum does not need to be pinned here by hand.
+
+# Mainline base for patches/linux/.
+LINUX_VERSION=7.3.1
+LINUX_SERIES=v7.x
+
+# Arch Linux Ports aarch64 bootstrap (drzee.net, ARMv8.2+).
+# `latest` is a stable symlink; set ARCH_TARBALL to a dated file to pin it.
+ARCH_TARBALL=archlinux-bootstrap-latest-aarch64.tar.zst
+ARCH_TARBALL_URL=https://arch-linux-repo.drzee.net/arch/tarballs/os/aarch64
+
+# Arch Linux Ports package repositories (ARMv8.2+, which the Kryo 680 supports).
+ARCH_REPO_CORE=https://arch-linux-repo.drzee.net/arch/core/os/aarch64
+ARCH_REPO_EXTRA=https://arch-linux-repo.drzee.net/arch/extra/os/aarch64
+ARCH_REPO_FORGE=https://arch-linux-repo.drzee.net/arch/forge/os/aarch64
+
+# Device constants (from the stock firmware in M0; tools print an error if unset).
+B2Q_MODEL=SM-F711N
+B2Q_CODENAME=b2q
+# 96 MB boot and recovery partitions.
+B2Q_BOOT_PART_SIZE=100663296
+
+# Static busybox for the bring-up initramfs (tools/build-busybox.sh).
+BUSYBOX_VERSION=1.37.0
+BUSYBOX_SHA256=3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4
+
+# drzee.net signs the ports packages with its own key; tools/build-rootfs.sh checks it
+# against this fingerprint before trusting it (ports.archlinux.page/aarch64 links the key).
+ARCH_PORTS_KEY_URL=https://arch-linux-repo.drzee.net/arch/extra/os/aarch64/public.key
+ARCH_PORTS_KEY_FPR=9B2C213B21883BB65CE2FB900CF25682E6BA0751
+
+# Packages on top of the bootstrap's base.
+ROOTFS_PACKAGES="openssh lvm2 f2fs-tools networkmanager linux-firmware-atheros linux-firmware-qcom bluez bluez-utils iw"
+
+# systemd-firstboot answers, so the first boot does not stop to ask on the console.
+ROOTFS_TIMEZONE=Asia/Seoul
+
+# U-Boot, chain-loaded by ABL from boot (tools/build-u-boot.sh, patches/u-boot/).
+UBOOT_VERSION=v2026.10
+UBOOT_GIT=https://source.denx.de/u-boot/u-boot.git
+UBOOT_COMMIT=5508406582f6f7120dce0c4b3059819a41788db2
