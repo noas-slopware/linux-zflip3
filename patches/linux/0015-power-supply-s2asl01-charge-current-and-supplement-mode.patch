@@ -1,0 +1,93 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] power: supply: s2asl01: charge current and supplement mode
+
+Expose what Samsung's dual battery code asks of a limiter as standard
+properties: its share of the charge current as constant_charge_current,
+and supplement mode, which stops a full cell taking current, as
+charge_behaviour inhibit-charge.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+---
+diff --git a/drivers/power/supply/s2asl01_limiter.c b/drivers/power/supply/s2asl01_limiter.c
+--- a/drivers/power/supply/s2asl01_limiter.c
++++ b/drivers/power/supply/s2asl01_limiter.c
+@@ -683,21 +683,67 @@ static int s2asl01_get_property(struct power_supply *psy,
+ 		val->intval = ua;
+ 		return 0;
+ 	case POWER_SUPPLY_PROP_CURRENT_MAX:
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
+ 		ret = s2asl01_get_charge_current_limit(chip, &ua_unsigned);
+ 		if (ret)
+ 			return ret;
+ 		val->intval = ua_unsigned;
+ 		return 0;
++	case POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR:
++		val->intval = chip->supplement_mode ?
++			      POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE :
++			      POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO;
++		return 0;
+ 	default:
+ 		return -EINVAL;
+ 	}
+ }
+ 
++/*
++ * What the vendor dual battery code asks of a limiter: its share of the
++ * charge current (FASTCHG_LIMIT_CURRENT, c:820-823) and supplement mode for a
++ * full cell (POWER_SUPPLY_PROP_CHARGE_FULL, c:807-810), which stops the cell
++ * taking current while the phone runs from the charger.
++ */
++static int s2asl01_set_property(struct power_supply *psy,
++				enum power_supply_property psp,
++				const union power_supply_propval *val)
++{
++	struct s2asl01_chip *chip = power_supply_get_drvdata(psy);
++
++	switch (psp) {
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
++		if (val->intval < 0)
++			return -EINVAL;
++		return s2asl01_set_charge_current_limit(chip, val->intval);
++	case POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR:
++		switch (val->intval) {
++		case POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO:
++			return s2asl01_set_supplement_mode(chip, false);
++		case POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE:
++			return s2asl01_set_supplement_mode(chip, true);
++		default:
++			return -EINVAL;
++		}
++	default:
++		return -EINVAL;
++	}
++}
++
++static int s2asl01_property_is_writeable(struct power_supply *psy,
++					 enum power_supply_property psp)
++{
++	return psp == POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT ||
++	       psp == POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR;
++}
++
+ static enum power_supply_property s2asl01_props[] = {
+ 	POWER_SUPPLY_PROP_HEALTH,
+ 	POWER_SUPPLY_PROP_VOLTAGE_NOW,
+ 	POWER_SUPPLY_PROP_CURRENT_NOW,
+ 	POWER_SUPPLY_PROP_CURRENT_MAX,
++	POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT,
++	POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR,
+ };
+ 
+ /*
+@@ -1228,6 +1274,11 @@ static int s2asl01_probe(struct i2c_client *client)
+ 	chip->psy_desc.properties = s2asl01_props;
+ 	chip->psy_desc.num_properties = ARRAY_SIZE(s2asl01_props);
+ 	chip->psy_desc.get_property = s2asl01_get_property;
++	chip->psy_desc.set_property = s2asl01_set_property;
++	chip->psy_desc.property_is_writeable = s2asl01_property_is_writeable;
++	chip->psy_desc.charge_behaviours =
++		BIT(POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO) |
++		BIT(POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE);
+ 	chip->psy_desc.no_thermal = true;
+ 
+ 	psy_cfg.drv_data = chip;

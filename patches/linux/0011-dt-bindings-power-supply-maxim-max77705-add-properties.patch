@@ -1,0 +1,72 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH 2/2] dt-bindings: power: supply: maxim,max77705: add properties
+
+Document the properties the charger driver now uses: the PMIC phandle and
+the optional second interrupt that carry BC1.2 cable events, the per-port
+current limits, and the switching frequency, top-off time and BAT to SYS
+OCP settings that Samsung's firmware takes from its device tree.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+---
+--- a/Documentation/devicetree/bindings/power/supply/maxim,max77705.yaml
++++ b/Documentation/devicetree/bindings/power/supply/maxim,max77705.yaml
+@@ -20,7 +20,58 @@
+     const: maxim,max77705-charger
+ 
+   interrupts:
+-    maxItems: 1
++    minItems: 1
++    maxItems: 2
++    description: |
++      The first interrupt is the charger block's own interrupt line. The
++      optional second one is the USB-C (BC1.2) interrupt source of the PMIC
++      node in maxim,pmic.
++
++  maxim,pmic:
++    $ref: /schemas/types.yaml#/definitions/phandle
++    description: |
++      Phandle to the MAX77705 MFD node. Needed for BC1.2 cable detection:
++      the port type comes from the USB-C block that the MFD driver owns.
++
++  maxim,input-current-limits-microamp:
++    $ref: /schemas/types.yaml#/definitions/uint32-array
++    minItems: 3
++    maxItems: 3
++    description: |
++      Input current limit per BC1.2 port type, in the order the hardware
++      reports them: SDP, CDP, DCP.
++
++  maxim,charge-current-limits-microamp:
++    $ref: /schemas/types.yaml#/definitions/uint32-array
++    minItems: 3
++    maxItems: 3
++    description: |
++      Charge current limit per BC1.2 port type, in the order the hardware
++      reports them: SDP, CDP, DCP.
++
++  maxim,switching-frequency-hz:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    enum: [1500000, 2000000, 3000000]
++    default: 1500000
++
++  maxim,topoff-time-minutes:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    multipleOf: 10
++    maximum: 70
++    default: 30
++
++  maxim,b2sovrc-current-microamp:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    description: |
++      BAT to SYS overcurrent threshold, in 200 mA steps from 4.6 A. Zero
++      disables the protection.
++    minimum: 0
++    maximum: 6200000
++    default: 4800000
++
++  maxim,b2sovrc-dtc-100ms:
++    type: boolean
++    description: 100 ms blanking instead of 6 ms on the BAT to SYS OCP.
+ 
+   reg:
+     maxItems: 1

@@ -1,0 +1,246 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] pwm: add Qualcomm GCC general purpose clock PWM driver
+
+Samsung phones drive the MAX77705 haptic motor's PWM input from a GCC
+general purpose clock pin (gpio116, gcc_gp2 on SM8350), with the clock
+root running from XO divided by 16 and its M/N:D counter making the
+period and duty cycle (Samsung's pwm-gpclk driver). The GCC driver only
+offers the GP clocks at fixed rates of 50 MHz and up, so this driver
+programs the root itself, picking M and N the way Samsung's driver does,
+and switches the branch through the clock framework.
+
+samsung,lra-ratio scales the duty cycle the way Samsung's vibrator
+driver limits an LRA's drive: full scale is the ratio, zero is 100 %
+minus it, 50 % stays 50 %.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+---
+diff --git a/drivers/pwm/Kconfig b/drivers/pwm/Kconfig
+--- a/drivers/pwm/Kconfig
++++ b/drivers/pwm/Kconfig
+@@ -576,6 +576,18 @@ config PWM_PXA
+ 	  To compile this driver as a module, choose M here: the module
+ 	  will be called pwm-pxa.
+ 
++config PWM_QCOM_GP
++	tristate "Qualcomm GCC general purpose clock PWM support"
++	depends on ARCH_QCOM || COMPILE_TEST
++	depends on COMMON_CLK && HAS_IOMEM && OF
++	help
++	  PWM on a Qualcomm GCC general purpose clock (GCC_GPn), programmed
++	  through its M/N:D counter, as Samsung phones use it to drive the
++	  MAX77705 haptic motor.
++
++	  To compile this driver as a module, choose M here: the module
++	  will be called pwm-qcom-gp.
++
+ config PWM_RASPBERRYPI_POE
+ 	tristate "Raspberry Pi Firmware PoE Hat PWM support"
+ 	# Make sure not 'y' when RASPBERRYPI_FIRMWARE is 'm'. This can only
+diff --git a/drivers/pwm/Makefile b/drivers/pwm/Makefile
+--- a/drivers/pwm/Makefile
++++ b/drivers/pwm/Makefile
+@@ -51,6 +51,7 @@ obj-$(CONFIG_PWM_NTXEC)		+= pwm-ntxec.o
+ obj-$(CONFIG_PWM_OMAP_DMTIMER)	+= pwm-omap-dmtimer.o
+ obj-$(CONFIG_PWM_PCA9685)	+= pwm-pca9685.o
+ obj-$(CONFIG_PWM_PXA)		+= pwm-pxa.o
++obj-$(CONFIG_PWM_QCOM_GP)	+= pwm-qcom-gp.o
+ obj-$(CONFIG_PWM_RASPBERRYPI_POE)	+= pwm-raspberrypi-poe.o
+ obj-$(CONFIG_PWM_RENESAS_RCAR)	+= pwm-rcar.o
+ obj-$(CONFIG_PWM_RENESAS_RZG2L_GPT)	+= pwm-rzg2l-gpt.o
+diff --git a/drivers/pwm/pwm-qcom-gp.c b/drivers/pwm/pwm-qcom-gp.c
+new file mode 100644
+--- /dev/null
++++ b/drivers/pwm/pwm-qcom-gp.c
+@@ -0,0 +1,191 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * PWM on a Qualcomm GCC general purpose clock (GCC_GPn), as Samsung's
++ * pwm-gpclk driver uses it to drive the MAX77705 haptic motor on the
++ * Galaxy Z Flip3: the clock root runs from XO divided by 16 (1.2 MHz) and
++ * its M/N:D counter makes the period and duty cycle.
++ *
++ * The GCC driver only offers the GP clocks at fixed rates of 50 MHz and up,
++ * so the root is programmed here; the branch is still switched through the
++ * clock framework.
++ */
++
++#include <linux/bitfield.h>
++#include <linux/bits.h>
++#include <linux/clk.h>
++#include <linux/io.h>
++#include <linux/iopoll.h>
++#include <linux/math64.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/pwm.h>
++
++#define GP_CMD_RCGR		0x04
++#define  CMD_UPDATE		BIT(0)
++#define GP_CFG_RCGR		0x08
++#define  CFG_SRC_DIV		GENMASK(4, 0)
++#define  CFG_SRC_SEL		GENMASK(10, 8)
++#define  CFG_MODE		GENMASK(13, 12)
++#define GP_M			0x0c
++#define GP_N			0x10
++#define GP_D			0x14
++#define  MND_MASK		GENMASK(7, 0)
++
++/* XO (19.2 MHz) through the half-integer divider at 16, dual-edge M/N:D */
++#define GP_CFG			(FIELD_PREP(CFG_SRC_DIV, 31) | FIELD_PREP(CFG_MODE, 2))
++#define GP_INPUT_HZ		1200000
++
++struct qcom_gp_pwm {
++	void __iomem *base;
++	struct clk *clk;
++	u32 ratio;
++	bool enabled;
++};
++
++static void qcom_gp_pwm_update(struct qcom_gp_pwm *gp, u32 reg, u32 mask, u32 val)
++{
++	u32 v = readl(gp->base + reg);
++
++	writel((v & ~mask) | val, gp->base + reg);
++}
++
++/* Samsung's M and N search: M of 2 or 3, whichever lands nearer the rate */
++static void qcom_gp_pwm_mn(u32 freq, u32 *m, u32 *n)
++{
++	u32 ip_clock = GP_INPUT_HZ * 10;
++	u32 base_n = ip_clock / freq;
++	u32 n_m2 = base_n * 2, n_m3 = base_n * 3;
++	u32 m2_freq = ip_clock / n_m2 * 2, m3_freq = ip_clock / n_m3 * 3;
++
++	if (abs((int)freq - (int)m2_freq) <= abs((int)freq - (int)m3_freq)) {
++		*m = 2;
++		*n = (n_m2 + 5) / 10;
++	} else {
++		*m = 3;
++		*n = (n_m3 + 5) / 10;
++		if (*n > 150) {
++			*m = 2;
++			*n = (n_m2 + 5) / 10;
++		}
++	}
++}
++
++static int qcom_gp_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
++			     const struct pwm_state *state)
++{
++	struct qcom_gp_pwm *gp = pwmchip_get_drvdata(chip);
++	u64 period = state->period;
++	s64 duty = state->duty_cycle;
++	u32 freq, m, n, d, v;
++	int ret;
++
++	if (state->polarity != PWM_POLARITY_NORMAL)
++		return -EINVAL;
++
++	if (!state->enabled) {
++		if (gp->enabled) {
++			clk_disable_unprepare(gp->clk);
++			gp->enabled = false;
++		}
++		return 0;
++	}
++
++	if (!period || period > NSEC_PER_SEC)
++		return -EINVAL;
++	freq = div64_u64(NSEC_PER_SEC, period);
++	if (!freq || freq > GP_INPUT_HZ / 4)
++		return -EINVAL;
++	qcom_gp_pwm_mn(freq, &m, &n);
++	if (n > MND_MASK || n <= m)
++		return -EINVAL;
++
++	/*
++	 * Stock limits an LRA's drive to a ratio of the period either side
++	 * of 50 %, the level at which the motor stands still: full scale is
++	 * the ratio, zero is 100 % minus the ratio.
++	 */
++	if (gp->ratio) {
++		s64 half = period / 2;
++
++		duty = half + div_s64((duty - half) * (2 * gp->ratio - 100), 100);
++	}
++
++	d = div64_u64((u64)n * duty, period);
++	if (d > 127)
++		d = 127;
++	d = ~(d << 1) & MND_MASK;
++	if (d == MND_MASK)
++		d = MND_MASK - 1;
++
++	if (!gp->enabled) {
++		ret = clk_prepare_enable(gp->clk);
++		if (ret)
++			return ret;
++		gp->enabled = true;
++	}
++
++	qcom_gp_pwm_update(gp, GP_CFG_RCGR, CFG_SRC_SEL | CFG_SRC_DIV | CFG_MODE, GP_CFG);
++	qcom_gp_pwm_update(gp, GP_M, MND_MASK, m);
++	qcom_gp_pwm_update(gp, GP_N, MND_MASK, ~(n - m) & MND_MASK);
++	qcom_gp_pwm_update(gp, GP_D, MND_MASK, d);
++	qcom_gp_pwm_update(gp, GP_CMD_RCGR, CMD_UPDATE, CMD_UPDATE);
++
++	return readl_poll_timeout(gp->base + GP_CMD_RCGR, v, !(v & CMD_UPDATE), 1, 500);
++}
++
++static const struct pwm_ops qcom_gp_pwm_ops = {
++	.apply = qcom_gp_pwm_apply,
++};
++
++static int qcom_gp_pwm_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct qcom_gp_pwm *gp;
++	struct pwm_chip *chip;
++	struct resource *res;
++
++	chip = devm_pwmchip_alloc(dev, 1, sizeof(*gp));
++	if (IS_ERR(chip))
++		return PTR_ERR(chip);
++	gp = pwmchip_get_drvdata(chip);
++
++	/* The registers sit inside the GCC block, which GCC has claimed */
++	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
++	if (!res)
++		return -EINVAL;
++	gp->base = devm_ioremap(dev, res->start, resource_size(res));
++	if (!gp->base)
++		return -ENOMEM;
++
++	gp->clk = devm_clk_get(dev, NULL);
++	if (IS_ERR(gp->clk))
++		return dev_err_probe(dev, PTR_ERR(gp->clk), "failed to get clock\n");
++
++	of_property_read_u32(dev->of_node, "samsung,lra-ratio", &gp->ratio);
++	if (gp->ratio && (gp->ratio < 50 || gp->ratio > 100))
++		return dev_err_probe(dev, -EINVAL, "samsung,lra-ratio out of range\n");
++
++	chip->ops = &qcom_gp_pwm_ops;
++
++	return devm_pwmchip_add(dev, chip);
++}
++
++static const struct of_device_id qcom_gp_pwm_of_match[] = {
++	{ .compatible = "qcom,gcc-gp-pwm" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, qcom_gp_pwm_of_match);
++
++static struct platform_driver qcom_gp_pwm_driver = {
++	.driver = {
++		.name = "pwm-qcom-gp",
++		.of_match_table = qcom_gp_pwm_of_match,
++	},
++	.probe = qcom_gp_pwm_probe,
++};
++module_platform_driver(qcom_gp_pwm_driver);
++
++MODULE_AUTHOR("Noa Himesaka <himesaka@noa.codes>");
++MODULE_DESCRIPTION("PWM on a Qualcomm GCC general purpose clock");
++MODULE_LICENSE("GPL");

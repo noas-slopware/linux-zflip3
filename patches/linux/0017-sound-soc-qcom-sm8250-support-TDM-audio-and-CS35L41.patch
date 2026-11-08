@@ -1,0 +1,356 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] ASoC: qcom: sm8250: support the Primary TDM link to CS35L41 amps
+
+The Galaxy Z Flip3 drives two CS35L41 amplifiers from Primary TDM: four
+32-bit slots at 48 kHz (6.144 MHz bit clock), 16-bit samples, DSP A with
+an inverted bit clock on the codec side, as Samsung's lahaina machine
+driver sets them up.
+
+sm8250: for PRIMARY_TDM_RX_0, set the 6.144 MHz bit clock at startup and
+release it at shutdown, put the AFE port on slots 0-1, and give codec N of
+the dai-link TDM slot N, its SCLK as the PLL reference and the slot width.
+
+q6afe: the DT properties qcom,tdm-data-out, qcom,tdm-invert-sync and
+qcom,tdm-data-delay were parsed but never reached afe_param_id_tdm_cfg,
+so the DSP always framed TDM with no data delay. Pass them through.
+
+q6afe: the response to an LPASS core HW vote carries only the client
+handle, which was never stored (and its status was read past the end of
+the payload), so every devote sent a stale handle and the DSP failed it
+("cmd = 0x100f6 returned error = 0x1"). Keep the handle for the devote,
+as downstream does.
+
+cs35l41: implement set_tdm_slot so ASP_WIDTH follows the 32-bit slot
+while the word length stays 16 (downstream's cirrus,fixed-width = 32),
+and power the amp up after DAPM enables it (POST_PMU), the order
+downstream uses. Give the CSPL firmware 15 ms to acknowledge a mailbox
+command, as downstream does: Samsung's receiver tuning takes longer than
+5 ms to pause.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+--- a/sound/soc/codecs/cs35l41.h
++++ b/sound/soc/codecs/cs35l41.h
+@@ -33,6 +33,7 @@
+ 	int irq;
+ 	/* GPIO for /RST */
+ 	struct gpio_desc *reset_gpio;
++	int slot_width;
+ };
+ 
+ int cs35l41_probe(struct cs35l41_private *cs35l41, const struct cs35l41_hw_cfg *hw_cfg);
+--- a/sound/soc/codecs/cs35l41.c
++++ b/sound/soc/codecs/cs35l41.c
+@@ -513,7 +513,7 @@
+ 	int ret = 0;
+ 
+ 	switch (event) {
+-	case SND_SOC_DAPM_PRE_PMU:
++	case SND_SOC_DAPM_POST_PMU:
+ 		regmap_multi_reg_write_bypassed(cs35l41->regmap,
+ 						cs35l41_pup_patch,
+ 						ARRAY_SIZE(cs35l41_pup_patch));
+@@ -577,7 +577,7 @@
+ 
+ 	SND_SOC_DAPM_OUT_DRV_E("Main AMP", CS35L41_PWR_CTRL2, 0, 0, NULL, 0,
+ 			       cs35l41_main_amp_event,
+-			       SND_SOC_DAPM_POST_PMD |	SND_SOC_DAPM_PRE_PMU),
++			       SND_SOC_DAPM_POST_PMD |	SND_SOC_DAPM_POST_PMU),
+ 
+ 	SND_SOC_DAPM_MUX("ASP TX1 Source", SND_SOC_NOPM, 0, 0, &asp_tx1_mux),
+ 	SND_SOC_DAPM_MUX("ASP TX2 Source", SND_SOC_NOPM, 0, 0, &asp_tx2_mux),
+@@ -681,6 +681,15 @@
+ 	return cs35l41_set_channels(cs35l41->dev, cs35l41->regmap, tx_n, tx_slot, rx_n, rx_slot);
+ }
+ 
++static int cs35l41_set_tdm_slot(struct snd_soc_dai *dai, unsigned int tx_mask,
++				unsigned int rx_mask, int slots, int slot_width)
++{
++	struct cs35l41_private *cs35l41 = snd_soc_component_get_drvdata(dai->component);
++
++	cs35l41->slot_width = slot_width;
++	return 0;
++}
++
+ static int cs35l41_set_dai_fmt(struct snd_soc_dai *dai, unsigned int fmt)
+ {
+ 	struct cs35l41_private *cs35l41 = snd_soc_component_get_drvdata(dai->component);
+@@ -759,6 +768,7 @@
+ 	struct cs35l41_private *cs35l41 = snd_soc_component_get_drvdata(dai->component);
+ 	unsigned int rate = params_rate(params);
+ 	u8 asp_wl;
++	u8 asp_width;
+ 	int i;
+ 
+ 	for (i = 0; i < ARRAY_SIZE(cs35l41_fs_rates); i++) {
+@@ -772,6 +782,7 @@
+ 	}
+ 
+ 	asp_wl = params_width(params);
++	asp_width = cs35l41->slot_width ? cs35l41->slot_width : asp_wl;
+ 
+ 	regmap_update_bits(cs35l41->regmap, CS35L41_GLOBAL_CLK_CTRL,
+ 			   CS35L41_GLOBAL_FS_MASK,
+@@ -780,14 +791,14 @@
+ 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+ 		regmap_update_bits(cs35l41->regmap, CS35L41_SP_FORMAT,
+ 				   CS35L41_ASP_WIDTH_RX_MASK,
+-				   asp_wl << CS35L41_ASP_WIDTH_RX_SHIFT);
++				   asp_width << CS35L41_ASP_WIDTH_RX_SHIFT);
+ 		regmap_update_bits(cs35l41->regmap, CS35L41_SP_RX_WL,
+ 				   CS35L41_ASP_RX_WL_MASK,
+ 				   asp_wl << CS35L41_ASP_RX_WL_SHIFT);
+ 	} else {
+ 		regmap_update_bits(cs35l41->regmap, CS35L41_SP_FORMAT,
+ 				   CS35L41_ASP_WIDTH_TX_MASK,
+-				   asp_wl << CS35L41_ASP_WIDTH_TX_SHIFT);
++				   asp_width << CS35L41_ASP_WIDTH_TX_SHIFT);
+ 		regmap_update_bits(cs35l41->regmap, CS35L41_SP_TX_WL,
+ 				   CS35L41_ASP_TX_WL_MASK,
+ 				   asp_wl << CS35L41_ASP_TX_WL_SHIFT);
+@@ -958,6 +969,7 @@
+ 	.hw_params = cs35l41_pcm_hw_params,
+ 	.set_sysclk = cs35l41_dai_set_sysclk,
+ 	.set_channel_map = cs35l41_set_channel_map,
++	.set_tdm_slot = cs35l41_set_tdm_slot,
+ };
+ 
+ #define CS35L41_RATES (		    \
+--- a/sound/soc/codecs/cs35l41-lib.c
++++ b/sound/soc/codecs/cs35l41-lib.c
+@@ -1466,8 +1466,11 @@
+ 		return ret;
+ 	}
+ 
+-	// Read mailbox status and verify it is appropriate for the given cmd
+-	for (i = 0; i < 5; i++) {
++	/*
++	 * Read mailbox status and verify it is appropriate for the given cmd.
++	 * Some CSPL builds take over 5 ms to pause; downstream waits 15 ms.
++	 */
++	for (i = 0; i < 15; i++) {
+ 		usleep_range(1000, 1100);
+ 
+ 		ret = regmap_read(regmap, CS35L41_DSP_MBOX_2, &sts);
+--- a/sound/soc/qcom/qdsp6/q6afe.h
++++ b/sound/soc/qcom/qdsp6/q6afe.h
+@@ -192,6 +192,9 @@
+ 	u16	nslots_per_frame;
+ 	u16	slot_width;
+ 	u16	slot_mask;
++	u16	data_out_enable;
++	u16	invert_sync;
++	u16	data_delay;
+ 	u32	data_align_type;
+ 	u16	ch_mapping[AFE_MAX_CHAN_COUNT];
+ };
+--- a/sound/soc/qcom/qdsp6/q6afe.c
++++ b/sound/soc/qcom/qdsp6/q6afe.c
+@@ -393,6 +393,7 @@
+ 	struct q6core_svc_api_info ainfo;
+ 	struct mutex lock;
+ 	struct aprv2_ibasic_rsp_result_t result;
++	u32 vote_handle;
+ 	wait_queue_head_t wait;
+ 	struct list_head port_list;
+ 	spinlock_t port_list_lock;
+@@ -1036,6 +1037,8 @@
+ 				wake_up(&afe->wait);
+ 			}
+ 			break;
++		case AFE_CMD_REMOTE_LPASS_CORE_HW_DEVOTE_REQUEST:
++			break;
+ 		default:
+ 			dev_err(afe->dev, "Unknown cmd 0x%x\n",	res->opcode);
+ 			break;
+@@ -1043,8 +1046,10 @@
+ 	}
+ 		break;
+ 	case AFE_CMD_RSP_REMOTE_LPASS_CORE_HW_VOTE_REQUEST:
++		/* The payload is only the client handle, not a basic result */
++		afe->vote_handle = *(const u32 *)data->payload;
++		afe->result.status = 0;
+ 		afe->result.opcode = hdr->opcode;
+-		afe->result.status = res->status;
+ 		wake_up(&afe->wait);
+ 		break;
+ 	default:
+@@ -1404,6 +1409,9 @@
+ 	pcfg->tdm_cfg.sync_mode = cfg->sync_mode;
+ 	pcfg->tdm_cfg.sync_src = cfg->sync_src;
+ 	pcfg->tdm_cfg.nslots_per_frame = cfg->nslots_per_frame;
++	pcfg->tdm_cfg.ctrl_data_out_enable = cfg->data_out_enable;
++	pcfg->tdm_cfg.ctrl_invert_sync_pulse = cfg->invert_sync;
++	pcfg->tdm_cfg.ctrl_sync_data_delay = cfg->data_delay;
+ 
+ 	pcfg->tdm_cfg.slot_width = cfg->slot_width;
+ 	pcfg->tdm_cfg.slot_mask = cfg->slot_mask;
+@@ -1953,10 +1961,15 @@
+ 
+ 	ret = afe_apr_send_pkt(afe, pkt, NULL,
+ 			       AFE_CMD_RSP_REMOTE_LPASS_CORE_HW_VOTE_REQUEST);
+-	if (ret)
++	if (ret) {
+ 		dev_err(afe->dev, "AFE failed to vote (%d)\n", hw_block_id);
++		return ret;
++	}
+ 
+-	return ret;
++	/* Votes come from clk prepare, which the clk core serialises */
++	*client_handle = afe->vote_handle;
++
++	return 0;
+ }
+ EXPORT_SYMBOL(q6afe_vote_lpass_core_hw);
+ 
+--- a/sound/soc/qcom/qdsp6/q6afe-dai.c
++++ b/sound/soc/qcom/qdsp6/q6afe-dai.c
+@@ -278,6 +278,9 @@
+ 	tdm->data_align_type = dai_data->priv[dai->id].data_align;
+ 	tdm->sync_src = dai_data->priv[dai->id].sync_src;
+ 	tdm->sync_mode = dai_data->priv[dai->id].sync_mode;
++	tdm->data_out_enable = dai_data->priv[dai->id].data_out_enable;
++	tdm->invert_sync = dai_data->priv[dai->id].invert_sync;
++	tdm->data_delay = dai_data->priv[dai->id].data_delay;
+ 
+ 	return 0;
+ }
+--- a/sound/soc/qcom/sm8250.c
++++ b/sound/soc/qcom/sm8250.c
+@@ -10,6 +10,7 @@
+ #include <sound/pcm_params.h>
+ #include <linux/soundwire/sdw.h>
+ #include <sound/jack.h>
++#include <sound/cs35l41.h>
+ #include <linux/input-event-codes.h>
+ #include "qdsp6/q6afe.h"
+ #include "common.h"
+@@ -18,6 +19,12 @@
+ 
+ #define MI2S_BCLK_RATE		1536000
+ 
++/* Primary TDM: 4 slots of 32 bits at 48 kHz, two codecs on slots 0 and 1 */
++#define TDM_SLOTS		4
++#define TDM_SLOT_WIDTH		32
++#define TDM_SLOT_MASK		0x3
++#define TDM_BCLK_RATE		(48000 * TDM_SLOTS * TDM_SLOT_WIDTH)
++
+ struct sm8250_snd_data {
+ 	bool stream_prepared[AFE_PORT_MAX];
+ 	struct snd_soc_card *card;
+@@ -78,6 +85,8 @@
+ 	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+ 	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
+ 	struct snd_soc_dai *codec_dai = snd_soc_rtd_to_codec(rtd, 0);
++	struct snd_soc_dai *dai;
++	int i;
+ 
+ 	switch (cpu_dai->id) {
+ 	case PRIMARY_MI2S_RX:
+@@ -128,6 +137,15 @@
+ 		snd_soc_dai_set_fmt(cpu_dai, fmt);
+ 		snd_soc_dai_set_fmt(codec_dai, codec_dai_fmt);
+ 		break;
++	case PRIMARY_TDM_RX_0:
++		codec_dai_fmt |= SND_SOC_DAIFMT_DSP_A | SND_SOC_DAIFMT_IB_NF;
++		snd_soc_dai_set_sysclk(cpu_dai,
++			Q6AFE_LPASS_CLK_ID_PRI_TDM_IBIT,
++			TDM_BCLK_RATE, SNDRV_PCM_STREAM_PLAYBACK);
++		snd_soc_dai_set_fmt(cpu_dai, fmt);
++		for_each_rtd_codec_dais(rtd, i, dai)
++			snd_soc_dai_set_fmt(dai, codec_dai_fmt);
++		break;
+ 	default:
+ 		break;
+ 	}
+@@ -135,6 +153,79 @@
+ 	return qcom_snd_sdw_startup(substream);
+ }
+ 
++static void sm8250_snd_shutdown(struct snd_pcm_substream *substream)
++{
++	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
++	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
++
++	if (cpu_dai->id == PRIMARY_TDM_RX_0)
++		snd_soc_dai_set_sysclk(cpu_dai, Q6AFE_LPASS_CLK_ID_PRI_TDM_IBIT,
++				       0, SNDRV_PCM_STREAM_PLAYBACK);
++
++	qcom_snd_sdw_shutdown(substream);
++}
++
++/*
++ * Codec N of the dai-link listens on TDM slot N, so the order of the codecs
++ * in the DT is the channel order.
++ */
++static int sm8250_snd_hw_params(struct snd_pcm_substream *substream,
++				struct snd_pcm_hw_params *params)
++{
++	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
++	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
++	unsigned int clk_freq = params_rate(params) * TDM_SLOTS * TDM_SLOT_WIDTH;
++	unsigned int slot_offset[TDM_SLOTS];
++	struct snd_soc_dai *codec_dai;
++	unsigned int rx_slot;
++	int i, ret;
++
++	if (cpu_dai->id != PRIMARY_TDM_RX_0)
++		return 0;
++
++	/* AFE channel map: byte offset of each slot in the frame */
++	for (i = 0; i < TDM_SLOTS; i++)
++		slot_offset[i] = i * TDM_SLOT_WIDTH / 8;
++
++	ret = snd_soc_dai_set_tdm_slot(cpu_dai, 0, TDM_SLOT_MASK,
++				       TDM_SLOTS, TDM_SLOT_WIDTH);
++	if (ret < 0)
++		return ret;
++
++	ret = snd_soc_dai_set_channel_map(cpu_dai, 0, NULL,
++					  params_channels(params), slot_offset);
++	if (ret < 0)
++		return ret;
++
++	for_each_rtd_codec_dais(rtd, i, codec_dai) {
++		if (i >= hweight32(TDM_SLOT_MASK))
++			return -EINVAL;
++
++		ret = snd_soc_component_set_sysclk(codec_dai->component,
++						   CS35L41_CLKID_SCLK, 0,
++						   clk_freq, SND_SOC_CLOCK_IN);
++		if (ret < 0 && ret != -ENOTSUPP)
++			return ret;
++
++		ret = snd_soc_dai_set_sysclk(codec_dai, CS35L41_CLKID_SCLK,
++					     clk_freq, SND_SOC_CLOCK_IN);
++		if (ret < 0 && ret != -ENOTSUPP)
++			return ret;
++
++		ret = snd_soc_dai_set_tdm_slot(codec_dai, 0, BIT(i),
++					       TDM_SLOTS, TDM_SLOT_WIDTH);
++		if (ret < 0 && ret != -ENOTSUPP)
++			return ret;
++
++		rx_slot = i;
++		ret = snd_soc_dai_set_channel_map(codec_dai, 0, NULL, 1, &rx_slot);
++		if (ret < 0 && ret != -ENOTSUPP)
++			return ret;
++	}
++
++	return 0;
++}
++
+ static int sm8250_snd_prepare(struct snd_pcm_substream *substream)
+ {
+ 	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+@@ -155,7 +246,8 @@
+ 
+ static const struct snd_soc_ops sm8250_be_ops = {
+ 	.startup = sm8250_snd_startup,
+-	.shutdown = qcom_snd_sdw_shutdown,
++	.hw_params = sm8250_snd_hw_params,
++	.shutdown = sm8250_snd_shutdown,
+ 	.hw_free = sm8250_snd_hw_free,
+ 	.prepare = sm8250_snd_prepare,
+ };

@@ -1,0 +1,63 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] mfd: max77705: accept the MD15 PASS2 part
+
+The Galaxy Z Flip3's MAX77705 reads PMICID1 0x15 and revision 2, which
+the probe rejects ("Rev.0x2 is not tested"). Samsung's vendor driver
+lists it as MD15 PASS2 next to MD05 PASS3 and PASS4 and drives both with
+the same register map. Check PMICID1 as well and accept MD05 PASS3 and
+MD15 PASS2.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+---
+diff --git a/drivers/mfd/max77705.c b/drivers/mfd/max77705.c
+--- a/drivers/mfd/max77705.c
++++ b/drivers/mfd/max77705.c
+@@ -85,7 +85,7 @@
+ 	struct regmap_irq_chip_data *irq_data;
+ 	struct irq_domain *domain;
+ 	enum max77705_hw_rev pmic_rev;
+-	unsigned int pmic_rev_value;
++	unsigned int pmic_rev_value, pmic_id;
+ 	int ret;
+ 
+ 	max77705 = devm_kzalloc(dev, sizeof(*max77705), GFP_KERNEL);
+@@ -100,13 +100,23 @@
+ 	if (IS_ERR(max77705->regmap))
+ 		return PTR_ERR(max77705->regmap);
+ 
++	ret = regmap_read(max77705->regmap, MAX77705_PMIC_REG_PMICID1, &pmic_id);
++	if (ret < 0)
++		return -ENODEV;
++
+ 	ret = regmap_read(max77705->regmap, MAX77705_PMIC_REG_PMICREV, &pmic_rev_value);
+ 	if (ret < 0)
+ 		return -ENODEV;
+ 
++	/*
++	 * Samsung's vendor driver also lists MD15 PASS2 (PMICID1 0x15), as found
++	 * on the Galaxy Z Flip3; the core registers used here are the same.
++	 */
+ 	pmic_rev = pmic_rev_value & MAX77705_REVISION_MASK;
+-	if (pmic_rev != MAX77705_PASS3)
+-		return dev_err_probe(dev, -ENODEV, "Rev.0x%x is not tested\n", pmic_rev);
++	if (!(pmic_id == MAX77705_PMICID_MD05 && pmic_rev == MAX77705_PASS3) &&
++	    !(pmic_id == MAX77705_PMICID_MD15 && pmic_rev == MAX77705_PASS2))
++		return dev_err_probe(dev, -ENODEV, "ID 0x%x Rev.0x%x is not tested\n",
++				     pmic_id, pmic_rev);
+ 
+ 	/* Active Discharge Enable */
+ 	regmap_update_bits(max77705->regmap, MAX77705_PMIC_REG_MAINCTRL1, 1, 1);
+diff --git a/include/linux/mfd/max77705-private.h b/include/linux/mfd/max77705-private.h
+--- a/include/linux/mfd/max77705-private.h
++++ b/include/linux/mfd/max77705-private.h
+@@ -16,6 +16,10 @@
+ #define MAX77705_SRC_IRQ_ALL	(MAX77705_SRC_IRQ_CHG | MAX77705_SRC_IRQ_TOP | \
+ 				MAX77705_SRC_IRQ_FG | MAX77705_SRC_IRQ_USBC)
+ 
++/* MAX77705_PMIC_REG_PMICID1 register */
++#define MAX77705_PMICID_MD05	0x05
++#define MAX77705_PMICID_MD15	0x15
++
+ /* MAX77705_PMIC_REG_PMICREV register */
+ #define MAX77705_VERSION_SHIFT	3
+ #define MAX77705_REVISION_MASK	GENMASK(2, 0)

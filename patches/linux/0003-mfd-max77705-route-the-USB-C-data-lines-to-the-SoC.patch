@@ -1,0 +1,169 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] mfd: max77705: route the USB-C data lines to the SoC
+
+The MAX77705's Type-C block owns a switch on the connector's D+/D- lines.
+It sits at I2C address 0x25 and is set through the block firmware's
+opcode mailbox (CONTROL1_WRITE). Samsung's vendor driver closes it to the
+AP when a USB cable is detected and opens it at shutdown; mainline has no
+driver for that block, so the switch keeps whatever state the bootloader
+left. On the Galaxy Z Flip3 that is open after a warm reboot (CONTROL1
+reads 0x3f), so the gadget never connects until the cable is re-plugged
+and the firmware re-runs its detection.
+
+Close the switch to USB at probe, keeping BC1.2 comparison enabled, and
+open it again at shutdown like the vendor driver.
+
+Nothing handles the block's interrupts, and the bootloader leaves them
+unmasked; they drive the PMIC interrupt line regardless of INTSRC_MASK, so
+the opcode's completion (UIC_INT 0x80) and pending CC/PD events kept the
+line asserted until the core reported "irq: nobody cared" and disabled
+it. Mask all USBC sources and clear what is pending before the command.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+---
+diff --git a/drivers/mfd/max77705.c b/drivers/mfd/max77705.c
+--- a/drivers/mfd/max77705.c
++++ b/drivers/mfd/max77705.c
+@@ -15,6 +15,30 @@
+ #include <linux/regmap.h>
+ #include <linux/of.h>
+ 
++/*
++ * The USB Type-C block (CC, BC1.2 and the switch that routes the connector's
++ * D+/D- lines) sits at its own I2C address and is driven by its firmware
++ * through an opcode mailbox: the opcode and its data go to OPCODE_WRITE
++ * onwards, and a write to OPCODE_WRITE_END executes the command.
++ */
++#define MAX77705_USBC_I2C_ADDR		0x25
++#define MAX77705_USBC_UIC_INT		0x02
++#define MAX77705_USBC_VDM_INT		0x05
++#define MAX77705_USBC_UIC_INT_M		0x0e
++#define MAX77705_USBC_VDM_INT_M		0x11
++#define MAX77705_USBC_OPCODE_WRITE	0x21
++#define MAX77705_USBC_OPCODE_WRITE_END	0x41
++#define MAX77705_USBC_OP_CONTROL1_WRITE	0x06
++
++/*
++ * CONTROL1: NoBCComp [7], RCPS [6], D+ switch [5:3], D- switch [2:0].
++ * USB routes the lines to the AP while the firmware still applies its
++ * BC1.2 detection result; open disconnects them.
++ */
++#define MAX77705_USBC_SW_USB		0x1
++#define MAX77705_USBC_SW_OPEN		0x7
++#define MAX77705_USBC_CONTROL1(sw)	(((sw) << 3) | (sw))
++
+ static struct mfd_cell max77705_devs[] = {
+ 	MFD_CELL_OF("max77705-rgb", NULL, NULL, 0, 0, "maxim,max77705-rgb"),
+ 	MFD_CELL_OF("max77705-charger", NULL, NULL, 0, 0, "maxim,max77705-charger"),
+@@ -78,11 +102,62 @@
+ 	.num_irqs	= ARRAY_SIZE(max77705_irqs),
+ };
+ 
++static const struct regmap_config max77705_usbc_regmap_config = {
++	.reg_bits = 8,
++	.val_bits = 8,
++	.max_register = MAX77705_USBC_OPCODE_WRITE_END,
++};
++
++/*
++ * Nothing else sets the D+/D- switch, and it keeps whatever state the
++ * bootloader left it in: after a warm reboot it is open, and the USB
++ * controller is not connected to the port until a cable is re-plugged.
++ */
++/*
++ * Nothing handles the Type-C block's interrupts yet, and the bootloader leaves
++ * them unmasked. Its sources drive the PMIC interrupt line regardless of
++ * INTSRC_MASK, so mask them all and clear what is pending; the line would
++ * otherwise stay asserted (the opcode below completes with an interrupt too).
++ */
++static int max77705_usbc_quiesce_irqs(struct regmap *usbc)
++{
++	unsigned int reg, val;
++	int ret;
++
++	for (reg = MAX77705_USBC_UIC_INT_M; reg <= MAX77705_USBC_VDM_INT_M; reg++) {
++		ret = regmap_write(usbc, reg, 0xff);
++		if (ret)
++			return ret;
++	}
++
++	/* The interrupt registers clear on read. */
++	for (reg = MAX77705_USBC_UIC_INT; reg <= MAX77705_USBC_VDM_INT; reg++) {
++		ret = regmap_read(usbc, reg, &val);
++		if (ret)
++			return ret;
++	}
++
++	return 0;
++}
++
++static int max77705_usbc_set_switch(struct regmap *usbc, u8 sw)
++{
++	u8 cmd[] = { MAX77705_USBC_OP_CONTROL1_WRITE, MAX77705_USBC_CONTROL1(sw) };
++	int ret;
++
++	ret = regmap_bulk_write(usbc, MAX77705_USBC_OPCODE_WRITE, cmd, ARRAY_SIZE(cmd));
++	if (ret)
++		return ret;
++
++	return regmap_write(usbc, MAX77705_USBC_OPCODE_WRITE_END, 0);
++}
++
+ static int max77705_i2c_probe(struct i2c_client *i2c)
+ {
+ 	struct device *dev = &i2c->dev;
+ 	struct max77693_dev *max77705;
+ 	struct regmap_irq_chip_data *irq_data;
++	struct i2c_client *usbc;
+ 	struct irq_domain *domain;
+ 	enum max77705_hw_rev pmic_rev;
+ 	unsigned int pmic_rev_value, pmic_id;
+@@ -121,6 +196,23 @@
+ 	/* Active Discharge Enable */
+ 	regmap_update_bits(max77705->regmap, MAX77705_PMIC_REG_MAINCTRL1, 1, 1);
+ 
++	usbc = devm_i2c_new_dummy_device(dev, i2c->adapter, MAX77705_USBC_I2C_ADDR);
++	if (IS_ERR(usbc))
++		return dev_err_probe(dev, PTR_ERR(usbc), "Failed to add USBC client\n");
++
++	max77705->regmap_muic = devm_regmap_init_i2c(usbc, &max77705_usbc_regmap_config);
++	if (IS_ERR(max77705->regmap_muic))
++		return dev_err_probe(dev, PTR_ERR(max77705->regmap_muic),
++				     "Failed to init USBC regmap\n");
++
++	ret = max77705_usbc_quiesce_irqs(max77705->regmap_muic);
++	if (ret)
++		dev_warn(dev, "Failed to mask USBC interrupts: %d\n", ret);
++
++	ret = max77705_usbc_set_switch(max77705->regmap_muic, MAX77705_USBC_SW_USB);
++	if (ret)
++		dev_warn(dev, "Failed to route USB data lines: %d\n", ret);
++
+ 	ret = devm_regmap_add_irq_chip(dev, max77705->regmap,
+ 					i2c->irq,
+ 					IRQF_ONESHOT, 0,
+@@ -144,6 +236,14 @@
+ 	return 0;
+ }
+ 
++static void max77705_i2c_shutdown(struct i2c_client *i2c)
++{
++	struct max77693_dev *max77705 = i2c_get_clientdata(i2c);
++
++	if (max77705->regmap_muic)
++		max77705_usbc_set_switch(max77705->regmap_muic, MAX77705_USBC_SW_OPEN);
++}
++
+ static int max77705_suspend(struct device *dev)
+ {
+ 	struct i2c_client *i2c = to_i2c_client(dev);
+@@ -181,7 +281,8 @@
+ 		.of_match_table		= max77705_i2c_of_match,
+ 		.pm			= pm_sleep_ptr(&max77705_pm_ops),
+ 	},
+-	.probe = max77705_i2c_probe
++	.probe = max77705_i2c_probe,
++	.shutdown = max77705_i2c_shutdown,
+ };
+ module_i2c_driver(max77705_i2c_driver);
+ 

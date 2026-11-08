@@ -1,0 +1,1 @@
+console=tty0 loglevel=8 ignore_loglevel panic=0 pause_on_oops=120 clk_ignore_unused regulator_ignore_unused fbcon=font:TER16x32 msm.separate_gpu_kms=1 mem_sleep_default=s2idle

@@ -1,0 +1,625 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] power: supply: add Samsung dual cell battery charging
+
+Samsung's sec_battery and sec_dual_battery charge the Galaxy Z Flip3's
+two cells through two S2ASL01 limiters: the charge current is split by
+zone, the first full stage ends on fuel gauge current and voltage, the
+second ends when each cell reaches its full voltage at its end of
+charge current (supplement mode for a full cell, forced 30 minutes
+after the first), the charger then stops with its buck on, and charging
+restarts by the limiter recharge condition. Without a charger both
+cells balance. Checked on charger changes and every 30 s with a
+charger attached, as stock polls.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+---
+diff --git a/Documentation/devicetree/bindings/power/supply/samsung,dual-battery.yaml b/Documentation/devicetree/bindings/power/supply/samsung,dual-battery.yaml
+new file mode 100644
+--- /dev/null
++++ b/Documentation/devicetree/bindings/power/supply/samsung,dual-battery.yaml
+@@ -0,0 +1,118 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/power/supply/samsung,dual-battery.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: Samsung dual cell battery charging
++
++maintainers:
++  - Noa Himesaka <himesaka@noa.codes>
++
++description:
++  A battery made of two cells, each behind its own current limiter, charged
++  by one charger as Samsung phones such as the Galaxy Z Flip3 do it. The
++  charge current is split between the cells by zone, a cell that reaches
++  its full voltage at its end of charge current is taken out of charging,
++  the charger stops once both are full, and charging restarts when the
++  higher cell falls to the recharge voltage or the cells drift apart.
++
++properties:
++  compatible:
++    const: samsung,dual-battery
++
++  samsung,charger:
++    $ref: /schemas/types.yaml#/definitions/phandle
++    description: The charger, with charge_behaviour and constant charge current.
++
++  samsung,fuel-gauge:
++    $ref: /schemas/types.yaml#/definitions/phandle
++    description: The fuel gauge of the pack.
++
++  samsung,main-limiter:
++    $ref: /schemas/types.yaml#/definitions/phandle
++    description: The main cell's current limiter.
++
++  samsung,sub-limiter:
++    $ref: /schemas/types.yaml#/definitions/phandle
++    description: The sub cell's current limiter.
++
++  samsung,zone-current-rates-percent:
++    $ref: /schemas/types.yaml#/definitions/uint32-array
++    description:
++      Share of the charge current for the main and the sub cell, in percent,
++      for charge currents up to 1.2 A, up to 3 A and above.
++    items:
++      - description: zone 1, main
++      - description: zone 1, sub
++      - description: zone 2, main
++      - description: zone 2, sub
++      - description: zone 3, main
++      - description: zone 3, sub
++
++  samsung,limiter-current-range-microamp:
++    $ref: /schemas/types.yaml#/definitions/uint32-array
++    items:
++      - description: main cell minimum
++      - description: main cell maximum
++      - description: sub cell minimum
++      - description: sub cell maximum
++
++  samsung,cell-full-microvolt:
++    $ref: /schemas/types.yaml#/definitions/uint32-array
++    items:
++      - description: main cell
++      - description: sub cell
++
++  samsung,cell-eoc-microamp:
++    $ref: /schemas/types.yaml#/definitions/uint32-array
++    items:
++      - description: main cell end of charge current
++      - description: sub cell end of charge current
++
++  samsung,full-check-current-microamp:
++    description: Pack current below which the first full stage ends.
++
++  samsung,full-condition-microvolt:
++    description: Pack voltage the first full stage needs.
++
++  samsung,recharge-microvolt:
++    description: Higher cell voltage at or below which charging restarts.
++
++  samsung,force-recharge-margin-microvolt:
++    description: Cell voltage difference above which charging restarts.
++
++required:
++  - compatible
++  - samsung,charger
++  - samsung,fuel-gauge
++  - samsung,main-limiter
++  - samsung,sub-limiter
++  - samsung,zone-current-rates-percent
++  - samsung,limiter-current-range-microamp
++  - samsung,cell-full-microvolt
++  - samsung,cell-eoc-microamp
++  - samsung,full-check-current-microamp
++  - samsung,full-condition-microvolt
++  - samsung,recharge-microvolt
++  - samsung,force-recharge-margin-microvolt
++
++additionalProperties: false
++
++examples:
++  - |
++    dual-battery {
++        compatible = "samsung,dual-battery";
++        samsung,charger = <&charger>;
++        samsung,fuel-gauge = <&fuel_gauge>;
++        samsung,main-limiter = <&limiter_main>;
++        samsung,sub-limiter = <&limiter_sub>;
++        samsung,zone-current-rates-percent = <40 85 33 77 46 60>;
++        samsung,limiter-current-range-microamp = <0 3150000 200000 3150000>;
++        samsung,cell-full-microvolt = <4400000 4400000>;
++        samsung,cell-eoc-microamp = <45000 115000>;
++        samsung,full-check-current-microamp = <480000>;
++        samsung,full-condition-microvolt = <4390000>;
++        samsung,recharge-microvolt = <4350000>;
++        samsung,force-recharge-margin-microvolt = <140000>;
++    };
+diff --git a/drivers/power/supply/Kconfig b/drivers/power/supply/Kconfig
+--- a/drivers/power/supply/Kconfig
++++ b/drivers/power/supply/Kconfig
+@@ -863,6 +863,19 @@ config CHARGER_RK817
+ 	help
+ 	  Say Y to include support for Rockchip RK817 Battery Charger.
+ 
++config BATTERY_SAMSUNG_DUAL
++	tristate "Samsung dual cell battery charging"
++	depends on OF
++	help
++	  Charging of a battery made of two cells behind two current
++	  limiters, as Samsung phones such as the Galaxy Z Flip3 do it:
++	  the charge current is split between the cells, each cell is
++	  taken out of charging when it is full, and charging restarts
++	  when the cells need it.
++
++	  To compile this driver as a module, choose M here: the module
++	  will be called samsung-dual-battery.
++
+ config CHARGER_S2ASL01
+ 	tristate "Samsung S2ASL01 battery current limiter"
+ 	depends on I2C
+diff --git a/drivers/power/supply/Makefile b/drivers/power/supply/Makefile
+--- a/drivers/power/supply/Makefile
++++ b/drivers/power/supply/Makefile
+@@ -108,6 +108,7 @@ obj-$(CONFIG_CHARGER_BQ25980)	+= bq25980_charger.o
+ obj-$(CONFIG_CHARGER_BQ25630)	+= bq25630_charger.o
+ obj-$(CONFIG_CHARGER_BQ256XX)	+= bq256xx_charger.o
+ obj-$(CONFIG_CHARGER_RK817)	+= rk817_charger.o
++obj-$(CONFIG_BATTERY_SAMSUNG_DUAL)	+= samsung-dual-battery.o
+ obj-$(CONFIG_CHARGER_S2ASL01)	+= s2asl01_limiter.o
+ obj-$(CONFIG_CHARGER_S2M)	+= s2m-charger.o
+ obj-$(CONFIG_CHARGER_SGM41542)	+= sgm41542_charger.o
+diff --git a/drivers/power/supply/samsung-dual-battery.c b/drivers/power/supply/samsung-dual-battery.c
+new file mode 100644
+--- /dev/null
++++ b/drivers/power/supply/samsung-dual-battery.c
+@@ -0,0 +1,448 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Charging of a two cell battery behind two current limiters, as Samsung's
++ * sec_battery and sec_dual_battery drivers do it on the Galaxy Z Flip3:
++ *
++ * - the charger's charge current is split between the cells by zone
++ *   (sec_bat_divide_limiter_current) and written to the limiters;
++ * - first full: fuel gauge current below the first full check current with
++ *   the cell voltage above the full condition voltage (FULLCHARGED_FG_CURRENT
++ *   with FULL_CONDITION_VCELL);
++ * - second full: each cell is full when its voltage reaches the cell full
++ *   voltage and its charge current falls to its end of charge current; a full
++ *   cell goes into supplement mode, and 30 minutes after the first cell the
++ *   other one is forced (sec_dual_check_eoc_status);
++ * - with both cells full the charger stops charging with its buck left on;
++ * - recharge when the higher cell voltage falls to the recharge voltage or
++ *   the cells drift apart by more than the force recharge margin
++ *   (RECHARGE_CONDITION_LIMITER);
++ * - without a charger, supplement mode is off so the cells balance.
++ *
++ * Like stock, the state is checked on every charger change and every 30 s
++ * (battery,polling_time for charging and full) while a charger is attached;
++ * without a charger nothing runs.
++ */
++
++#include <linux/device.h>
++#include <linux/jiffies.h>
++#include <linux/kernel.h>
++#include <linux/minmax.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/power_supply.h>
++#include <linux/property.h>
++#include <linux/workqueue.h>
++
++#define SDB_POLL_MS		30000
++#define SDB_FORCE_FULL_MS	(30 * 60 * 1000)
++#define SDB_ZONE1_MAX_UA	1200000
++#define SDB_ZONE2_MAX_UA	3000000
++
++enum sdb_state {
++	SDB_DISCHARGING,
++	SDB_CHARGING_1ST,
++	SDB_CHARGING_2ND,
++	SDB_FULL,
++};
++
++enum { SDB_MAIN, SDB_SUB, SDB_CELLS };
++
++struct sdb {
++	struct device *dev;
++	struct power_supply *charger;
++	struct power_supply *fuel_gauge;
++	struct power_supply *limiter[SDB_CELLS];
++	struct notifier_block nb;
++	struct delayed_work work;
++	struct mutex lock;	/* serialises sdb_work() */
++
++	u32 zone_rate[3][SDB_CELLS];
++	u32 limiter_min_ua[SDB_CELLS];
++	u32 limiter_max_ua[SDB_CELLS];
++	u32 cell_full_uv[SDB_CELLS];
++	u32 cell_eoc_ua[SDB_CELLS];
++	u32 full_check_ua;
++	u32 full_condition_uv;
++	u32 recharge_uv;
++	u32 force_recharge_margin_uv;
++
++	enum sdb_state state;
++	bool cell_full[SDB_CELLS];
++	unsigned long force_full_start;
++	int charge_current_ua;
++};
++
++static int sdb_get(struct power_supply *psy, enum power_supply_property psp,
++		   int *val)
++{
++	union power_supply_propval v;
++	int ret;
++
++	ret = power_supply_get_property(psy, psp, &v);
++	if (!ret)
++		*val = v.intval;
++	return ret;
++}
++
++static int sdb_set(struct power_supply *psy, enum power_supply_property psp,
++		   int val)
++{
++	union power_supply_propval v = { .intval = val };
++
++	return power_supply_set_property(psy, psp, &v);
++}
++
++static void sdb_supplement(struct sdb *sdb, int cell, bool on)
++{
++	int ret;
++
++	ret = sdb_set(sdb->limiter[cell], POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR,
++		      on ? POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE :
++			   POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO);
++	if (ret)
++		dev_err(sdb->dev, "cell %d supplement mode %d: %d\n", cell, on, ret);
++}
++
++static void sdb_charger_enable(struct sdb *sdb, bool on)
++{
++	int ret;
++
++	ret = sdb_set(sdb->charger, POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR,
++		      on ? POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO :
++			   POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE);
++	if (ret)
++		dev_err(sdb->dev, "charger %s: %d\n", on ? "on" : "off", ret);
++}
++
++/* sec_bat_divide_limiter_current() */
++static void sdb_divide_current(struct sdb *sdb, int total_ua)
++{
++	int zone, cell, ret;
++
++	if (total_ua <= SDB_ZONE1_MAX_UA)
++		zone = 0;
++	else if (total_ua <= SDB_ZONE2_MAX_UA)
++		zone = 1;
++	else
++		zone = 2;
++
++	for (cell = 0; cell < SDB_CELLS; cell++) {
++		int ua = div_u64((u64)total_ua * sdb->zone_rate[zone][cell], 100);
++
++		ua = clamp_t(int, ua, sdb->limiter_min_ua[cell],
++			     sdb->limiter_max_ua[cell]);
++		ret = sdb_set(sdb->limiter[cell],
++			      POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT, ua);
++		if (ret)
++			dev_err(sdb->dev, "cell %d current %d uA: %d\n",
++				cell, ua, ret);
++		else
++			dev_dbg(sdb->dev, "cell %d: %d uA of %d uA\n",
++				cell, ua, total_ua);
++	}
++}
++
++static void sdb_set_state(struct sdb *sdb, enum sdb_state state)
++{
++	static const char * const names[] = {
++		"discharging", "charging", "second stage", "full",
++	};
++
++	if (sdb->state != state)
++		dev_info(sdb->dev, "%s -> %s\n", names[sdb->state], names[state]);
++	sdb->state = state;
++}
++
++static void sdb_start_charging(struct sdb *sdb)
++{
++	int cell;
++
++	/* From full, take the charger through off so it starts a new cycle */
++	if (sdb->state == SDB_FULL)
++		sdb_charger_enable(sdb, false);
++
++	for (cell = 0; cell < SDB_CELLS; cell++) {
++		sdb_supplement(sdb, cell, false);
++		sdb->cell_full[cell] = false;
++	}
++	sdb->force_full_start = 0;
++	sdb_charger_enable(sdb, true);
++	sdb_set_state(sdb, SDB_CHARGING_1ST);
++}
++
++/* FULLCHARGED_FG_CURRENT with FULL_CONDITION_VCELL */
++static bool sdb_first_full(struct sdb *sdb)
++{
++	int now, avg, uv;
++
++	if (sdb_get(sdb->fuel_gauge, POWER_SUPPLY_PROP_CURRENT_NOW, &now) ||
++	    sdb_get(sdb->fuel_gauge, POWER_SUPPLY_PROP_CURRENT_AVG, &avg) ||
++	    sdb_get(sdb->fuel_gauge, POWER_SUPPLY_PROP_VOLTAGE_NOW, &uv))
++		return false;
++
++	return now > 0 && now < sdb->full_check_ua &&
++	       avg > 0 && avg < sdb->full_check_ua &&
++	       uv >= sdb->full_condition_uv;
++}
++
++/* sec_dual_check_eoc_status() */
++static bool sdb_second_full(struct sdb *sdb)
++{
++	int cell, uv, ua;
++
++	for (cell = 0; cell < SDB_CELLS; cell++) {
++		if (sdb->cell_full[cell])
++			continue;
++		if (sdb_get(sdb->limiter[cell], POWER_SUPPLY_PROP_VOLTAGE_NOW, &uv) ||
++		    sdb_get(sdb->limiter[cell], POWER_SUPPLY_PROP_CURRENT_NOW, &ua))
++			continue;
++		if (uv >= sdb->cell_full_uv[cell] && ua <= sdb->cell_eoc_ua[cell]) {
++			dev_info(sdb->dev, "cell %d full: %d uV, %d uA\n",
++				 cell, uv, ua);
++			sdb->cell_full[cell] = true;
++			sdb_supplement(sdb, cell, true);
++			if (!sdb->force_full_start)
++				sdb->force_full_start = jiffies ?: 1;
++		}
++	}
++
++	if (sdb->force_full_start &&
++	    !(sdb->cell_full[SDB_MAIN] && sdb->cell_full[SDB_SUB]) &&
++	    time_after_eq(jiffies, sdb->force_full_start +
++			  msecs_to_jiffies(SDB_FORCE_FULL_MS))) {
++		dev_info(sdb->dev, "30 min since the first cell: forcing full\n");
++		for (cell = 0; cell < SDB_CELLS; cell++) {
++			sdb->cell_full[cell] = true;
++			sdb_supplement(sdb, cell, true);
++		}
++	}
++
++	return sdb->cell_full[SDB_MAIN] && sdb->cell_full[SDB_SUB];
++}
++
++/* RECHARGE_CONDITION_LIMITER */
++static bool sdb_needs_recharge(struct sdb *sdb)
++{
++	int main_uv, sub_uv;
++
++	if (sdb_get(sdb->limiter[SDB_MAIN], POWER_SUPPLY_PROP_VOLTAGE_NOW, &main_uv) ||
++	    sdb_get(sdb->limiter[SDB_SUB], POWER_SUPPLY_PROP_VOLTAGE_NOW, &sub_uv))
++		return false;
++
++	return max(main_uv, sub_uv) <= sdb->recharge_uv ||
++	       abs(main_uv - sub_uv) > sdb->force_recharge_margin_uv;
++}
++
++static void sdb_work(struct work_struct *work)
++{
++	struct sdb *sdb = container_of(work, struct sdb, work.work);
++	int online = 0, cc = 0, status, ua, cell;
++
++	mutex_lock(&sdb->lock);
++
++	sdb_get(sdb->charger, POWER_SUPPLY_PROP_ONLINE, &online);
++	if (!online) {
++		if (sdb->state != SDB_DISCHARGING) {
++			for (cell = 0; cell < SDB_CELLS; cell++) {
++				sdb_supplement(sdb, cell, false);
++				sdb->cell_full[cell] = false;
++			}
++			sdb->force_full_start = 0;
++			sdb_charger_enable(sdb, true);
++			sdb_set_state(sdb, SDB_DISCHARGING);
++		}
++		sdb->charge_current_ua = 0;
++		mutex_unlock(&sdb->lock);
++		return;
++	}
++
++	if (!sdb_get(sdb->charger, POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT, &cc) &&
++	    cc != sdb->charge_current_ua) {
++		sdb_divide_current(sdb, cc);
++		sdb->charge_current_ua = cc;
++	}
++
++	/*
++	 * The charger ends a cycle by itself after its top-off timer and does
++	 * not restart (CHG_RSTRT is disabled, as stock sets it). Stock then
++	 * sits in full and recharges by the limiter condition, so do the same.
++	 * The charger also says full in top-off, while current still flows
++	 * and stock runs its second stage: only no current means done.
++	 */
++	if ((sdb->state == SDB_CHARGING_1ST || sdb->state == SDB_CHARGING_2ND) &&
++	    !sdb_get(sdb->charger, POWER_SUPPLY_PROP_STATUS, &status) &&
++	    status == POWER_SUPPLY_STATUS_FULL &&
++	    !sdb_get(sdb->fuel_gauge, POWER_SUPPLY_PROP_CURRENT_NOW, &ua) &&
++	    ua <= 0) {
++		dev_info(sdb->dev, "charger terminated\n");
++		sdb_set_state(sdb, SDB_FULL);
++	}
++
++	switch (sdb->state) {
++	case SDB_DISCHARGING:
++		sdb_start_charging(sdb);
++		fallthrough;
++	case SDB_CHARGING_1ST:
++		if (sdb_first_full(sdb))
++			sdb_set_state(sdb, SDB_CHARGING_2ND);
++		else
++			break;
++		fallthrough;
++	case SDB_CHARGING_2ND:
++		if (sdb_second_full(sdb)) {
++			sdb_charger_enable(sdb, false);
++			sdb_set_state(sdb, SDB_FULL);
++		}
++		break;
++	case SDB_FULL:
++		if (sdb_needs_recharge(sdb)) {
++			dev_info(sdb->dev, "recharging\n");
++			sdb_start_charging(sdb);
++		}
++		break;
++	}
++
++	mod_delayed_work(system_freezable_wq, &sdb->work,
++			 msecs_to_jiffies(SDB_POLL_MS));
++	mutex_unlock(&sdb->lock);
++}
++
++static int sdb_notify(struct notifier_block *nb, unsigned long event, void *data)
++{
++	struct sdb *sdb = container_of(nb, struct sdb, nb);
++
++	if (event == PSY_EVENT_PROP_CHANGED && data == sdb->charger)
++		mod_delayed_work(system_freezable_wq, &sdb->work, 0);
++
++	return NOTIFY_OK;
++}
++
++static int sdb_get_psy(struct device *dev, const char *prop,
++		       struct power_supply **psy)
++{
++	*psy = devm_power_supply_get_by_reference(dev, prop);
++	if (IS_ERR(*psy))
++		return dev_err_probe(dev, PTR_ERR(*psy), "%s\n", prop);
++	if (!*psy)
++		return -EPROBE_DEFER;
++	return 0;
++}
++
++static int sdb_read_u32s(struct device *dev, const char *prop, u32 *val,
++			 size_t n)
++{
++	int ret = device_property_read_u32_array(dev, prop, val, n);
++
++	if (ret)
++		return dev_err_probe(dev, ret, "%s\n", prop);
++	return 0;
++}
++
++static void sdb_unregister(void *data)
++{
++	struct sdb *sdb = data;
++
++	power_supply_unreg_notifier(&sdb->nb);
++	cancel_delayed_work_sync(&sdb->work);
++}
++
++static int sdb_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	u32 rates[6], range[4], pair[2];
++	struct sdb *sdb;
++	int ret, i;
++
++	sdb = devm_kzalloc(dev, sizeof(*sdb), GFP_KERNEL);
++	if (!sdb)
++		return -ENOMEM;
++	sdb->dev = dev;
++
++	ret = sdb_get_psy(dev, "samsung,charger", &sdb->charger);
++	if (ret)
++		return ret;
++	ret = sdb_get_psy(dev, "samsung,fuel-gauge", &sdb->fuel_gauge);
++	if (ret)
++		return ret;
++	ret = sdb_get_psy(dev, "samsung,main-limiter", &sdb->limiter[SDB_MAIN]);
++	if (ret)
++		return ret;
++	ret = sdb_get_psy(dev, "samsung,sub-limiter", &sdb->limiter[SDB_SUB]);
++	if (ret)
++		return ret;
++
++	ret = sdb_read_u32s(dev, "samsung,zone-current-rates-percent", rates, 6);
++	if (ret)
++		return ret;
++	for (i = 0; i < 3; i++) {
++		sdb->zone_rate[i][SDB_MAIN] = rates[2 * i];
++		sdb->zone_rate[i][SDB_SUB] = rates[2 * i + 1];
++	}
++
++	ret = sdb_read_u32s(dev, "samsung,limiter-current-range-microamp", range, 4);
++	if (ret)
++		return ret;
++	sdb->limiter_min_ua[SDB_MAIN] = range[0];
++	sdb->limiter_max_ua[SDB_MAIN] = range[1];
++	sdb->limiter_min_ua[SDB_SUB] = range[2];
++	sdb->limiter_max_ua[SDB_SUB] = range[3];
++
++	ret = sdb_read_u32s(dev, "samsung,cell-full-microvolt", pair, 2);
++	if (ret)
++		return ret;
++	sdb->cell_full_uv[SDB_MAIN] = pair[0];
++	sdb->cell_full_uv[SDB_SUB] = pair[1];
++
++	ret = sdb_read_u32s(dev, "samsung,cell-eoc-microamp", pair, 2);
++	if (ret)
++		return ret;
++	sdb->cell_eoc_ua[SDB_MAIN] = pair[0];
++	sdb->cell_eoc_ua[SDB_SUB] = pair[1];
++
++	ret = sdb_read_u32s(dev, "samsung,full-check-current-microamp",
++			    &sdb->full_check_ua, 1) ?:
++	      sdb_read_u32s(dev, "samsung,full-condition-microvolt",
++			    &sdb->full_condition_uv, 1) ?:
++	      sdb_read_u32s(dev, "samsung,recharge-microvolt",
++			    &sdb->recharge_uv, 1) ?:
++	      sdb_read_u32s(dev, "samsung,force-recharge-margin-microvolt",
++			    &sdb->force_recharge_margin_uv, 1);
++	if (ret)
++		return ret;
++
++	mutex_init(&sdb->lock);
++	INIT_DELAYED_WORK(&sdb->work, sdb_work);
++	sdb->state = SDB_DISCHARGING;
++	sdb->nb.notifier_call = sdb_notify;
++
++	ret = power_supply_reg_notifier(&sdb->nb);
++	if (ret)
++		return ret;
++	ret = devm_add_action_or_reset(dev, sdb_unregister, sdb);
++	if (ret)
++		return ret;
++
++	mod_delayed_work(system_freezable_wq, &sdb->work, 0);
++	return 0;
++}
++
++static const struct of_device_id sdb_of_match[] = {
++	{ .compatible = "samsung,dual-battery" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, sdb_of_match);
++
++static struct platform_driver sdb_driver = {
++	.driver = {
++		.name = "samsung-dual-battery",
++		.of_match_table = sdb_of_match,
++	},
++	.probe = sdb_probe,
++};
++module_platform_driver(sdb_driver);
++
++MODULE_AUTHOR("Noa Himesaka <himesaka@noa.codes>");
++MODULE_DESCRIPTION("Samsung dual cell battery charging");
++MODULE_LICENSE("GPL");

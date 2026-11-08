@@ -1,0 +1,463 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] Input: add STMicroelectronics FTS9CU80F (Samsung firmware) driver
+
+The Galaxy Z Flip3's main touchscreen is an ST FTS9CU80F flashed with
+Samsung firmware (vendor driver: drivers/input/sec_input/stm_fold,
+compatible "stm,stm_ts"). It does not speak ST's FTM protocol that
+stmfts drives, but Samsung's sec_ts command set: 16-byte events read
+with 0x60/0x61, status events echoing each command, touch type 0x30,
+force calibration 0x13 and scan mode 0xa0.
+
+Bring it up as the vendor driver does (system reset, wait for the READY
+status event, enable finger/palm/wet touch types, calibrate, clear the
+event queue) and scan only while the input device is open. Coordinates
+come from panel info (0..4095 on this panel); palm contacts are reported
+as MT_TOOL_PALM. Firmware update and Samsung's factory interfaces are
+left out.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+---
+diff --git a/drivers/input/touchscreen/Kconfig b/drivers/input/touchscreen/Kconfig
+--- a/drivers/input/touchscreen/Kconfig
++++ b/drivers/input/touchscreen/Kconfig
+@@ -527,6 +527,19 @@
+ 	  To compile this driver as a module, choose M here: the
+ 	  module will be called bcm_iproc_tsc.
+ 
++config TOUCHSCREEN_FTS9CU80F
++	tristate "STMicroelectronics FTS9CU80F touchscreen (Samsung firmware)"
++	depends on I2C
++	help
++	  Say Y here to enable support for the STMicroelectronics FTS9CU80F
++	  touchscreen controller as Samsung ships it, with firmware that
++	  speaks Samsung's command set (Galaxy Z Flip3).
++
++	  If unsure, say N.
++
++	  To compile this driver as module, choose M here: the
++	  module will be called fts9cu80f.
++
+ config TOUCHSCREEN_S6SY761
+ 	tristate "Samsung S6SY761 Touchscreen driver"
+ 	depends on I2C
+diff --git a/drivers/input/touchscreen/Makefile b/drivers/input/touchscreen/Makefile
+--- a/drivers/input/touchscreen/Makefile
++++ b/drivers/input/touchscreen/Makefile
+@@ -77,6 +77,7 @@
+ obj-$(CONFIG_TOUCHSCREEN_PENMOUNT)	+= penmount.o
+ obj-$(CONFIG_TOUCHSCREEN_PIXCIR)	+= pixcir_i2c_ts.o
+ obj-$(CONFIG_TOUCHSCREEN_RM_TS)		+= raydium_i2c_ts.o
++obj-$(CONFIG_TOUCHSCREEN_FTS9CU80F)	+= fts9cu80f.o
+ obj-$(CONFIG_TOUCHSCREEN_S6SY761)	+= s6sy761.o
+ obj-$(CONFIG_TOUCHSCREEN_SILEAD)	+= silead.o
+ obj-$(CONFIG_TOUCHSCREEN_SIS_I2C)	+= sis_i2c.o
+diff --git a/drivers/input/touchscreen/fts9cu80f.c b/drivers/input/touchscreen/fts9cu80f.c
+new file mode 100644
+--- /dev/null
++++ b/drivers/input/touchscreen/fts9cu80f.c
+@@ -0,0 +1,405 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * STMicroelectronics FTS9CU80F touchscreen with Samsung firmware
++ *
++ * Samsung ships this controller with firmware that speaks its own "sec_ts"
++ * command set (the one s6sy761 uses too), not ST's FTM protocol: 16-byte
++ * events read with 0x60/0x61, status events that echo each command, and an
++ * 0xA0 scan-mode command. The controller is already flashed; this driver
++ * neither updates nor verifies firmware.
++ *
++ * Copyright (C) 2026 Noa Himesaka <himesaka@noa.codes>
++ */
++
++#include <linux/delay.h>
++#include <linux/i2c.h>
++#include <linux/input.h>
++#include <linux/input/mt.h>
++#include <linux/input/touchscreen.h>
++#include <linux/interrupt.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/regulator/consumer.h>
++#include <linux/unaligned.h>
++
++#define FTS_CMD_FORCE_CALIBRATION	0x13
++#define FTS_CMD_PANEL_INFO		0x23
++#define FTS_CMD_FW_VERSION		0x24
++#define FTS_CMD_TOUCH_TYPE		0x30
++#define FTS_CMD_READ_ONE_EVENT		0x60
++#define FTS_CMD_READ_ALL_EVENT		0x61
++#define FTS_CMD_CLEAR_ALL_EVENT		0x62
++#define FTS_CMD_SCAN_MODE		0xa0
++#define FTS_CMD_REG			0xfa
++
++#define FTS_SCAN_OFF			0x00
++#define FTS_SCAN_MS_SS			0x01
++
++/* Touch types to report: finger, palm and wet finger, as stock enables them */
++#define FTS_TOUCHTYPE_FINGER		BIT(0)
++#define FTS_TOUCHTYPE_PALM		BIT(5)
++#define FTS_TOUCHTYPE_WET		BIT(6)
++#define FTS_TOUCHTYPES			(FTS_TOUCHTYPE_FINGER | FTS_TOUCHTYPE_PALM | \
++					 FTS_TOUCHTYPE_WET)
++
++#define FTS_EVENT_SIZE			16
++#define FTS_EVENT_COUNT			31
++#define FTS_MAX_FINGERS			10
++
++/* Byte 0 of every event: event ID [1:0], then type-specific fields */
++#define FTS_EID(b)			((b) & 0x03)
++#define FTS_EID_COORDINATE		0
++#define FTS_EID_STATUS			1
++#define FTS_STATUS_TYPE(b)		(((b) >> 2) & 0x0f)
++#define FTS_STATUS_TYPE_INFO		2
++#define FTS_STATUS_INFO_READY		0x00
++#define FTS_EVENT_ERROR			0xf3
++
++/* Coordinate event */
++#define FTS_COORD_TID(b)		(((b) >> 2) & 0x0f)
++#define FTS_COORD_STATE(b)		((b) >> 6)
++#define FTS_COORD_STATE_RELEASE		3
++#define FTS_COORD_TYPE(e)		((((e)[6] >> 6) << 2) | ((e)[7] >> 6))
++#define FTS_TTYPE_PALM			5
++
++/* Every event: number of events still queued, byte 7 [4:0] */
++#define FTS_LEFT_EVENTS(e)		((e)[7] & 0x1f)
++
++struct fts9cu80f {
++	struct i2c_client *client;
++	struct input_dev *input;
++	struct touchscreen_properties prop;
++	struct regulator_bulk_data supplies[2];
++	u8 events[FTS_EVENT_SIZE * FTS_EVENT_COUNT];
++};
++
++static int fts_read(struct fts9cu80f *ts, u8 cmd, void *buf, u16 len)
++{
++	struct i2c_msg msgs[] = {
++		{ .addr = ts->client->addr, .len = 1, .buf = &cmd },
++		{ .addr = ts->client->addr, .flags = I2C_M_RD, .len = len, .buf = buf },
++	};
++	int ret;
++
++	ret = i2c_transfer(ts->client->adapter, msgs, ARRAY_SIZE(msgs));
++	if (ret < 0)
++		return ret;
++
++	return ret == ARRAY_SIZE(msgs) ? 0 : -EIO;
++}
++
++static int fts_write(struct fts9cu80f *ts, const u8 *buf, int len)
++{
++	int ret = i2c_master_send(ts->client, buf, len);
++
++	if (ret < 0)
++		return ret;
++
++	return ret == len ? 0 : -EIO;
++}
++
++static int fts_command(struct fts9cu80f *ts, u8 cmd)
++{
++	return fts_write(ts, &cmd, 1);
++}
++
++static int fts_set_scan_mode(struct fts9cu80f *ts, u8 mode)
++{
++	u8 cmd[] = { FTS_CMD_SCAN_MODE, 0x00, mode };
++
++	return fts_write(ts, cmd, sizeof(cmd));
++}
++
++/* After a reset the controller queues an INFO/READY status event. */
++static int fts_wait_for_ready(struct fts9cu80f *ts)
++{
++	u8 *ev = ts->events;
++	int i, ret;
++
++	for (i = 0; i < 50; i++) {
++		ret = fts_read(ts, FTS_CMD_READ_ONE_EVENT, ev, FTS_EVENT_SIZE);
++		if (ret)
++			return ret;
++
++		if (FTS_EID(ev[0]) == FTS_EID_STATUS &&
++		    FTS_STATUS_TYPE(ev[0]) == FTS_STATUS_TYPE_INFO &&
++		    ev[1] == FTS_STATUS_INFO_READY)
++			return 0;
++
++		if (ev[0] == FTS_EVENT_ERROR)
++			dev_warn(&ts->client->dev, "error event %*ph\n", 8, ev);
++
++		/* An empty queue: the controller is still booting. */
++		if (!ev[0])
++			msleep(10);
++	}
++
++	return -ETIMEDOUT;
++}
++
++static int fts_reset(struct fts9cu80f *ts)
++{
++	static const u8 reset[] = { FTS_CMD_REG, 0x20, 0x00, 0x00, 0x24, 0x81 };
++	int ret;
++
++	ret = fts_write(ts, reset, sizeof(reset));
++	if (ret)
++		return ret;
++
++	msleep(20);
++
++	return fts_wait_for_ready(ts);
++}
++
++static int fts_hw_init(struct fts9cu80f *ts)
++{
++	u8 touch_type[] = { FTS_CMD_TOUCH_TYPE, FTS_TOUCHTYPES & 0xff, FTS_TOUCHTYPES >> 8 };
++	int ret;
++
++	ret = fts_reset(ts);
++	if (ret)
++		return ret;
++
++	ret = fts_write(ts, touch_type, sizeof(touch_type));
++	if (ret)
++		return ret;
++
++	msleep(10);
++
++	/* Stock recalibrates on every power-up as well. */
++	ret = fts_command(ts, FTS_CMD_FORCE_CALIBRATION);
++	if (ret)
++		return ret;
++
++	msleep(100);
++
++	return fts_command(ts, FTS_CMD_CLEAR_ALL_EVENT);
++}
++
++static void fts_report_coordinate(struct fts9cu80f *ts, const u8 *ev)
++{
++	struct input_dev *input = ts->input;
++	unsigned int tid = FTS_COORD_TID(ev[0]);
++	bool down = FTS_COORD_STATE(ev[0]) != FTS_COORD_STATE_RELEASE;
++	unsigned int x, y;
++
++	if (tid >= FTS_MAX_FINGERS)
++		return;
++
++	input_mt_slot(input, tid);
++	input_mt_report_slot_state(input,
++				   FTS_COORD_TYPE(ev) == FTS_TTYPE_PALM ?
++				   MT_TOOL_PALM : MT_TOOL_FINGER, down);
++	if (!down)
++		return;
++
++	x = (ev[1] << 4) | (ev[3] >> 4);
++	y = (ev[2] << 4) | (ev[3] & 0x0f);
++	touchscreen_report_pos(input, &ts->prop, x, y, true);
++	input_report_abs(input, ABS_MT_TOUCH_MAJOR, ev[4]);
++	input_report_abs(input, ABS_MT_TOUCH_MINOR, ev[5]);
++	input_report_abs(input, ABS_MT_PRESSURE, (ev[6] & 0x3f) ?: 1);
++}
++
++static irqreturn_t fts_irq(int irq, void *dev_id)
++{
++	struct fts9cu80f *ts = dev_id;
++	unsigned int left, i;
++	int ret;
++
++	ret = fts_read(ts, FTS_CMD_READ_ONE_EVENT, ts->events, FTS_EVENT_SIZE);
++	if (ret || !ts->events[0])
++		return IRQ_HANDLED;
++
++	left = FTS_LEFT_EVENTS(ts->events);
++	if (left >= FTS_EVENT_COUNT) {
++		fts_command(ts, FTS_CMD_CLEAR_ALL_EVENT);
++		left = 0;
++	} else if (left) {
++		ret = fts_read(ts, FTS_CMD_READ_ALL_EVENT, ts->events + FTS_EVENT_SIZE,
++			       left * FTS_EVENT_SIZE);
++		if (ret)
++			left = 0;
++	}
++
++	for (i = 0; i <= left; i++) {
++		const u8 *ev = ts->events + i * FTS_EVENT_SIZE;
++
++		if (FTS_EID(ev[0]) == FTS_EID_COORDINATE)
++			fts_report_coordinate(ts, ev);
++		else if (ev[0] == FTS_EVENT_ERROR)
++			dev_dbg(&ts->client->dev, "error event %*ph\n", 8, ev);
++	}
++
++	input_mt_sync_frame(ts->input);
++	input_sync(ts->input);
++
++	return IRQ_HANDLED;
++}
++
++static int fts_input_open(struct input_dev *input)
++{
++	struct fts9cu80f *ts = input_get_drvdata(input);
++
++	return fts_set_scan_mode(ts, FTS_SCAN_MS_SS);
++}
++
++static void fts_input_close(struct input_dev *input)
++{
++	struct fts9cu80f *ts = input_get_drvdata(input);
++
++	fts_set_scan_mode(ts, FTS_SCAN_OFF);
++}
++
++static void fts_power_off(void *data)
++{
++	struct fts9cu80f *ts = data;
++
++	regulator_bulk_disable(ARRAY_SIZE(ts->supplies), ts->supplies);
++}
++
++static int fts_power_on(struct fts9cu80f *ts)
++{
++	int ret;
++
++	ret = regulator_bulk_enable(ARRAY_SIZE(ts->supplies), ts->supplies);
++	if (ret)
++		return ret;
++
++	/* Stock waits 20 ms after power-up; fts_wait_for_ready() covers the rest. */
++	msleep(20);
++
++	ret = fts_hw_init(ts);
++	if (ret)
++		fts_power_off(ts);
++
++	return ret;
++}
++
++static int fts_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	struct fts9cu80f *ts;
++	u8 info[11], ver[8];
++	u16 max_x, max_y;
++	int ret;
++
++	ts = devm_kzalloc(dev, sizeof(*ts), GFP_KERNEL);
++	if (!ts)
++		return -ENOMEM;
++
++	ts->client = client;
++	i2c_set_clientdata(client, ts);
++
++	ts->supplies[0].supply = "vdd";
++	ts->supplies[1].supply = "avdd";
++	ret = devm_regulator_bulk_get(dev, ARRAY_SIZE(ts->supplies), ts->supplies);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to get supplies\n");
++
++	ret = fts_power_on(ts);
++	if (ret)
++		return dev_err_probe(dev, ret, "controller did not come up\n");
++
++	ret = devm_add_action_or_reset(dev, fts_power_off, ts);
++	if (ret)
++		return ret;
++
++	ret = fts_read(ts, FTS_CMD_FW_VERSION, ver, sizeof(ver));
++	if (!ret)
++		dev_info(dev, "firmware %*phN\n", (int)sizeof(ver), ver);
++
++	/* Panel info: the coordinate range, big endian */
++	ret = fts_read(ts, FTS_CMD_PANEL_INFO, info, sizeof(info));
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to read panel info\n");
++	max_x = get_unaligned_be16(&info[0]);
++	max_y = get_unaligned_be16(&info[2]);
++
++	ts->input = devm_input_allocate_device(dev);
++	if (!ts->input)
++		return -ENOMEM;
++
++	ts->input->name = "fts9cu80f";
++	ts->input->id.bustype = BUS_I2C;
++	ts->input->open = fts_input_open;
++	ts->input->close = fts_input_close;
++
++	input_set_abs_params(ts->input, ABS_MT_POSITION_X, 0, max_x, 0, 0);
++	input_set_abs_params(ts->input, ABS_MT_POSITION_Y, 0, max_y, 0, 0);
++	input_set_abs_params(ts->input, ABS_MT_TOUCH_MAJOR, 0, 255, 0, 0);
++	input_set_abs_params(ts->input, ABS_MT_TOUCH_MINOR, 0, 255, 0, 0);
++	input_set_abs_params(ts->input, ABS_MT_PRESSURE, 0, 63, 0, 0);
++	input_set_abs_params(ts->input, ABS_MT_TOOL_TYPE, 0, MT_TOOL_MAX, 0, 0);
++	touchscreen_parse_properties(ts->input, true, &ts->prop);
++
++	ret = input_mt_init_slots(ts->input, FTS_MAX_FINGERS, INPUT_MT_DIRECT);
++	if (ret)
++		return ret;
++
++	input_set_drvdata(ts->input, ts);
++
++	ret = devm_request_threaded_irq(dev, client->irq, NULL, fts_irq,
++					IRQF_ONESHOT, "fts9cu80f", ts);
++	if (ret)
++		return ret;
++
++	return input_register_device(ts->input);
++}
++
++static int fts_suspend(struct device *dev)
++{
++	struct fts9cu80f *ts = dev_get_drvdata(dev);
++
++	disable_irq(ts->client->irq);
++	fts_power_off(ts);
++
++	return 0;
++}
++
++static int fts_resume(struct device *dev)
++{
++	struct fts9cu80f *ts = dev_get_drvdata(dev);
++	int ret;
++
++	ret = fts_power_on(ts);
++	if (ret)
++		return ret;
++
++	enable_irq(ts->client->irq);
++
++	guard(mutex)(&ts->input->mutex);
++	if (input_device_enabled(ts->input))
++		return fts_set_scan_mode(ts, FTS_SCAN_MS_SS);
++
++	return 0;
++}
++
++static DEFINE_SIMPLE_DEV_PM_OPS(fts_pm_ops, fts_suspend, fts_resume);
++
++static const struct of_device_id fts_of_match[] = {
++	{ .compatible = "st,fts9cu80f" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, fts_of_match);
++
++static const struct i2c_device_id fts_id[] = {
++	{ "fts9cu80f" },
++	{ }
++};
++MODULE_DEVICE_TABLE(i2c, fts_id);
++
++static struct i2c_driver fts_driver = {
++	.driver = {
++		.name = "fts9cu80f",
++		.of_match_table = fts_of_match,
++		.pm = pm_sleep_ptr(&fts_pm_ops),
++	},
++	.probe = fts_probe,
++	.id_table = fts_id,
++};
++module_i2c_driver(fts_driver);
++
++MODULE_AUTHOR("Noa Himesaka <himesaka@noa.codes>");
++MODULE_DESCRIPTION("STMicroelectronics FTS9CU80F touchscreen with Samsung firmware");
++MODULE_LICENSE("GPL");

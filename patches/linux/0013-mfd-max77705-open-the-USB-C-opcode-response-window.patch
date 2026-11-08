@@ -1,0 +1,21 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] mfd: max77705: open the USB-C opcode response window
+
+The USB-C block answers its opcodes at 0x51 with up to 32 data bytes.
+Extend the regmap to 0x71 so the charger can read the answers.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+---
+diff --git a/drivers/mfd/max77705.c b/drivers/mfd/max77705.c
+--- a/drivers/mfd/max77705.c
++++ b/drivers/mfd/max77705.c
+@@ -105,7 +105,8 @@ static const struct regmap_irq_chip max77705_irq_chip = {
+ static const struct regmap_config max77705_usbc_regmap_config = {
+ 	.reg_bits = 8,
+ 	.val_bits = 8,
+-	.max_register = MAX77705_USBC_OPCODE_WRITE_END,
++	/* the opcode response window, 0x51 and 32 data bytes */
++	.max_register = 0x71,
+ };
+ 
+ /*

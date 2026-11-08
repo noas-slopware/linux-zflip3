@@ -1,0 +1,37 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] clk: qcom: gcc-sm8350: keep the PCIe GDSCs in retention
+
+The Qualcomm PCIe controller keeps the link up across system suspend
+when an endpoint is present (the QCA6390 Wi-Fi on PCIe0 on the Galaxy
+Z Flip3). With PWRSTS_OFF_ON, genpd switches pcie_0_gdsc off in the
+noirq phase of suspend-to-idle and the SoC cold-resets there: pm_test
+"devices" survives, "platform" resets.
+
+Let the PCIe GDSCs only go to retention, as SM8450, SM8550 and SC8280XP
+already do. The same fix was found on the REDMAGIC 6 (SteamOS-ARM-
+Handhelds, kernel-sm8350 patch 0014). s2idle now suspends and resumes,
+woken by the RTC alarm and by the fold sensor.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+---
+diff --git a/drivers/clk/qcom/gcc-sm8350.c b/drivers/clk/qcom/gcc-sm8350.c
+--- a/drivers/clk/qcom/gcc-sm8350.c
++++ b/drivers/clk/qcom/gcc-sm8350.c
+@@ -3421,7 +3421,7 @@ static struct gdsc pcie_0_gdsc = {
+ 	.pd = {
+ 		.name = "pcie_0_gdsc",
+ 	},
+-	.pwrsts = PWRSTS_OFF_ON,
++	.pwrsts = PWRSTS_RET_ON,
+ };
+ 
+ static struct gdsc pcie_1_gdsc = {
+@@ -3429,7 +3429,7 @@ static struct gdsc pcie_1_gdsc = {
+ 	.pd = {
+ 		.name = "pcie_1_gdsc",
+ 	},
+-	.pwrsts = PWRSTS_OFF_ON,
++	.pwrsts = PWRSTS_RET_ON,
+ };
+ 
+ static struct gdsc ufs_card_gdsc = {

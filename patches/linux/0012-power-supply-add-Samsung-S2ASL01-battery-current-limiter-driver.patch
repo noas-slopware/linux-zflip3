@@ -1,0 +1,1487 @@
+From 6f8925eb8e8fe78adc8d497c17edb571a186e8ed Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Sat, 7 Nov 2026 04:09:44 +0900
+Subject: [PATCH] power: supply: add the Samsung S2ASL01 battery current
+ limiter
+
+The S2ASL01 sits between the charger output and a single battery cell
+and limits the current into and out of that cell. On the Galaxy Z Flip3
+(SM-F711N) two of them share i2c1, one per cell, at addresses 0x38 and
+0x39.
+
+Port Samsung's s2asl01_limiter driver to mainline: the register map, the
+current and voltage encodings (including the two charge current tables
+that depend on the revision and the IC generation), the full
+initialisation sequence and the power meter health check. The charging
+current split between the two cells is policy and stays out: Samsung
+does it in sec_battery.c, which needs the whole sec_battery framework,
+so this driver only programs the limit it is asked for, and each cell
+exposes the limit through CURRENT_MAX and a charge_current_limit
+attribute.
+
+The vendor EXT power supply properties have no mainline equivalent. They
+become sysfs attributes next to the four standard properties, so
+everything the vendor driver could do stays reachable.
+
+Nothing polls: stock only reads the health check from its battery
+monitor, so this driver computes it on read instead.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+---
+ .../power/supply/samsung,s2asl01.yaml         |  123 ++
+ drivers/power/supply/Kconfig                  |   12 +
+ drivers/power/supply/Makefile                 |    1 +
+ drivers/power/supply/s2asl01_limiter.c        | 1276 +++++++++++++++++
+ 4 files changed, 1412 insertions(+)
+ create mode 100644 Documentation/devicetree/bindings/power/supply/samsung,s2asl01.yaml
+ create mode 100644 drivers/power/supply/s2asl01_limiter.c
+
+diff --git a/Documentation/devicetree/bindings/power/supply/samsung,s2asl01.yaml b/Documentation/devicetree/bindings/power/supply/samsung,s2asl01.yaml
+new file mode 100644
+index 0000000..f9e903e
+--- /dev/null
++++ b/Documentation/devicetree/bindings/power/supply/samsung,s2asl01.yaml
+@@ -0,0 +1,123 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/power/supply/samsung,s2asl01.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: Samsung S2ASL01 battery current limiter
++
++maintainers:
++  - Noa Himesaka <himesaka@noa.codes>
++
++description: |
++  The S2ASL01 is a battery protection and current limiting IC that sits
++  between the charger output and a single battery cell. It limits the
++  current into the cell (fast and trickle charge) and the current out of
++  it, can gate the cell with its enable pins, measures the cell voltage,
++  the charging current, the discharge current and the input voltage, and
++  can cut the cell off at a configurable end-of-charge voltage and
++  current.
++
++  A phone with two battery cells carries one S2ASL01 per cell, both on the
++  same I2C bus. The cell an instance belongs to has to be described,
++  because the charger splits its constant current between the two cells
++  and the driver names each instance after its cell.
++
++properties:
++  compatible:
++    const: samsung,s2asl01-limiter
++
++  reg:
++    maxItems: 1
++
++  samsung,cell:
++    description: Which of the battery's cells this limiter is in front of.
++    $ref: /schemas/types.yaml#/definitions/string
++    enum: [main, sub]
++
++  battery-detect-gpios:
++    description: |
++      GPIO that is pulled low when the cell's connector is mated. It is
++      only ever read.
++    maxItems: 1
++
++  battery-enable-gpios:
++    description: |
++      GPIO that enables the cell's switch. Active low; the driver leaves
++      the pin alone and only reports its state.
++    maxItems: 1
++
++  battery-enable2-gpios:
++    description: |
++      Second enable pin of the main cell's switch, which Samsung's battery
++      driver uses to power-cycle the limiter when its power meter stops
++      converting. The driver leaves the pin alone and only reports its
++      state.
++    maxItems: 1
++
++  samsung,charge-current-limit-microamp:
++    description: |
++      Fast charge current limit programmed at probe, before any policy
++      layer asks for a share of the charger's constant current.
++    $ref: /schemas/types.yaml#/definitions/uint32
++    default: 1650000
++
++  samsung,eoc-current-microamp:
++    description: Charge termination current.
++    $ref: /schemas/types.yaml#/definitions/uint32
++    default: 200000
++
++  samsung,eoc-voltage-microvolt:
++    description: Charge termination voltage.
++    $ref: /schemas/types.yaml#/definitions/uint32
++    default: 4350000
++
++  samsung,powermeter-hysteresis-levels:
++    description: |
++      Hysteresis of the power meter's four channels, in register steps:
++      input voltage, cell voltage, charging current and discharging
++      current. Each level is three bits wide in the register and 4 is the
++      value Samsung programs.
++    $ref: /schemas/types.yaml#/definitions/uint32-array
++    minItems: 4
++    maxItems: 4
++    default: [4, 4, 4, 4]
++
++  samsung,charge-current-fully-turn-on:
++    description: |
++      Leave the charging path unregulated, so that it passes the switch's
++      full current instead of the programmed limit.
++    type: boolean
++
++  samsung,thermal-shutdown-enable:
++    description: Enable the thermal shutdown comparator.
++    type: boolean
++
++required:
++  - compatible
++  - reg
++  - samsung,cell
++
++allOf:
++  - $ref: power-supply.yaml#
++
++unevaluatedProperties: false
++
++examples:
++  - |
++    #include <dt-bindings/gpio/gpio.h>
++
++    i2c {
++        #address-cells = <1>;
++        #size-cells = <0>;
++
++        limiter@38 {
++            compatible = "samsung,s2asl01-limiter";
++            reg = <0x38>;
++            samsung,cell = "main";
++
++            battery-detect-gpios = <&tlmm 131 GPIO_ACTIVE_LOW>;
++            battery-enable-gpios = <&tlmm 86 GPIO_ACTIVE_LOW>;
++            battery-enable2-gpios = <&tlmm 74 GPIO_ACTIVE_LOW>;
++        };
++    };
+diff --git a/drivers/power/supply/Kconfig b/drivers/power/supply/Kconfig
+index b89ef40..58cd66e 100644
+--- a/drivers/power/supply/Kconfig
++++ b/drivers/power/supply/Kconfig
+@@ -863,6 +863,18 @@ config CHARGER_RK817
+ 	help
+ 	  Say Y to include support for Rockchip RK817 Battery Charger.
+ 
++config CHARGER_S2ASL01
++	tristate "Samsung S2ASL01 battery current limiter"
++	depends on I2C
++	depends on OF
++	select REGMAP_I2C
++	help
++	  Say Y here to enable support for the Samsung S2ASL01 battery
++	  current limiter, which sits between the charger and a single
++	  battery cell and limits that cell's charge and discharge current.
++	  Samsung phones with two battery cells (the Galaxy Z Flip3 and
++	  others) carry one limiter per cell.
++
+ config CHARGER_S2M
+ 	tristate "Samsung S2M series PMIC battery charger support"
+ 	depends on EXTCON_S2M
+diff --git a/drivers/power/supply/Makefile b/drivers/power/supply/Makefile
+index f3c0d10..10a4512 100644
+--- a/drivers/power/supply/Makefile
++++ b/drivers/power/supply/Makefile
+@@ -108,6 +108,7 @@ obj-$(CONFIG_CHARGER_BQ25980)	+= bq25980_charger.o
+ obj-$(CONFIG_CHARGER_BQ25630)	+= bq25630_charger.o
+ obj-$(CONFIG_CHARGER_BQ256XX)	+= bq256xx_charger.o
+ obj-$(CONFIG_CHARGER_RK817)	+= rk817_charger.o
++obj-$(CONFIG_CHARGER_S2ASL01)	+= s2asl01_limiter.o
+ obj-$(CONFIG_CHARGER_S2M)	+= s2m-charger.o
+ obj-$(CONFIG_CHARGER_SGM41542)	+= sgm41542_charger.o
+ obj-$(CONFIG_CHARGER_SMB347)	+= smb347-charger.o
+diff --git a/drivers/power/supply/s2asl01_limiter.c b/drivers/power/supply/s2asl01_limiter.c
+new file mode 100644
+index 0000000..6947d09
+--- /dev/null
++++ b/drivers/power/supply/s2asl01_limiter.c
+@@ -0,0 +1,1276 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Samsung S2ASL01 battery current limiter
++ *
++ * Copyright (C) 2021 Samsung Electronics
++ * Copyright (C) 2026 Noa Himesaka <himesaka@noa.codes>
++ *
++ * The S2ASL01 sits between the charger and one battery cell and limits the
++ * current into and out of that cell. A phone with two cells carries one per
++ * cell; on the Galaxy Z Flip3 (SM-F711N) the main cell is at address 0x38 and
++ * the sub cell at 0x39, both on i2c1. The charger's constant current is split
++ * between the two cells by policy (Samsung does it in sec_battery.c) and each
++ * instance only programs the limit it is asked for.
++ *
++ * Register addresses, the current and voltage encodings, the initialisation
++ * sequence and the quirks around the charge and discharge mode fields are
++ * ported from Samsung's s2asl01_limiter.c and s2asl01_limiter.h. Every write
++ * below carries the stock line it comes from.
++ */
++
++#include <linux/delay.h>
++#include <linux/device.h>
++#include <linux/gpio/consumer.h>
++#include <linux/i2c.h>
++#include <linux/module.h>
++#include <linux/mod_devicetable.h>
++#include <linux/of.h>
++#include <linux/power_supply.h>
++#include <linux/property.h>
++#include <linux/regmap.h>
++#include <linux/sysfs.h>
++
++/* Register map (s2asl01_limiter.h:29-62) */
++#define S2ASL01_REG_CORE_INT1		0x00
++#define S2ASL01_REG_CORE_INT2		0x01
++#define S2ASL01_REG_PM_INT		0x02
++#define S2ASL01_REG_CORE_INT1M		0x03
++#define S2ASL01_REG_CORE_INT2M		0x04
++#define S2ASL01_REG_PM_INTM		0x05
++#define S2ASL01_REG_CORE_STATUS1	0x06
++#define S2ASL01_REG_VAL1_VCHG		0x07
++#define S2ASL01_REG_VAL2_VCHG		0x08
++#define S2ASL01_REG_VAL1_VBAT		0x09
++#define S2ASL01_REG_VAL2_VBAT		0x0a
++#define S2ASL01_REG_VAL1_ICHG		0x0b
++#define S2ASL01_REG_VAL2_ICHG		0x0c
++#define S2ASL01_REG_VAL1_IDISCHG	0x0d
++#define S2ASL01_REG_VAL2_IDISCHG	0x0e
++#define S2ASL01_REG_CORE_CTRL1		0x0f
++#define S2ASL01_REG_CORE_CTRL2		0x10
++#define S2ASL01_REG_CORE_CTRL3		0x11
++#define S2ASL01_REG_CORE_CTRL4		0x12
++#define S2ASL01_REG_CORE_CTRL5		0x13
++#define S2ASL01_REG_CORE_CTRL6		0x14
++#define S2ASL01_REG_CORE_CTRL7		0x15
++#define S2ASL01_REG_CORE_CTRL8		0x16
++#define S2ASL01_REG_TOP_RECHG_CTRL1	0x17
++#define S2ASL01_REG_TOP_EOC_CTRL1	0x18
++#define S2ASL01_REG_TOP_EOC_CTRL2	0x19
++#define S2ASL01_REG_COMASK_CALDIS	0x1a
++#define S2ASL01_REG_PM_ENABLE		0x1b
++#define S2ASL01_REG_PM_HYST_LEVEL1	0x1c
++#define S2ASL01_REG_PM_HYST_LEVEL2	0x1d
++#define S2ASL01_REG_PM_V_OPTION		0x1e
++#define S2ASL01_REG_PM_I_OPTION		0x1f
++#define S2ASL01_REG_ID			0x29
++#define S2ASL01_REG_COMMON1		0x40
++
++#define S2ASL01_PM_ENABLE_MASK		0xf0	/* VCHG, VBAT, ICHG, IDISCHG */
++#define S2ASL01_PM_HYST_MASK		0xfc
++#define S2ASL01_CORE1_INT_MASK		0x0f
++#define S2ASL01_CORE2_INT_MASK		0x03
++#define S2ASL01_PM_INT_MASK		0xfe
++#define S2ASL01_COMMON1_TSD_EN		0x40
++
++#define S2ASL01_CTRL1_RESTART		BIT(1)
++#define S2ASL01_CTRL1_EOC		BIT(0)
++#define S2ASL01_CTRL2_SUB_PWR_OFF_MODE	BIT(0)
++#define S2ASL01_CTRL3_INOK		BIT(7)
++#define S2ASL01_CTRL3_SUPPLEMENT	BIT(6)
++#define S2ASL01_CTRL3_DIS_MODE_MASK	GENMASK(3, 2)
++#define S2ASL01_CTRL3_DIS_MODE_SHIFT	2
++#define S2ASL01_CTRL3_CHG_MODE_MASK	GENMASK(1, 0)
++#define S2ASL01_CTRL3_CHG_MODE_SHIFT	0
++#define S2ASL01_CTRL4_CURRENT_MASK	GENMASK(5, 0)
++#define S2ASL01_CTRL5_CURRENT_MASK	GENMASK(3, 0)
++#define S2ASL01_CTRL6_CURRENT_MASK	GENMASK(6, 0)
++#define S2ASL01_EOC_CTRL2_CURRENT_MASK	GENMASK(4, 0)
++
++/* Raw ADC LSB (s2asl01_limiter.c:270, 297, 326, 352) */
++#define S2ASL01_VOLT_LSB_UV		1250
++
++/* Stock DT defaults, used when the properties are absent (c:963-1017) */
++#define S2ASL01_DEFAULT_CHARGE_CURRENT_UA	1650000
++#define S2ASL01_DEFAULT_EOC_CURRENT_UA		200000
++#define S2ASL01_DEFAULT_EOC_VOLTAGE_UV		4350000
++#define S2ASL01_DEFAULT_HYST_LEVEL		4
++#define S2ASL01_PM_SETTLE_MS			100
++
++/* Charge and discharge mode field, CTRL3 (h:122-127) */
++enum s2asl01_mode {
++	S2ASL01_CURRENT_REGULATION = 0,
++	S2ASL01_CURRENT_VOLTAGE_REGULATION,
++	S2ASL01_CURRENT_SMARTER_VOLTAGE_REGULATION,
++	S2ASL01_NO_REGULATION_FULLY_ON,
++};
++
++/* IC generation, from the ID register (h:164-167) */
++enum s2asl01_version {
++	S2ASL01_VER_6030 = 0,
++	S2ASL01_VER_6130,
++};
++
++struct s2asl01_chip {
++	struct device *dev;
++	struct regmap *regmap;
++	struct power_supply *psy;
++	struct power_supply_desc psy_desc;
++	const char *psy_name;
++	struct gpio_desc *det_gpio;
++	struct gpio_desc *enb_gpio;
++	struct gpio_desc *enb2_gpio;
++
++	/* Static configuration, from DT */
++	unsigned int charge_current_ua;
++	unsigned int eoc_current_ua;
++	unsigned int eoc_voltage_uv;
++	unsigned int hyst_levels[4];
++	bool fully_on_at_init;
++	bool tsd_enable;
++
++	/* Read from the ID register: they select the current encodings */
++	unsigned int rev_id;
++	unsigned int es_num;
++	enum s2asl01_version ic_version;
++
++	/* State that has no read-back of its own */
++	bool in_ok;
++	bool supplement_mode;
++	bool power_meter;
++	bool tsd;
++};
++
++static const struct regmap_config s2asl01_regmap_config = {
++	.reg_bits = 8,
++	.val_bits = 8,
++	.max_register = S2ASL01_REG_COMMON1,
++};
++
++static int s2asl01_read_raw12(struct s2asl01_chip *chip, unsigned int reg,
++			      unsigned int *raw)
++{
++	unsigned int hi, lo;
++	int ret;
++
++	ret = regmap_read(chip->regmap, reg, &hi);
++	if (ret)
++		return ret;
++
++	ret = regmap_read(chip->regmap, reg + 1, &lo);
++	if (ret)
++		return ret;
++
++	*raw = ((hi & 0xff) << 4) | ((lo & 0xf0) >> 4);
++
++	return 0;
++}
++
++/* s2asl01_get_vchg() */
++static int s2asl01_get_vchg_uv(struct s2asl01_chip *chip, int *uv)
++{
++	unsigned int raw;
++	int ret;
++
++	ret = s2asl01_read_raw12(chip, S2ASL01_REG_VAL1_VCHG, &raw);
++	if (ret)
++		return ret;
++
++	*uv = raw * S2ASL01_VOLT_LSB_UV;
++
++	return 0;
++}
++
++/* s2asl01_get_vbat() */
++static int s2asl01_get_vbat_uv(struct s2asl01_chip *chip, int *uv)
++{
++	unsigned int raw;
++	int ret;
++
++	ret = s2asl01_read_raw12(chip, S2ASL01_REG_VAL1_VBAT, &raw);
++	if (ret)
++		return ret;
++
++	*uv = raw * S2ASL01_VOLT_LSB_UV;
++
++	return 0;
++}
++
++/* s2asl01_get_ichg(): (raw * 15625) / 10 uA */
++static int s2asl01_get_ichg_ua(struct s2asl01_chip *chip, int *ua)
++{
++	unsigned int raw;
++	int ret;
++
++	ret = s2asl01_read_raw12(chip, S2ASL01_REG_VAL1_ICHG, &raw);
++	if (ret)
++		return ret;
++
++	*ua = (raw * 15625) / 10;
++
++	return 0;
++}
++
++/* s2asl01_get_idischg(): (raw * 15625) / 10 uA */
++static int s2asl01_get_idischg_ua(struct s2asl01_chip *chip, int *ua)
++{
++	unsigned int raw;
++	int ret;
++
++	ret = s2asl01_read_raw12(chip, S2ASL01_REG_VAL1_IDISCHG, &raw);
++	if (ret)
++		return ret;
++
++	*ua = (raw * 15625) / 10;
++
++	return 0;
++}
++
++/*
++ * Charge current limit, CTRL4. Two encodings exist: 50 mA per step from 50 mA
++ * (all of the 6030 parts and the 6130 ES) and 75 mA per step up to 350 mA, then
++ * 50 mA per step, on production 6130 parts (c:394-456).
++ */
++static int s2asl01_set_charge_current_limit(struct s2asl01_chip *chip,
++					    unsigned int ua)
++{
++	unsigned int ma = ua / 1000;
++	unsigned int data;
++
++	if (chip->rev_id == 0 || chip->ic_version == S2ASL01_VER_6130) {
++		if (ma <= 50)
++			data = 0x00;
++		else if (ma <= 3200)
++			data = (ma / 50) - 1;
++		else
++			data = 0x3f;
++	} else {
++		if (ma <= 50)
++			data = 0x00;
++		else if (ma <= 350)
++			data = (ma - 50) / 75;
++		else if (ma <= 3300)
++			data = ((ma - 350) / 50) + 4;
++		else
++			data = 0x3f;
++	}
++
++	return regmap_update_bits(chip->regmap, S2ASL01_REG_CORE_CTRL4,
++				  S2ASL01_CTRL4_CURRENT_MASK, data);
++}
++
++static int s2asl01_get_charge_current_limit(struct s2asl01_chip *chip,
++					    unsigned int *ua)
++{
++	unsigned int data;
++	unsigned int ma;
++	int ret;
++
++	ret = regmap_read(chip->regmap, S2ASL01_REG_CORE_CTRL4, &data);
++	if (ret)
++		return ret;
++
++	data &= S2ASL01_CTRL4_CURRENT_MASK;
++
++	if (chip->rev_id == 0 || chip->ic_version == S2ASL01_VER_6130) {
++		ma = (data + 1) * 50;
++	} else {
++		if (data <= 0x04)
++			ma = (data * 75) + 50;
++		else
++			ma = ((data - 4) * 50) + 350;
++	}
++
++	*ua = ma * 1000;
++
++	return 0;
++}
++
++/* Trickle charge current limit, CTRL5 (c:458-532) */
++static int s2asl01_set_trickle_current_limit(struct s2asl01_chip *chip,
++					     unsigned int ua)
++{
++	unsigned int ma = ua / 1000;
++	unsigned int data;
++
++	if (chip->ic_version == S2ASL01_VER_6130) {
++		if (ma <= 50)
++			data = 0x00;
++		else if (ma <= 550)
++			data = (ma / 50) - 1;
++		else
++			data = 0x0a;
++	} else if (chip->rev_id == 0) {
++		if (ma <= 50)
++			data = 0x00;
++		else if (ma <= 500)
++			data = (ma / 50) - 1;
++		else
++			data = 0x09;
++	} else {
++		if (ma <= 50)
++			data = 0x00;
++		else if (ma <= 350)
++			data = (ma - 50) / 75;
++		else if (ma <= 550)
++			data = ((ma - 350) / 50) + 4;
++		else
++			data = 0x08;
++	}
++
++	return regmap_update_bits(chip->regmap, S2ASL01_REG_CORE_CTRL5,
++				  S2ASL01_CTRL5_CURRENT_MASK, data);
++}
++
++static int s2asl01_get_trickle_current_limit(struct s2asl01_chip *chip,
++					     unsigned int *ua)
++{
++	unsigned int data;
++	unsigned int ma;
++	int ret;
++
++	ret = regmap_read(chip->regmap, S2ASL01_REG_CORE_CTRL5, &data);
++	if (ret)
++		return ret;
++
++	data &= S2ASL01_CTRL5_CURRENT_MASK;
++
++	if (chip->ic_version == S2ASL01_VER_6130) {
++		if (data > 0x0a)
++			data = 0x0a;
++		ma = (data + 1) * 50;
++	} else if (chip->rev_id == 0) {
++		if (data > 0x09)
++			data = 0x09;
++		ma = (data + 1) * 50;
++	} else {
++		if (data > 0x08)
++			data = 0x08;
++		if (data <= 0x04)
++			ma = (data * 75) + 50;
++		else
++			ma = ((data - 4) * 50) + 350;
++	}
++
++	*ua = ma * 1000;
++
++	return 0;
++}
++
++/* Discharge current limit, CTRL6 (c:534-588) */
++static int s2asl01_set_dischg_current_limit(struct s2asl01_chip *chip,
++					    unsigned int ua)
++{
++	unsigned int ma = ua / 1000;
++	unsigned int data;
++
++	if (chip->rev_id == 0) {
++		if (ma <= 50)
++			data = 0x00;
++		else if (ma <= 6400)
++			data = (ma / 50) - 1;
++		else
++			data = 0x7f;
++	} else {
++		if (ma <= 50)
++			data = 0x00;
++		else if (ma <= 350)
++			data = (ma - 50) / 75;
++		else if (ma <= 6500)
++			data = ((ma - 350) / 50) + 4;
++		else
++			data = 0x7f;
++	}
++
++	return regmap_update_bits(chip->regmap, S2ASL01_REG_CORE_CTRL6,
++				  S2ASL01_CTRL6_CURRENT_MASK, data);
++}
++
++static int s2asl01_get_dischg_current_limit(struct s2asl01_chip *chip,
++					    unsigned int *ua)
++{
++	unsigned int data;
++	unsigned int ma;
++	int ret;
++
++	ret = regmap_read(chip->regmap, S2ASL01_REG_CORE_CTRL6, &data);
++	if (ret)
++		return ret;
++
++	data &= S2ASL01_CTRL6_CURRENT_MASK;
++
++	if (chip->rev_id == 0) {
++		ma = (data + 1) * 50;
++	} else {
++		if (data <= 0x04)
++			ma = (data * 75) + 50;
++		else
++			ma = ((data - 4) * 50) + 350;
++	}
++
++	*ua = ma * 1000;
++
++	return 0;
++}
++
++/*
++ * Recharge and EOC voltage share a formula and both clamp to 4000 mV and
++ * 4400 mV: 0x90 is 4000 mV, 0xb8 is 4400 mV, 10 mV per step between
++ * (c:590-646).
++ */
++static unsigned int s2asl01_voltage_code(unsigned int uv)
++{
++	unsigned int mv = uv / 1000;
++
++	if (mv < 4000)
++		return 0x90;
++	if (mv < 4400)
++		return (mv - 2560) / 10;
++
++	return 0xb8;
++}
++
++static int s2asl01_set_rechg_voltage(struct s2asl01_chip *chip,
++				     unsigned int uv)
++{
++	return regmap_write(chip->regmap, S2ASL01_REG_TOP_RECHG_CTRL1,
++			    s2asl01_voltage_code(uv));
++}
++
++static int s2asl01_get_rechg_voltage(struct s2asl01_chip *chip,
++				     unsigned int *uv)
++{
++	unsigned int data;
++	int ret;
++
++	ret = regmap_read(chip->regmap, S2ASL01_REG_TOP_RECHG_CTRL1, &data);
++	if (ret)
++		return ret;
++
++	*uv = ((data * 10) + 2560) * 1000;
++
++	return 0;
++}
++
++static int s2asl01_set_eoc_voltage(struct s2asl01_chip *chip,
++				   unsigned int uv)
++{
++	return regmap_write(chip->regmap, S2ASL01_REG_TOP_EOC_CTRL1,
++			    s2asl01_voltage_code(uv));
++}
++
++static int s2asl01_get_eoc_voltage(struct s2asl01_chip *chip,
++				   unsigned int *uv)
++{
++	unsigned int data;
++	int ret;
++
++	ret = regmap_read(chip->regmap, S2ASL01_REG_TOP_EOC_CTRL1, &data);
++	if (ret)
++		return ret;
++
++	*uv = ((data * 10) + 2560) * 1000;
++
++	return 0;
++}
++
++/*
++ * EOC current, TOP_EOC_CTRL2 bits 4:0, 25 mA per step. Anything below 100 mA
++ * is code 4 (100 mA), anything above 775 mA is 0x1f (c:648-676).
++ */
++static int s2asl01_set_eoc_current(struct s2asl01_chip *chip, unsigned int ua)
++{
++	unsigned int ma = ua / 1000;
++	unsigned int data;
++
++	if (ma < 100)
++		data = 0x04;
++	else if (ma < 775)
++		data = ma / 25;
++	else
++		data = 0x1f;
++
++	return regmap_update_bits(chip->regmap, S2ASL01_REG_TOP_EOC_CTRL2,
++				  S2ASL01_EOC_CTRL2_CURRENT_MASK, data);
++}
++
++static int s2asl01_get_eoc_current(struct s2asl01_chip *chip, unsigned int *ua)
++{
++	unsigned int data;
++	int ret;
++
++	ret = regmap_read(chip->regmap, S2ASL01_REG_TOP_EOC_CTRL2, &data);
++	if (ret)
++		return ret;
++
++	*ua = (data & S2ASL01_EOC_CTRL2_CURRENT_MASK) * 25 * 1000;
++
++	return 0;
++}
++
++/* CTRL3 charge mode field (c:214-255) */
++static int s2asl01_set_chg_mode(struct s2asl01_chip *chip, unsigned int mode)
++{
++	if (mode > S2ASL01_NO_REGULATION_FULLY_ON)
++		return -EINVAL;
++
++	return regmap_update_bits(chip->regmap, S2ASL01_REG_CORE_CTRL3,
++				  S2ASL01_CTRL3_CHG_MODE_MASK,
++				  mode << S2ASL01_CTRL3_CHG_MODE_SHIFT);
++}
++
++static int s2asl01_get_chg_mode(struct s2asl01_chip *chip, unsigned int *mode)
++{
++	unsigned int data;
++	int ret;
++
++	ret = regmap_read(chip->regmap, S2ASL01_REG_CORE_CTRL3, &data);
++	if (ret)
++		return ret;
++
++	*mode = (data & S2ASL01_CTRL3_CHG_MODE_MASK) >>
++		S2ASL01_CTRL3_CHG_MODE_SHIFT;
++
++	return 0;
++}
++
++/*
++ * CTRL3 discharge mode field. Stock refuses to put the discharge path into
++ * "smarter voltage regulation": it maps 2 to 1 on the way in (c:164-190) and
++ * reports a stored 2 as 1 on the way out (c:192-212).
++ */
++static int s2asl01_set_dischg_mode(struct s2asl01_chip *chip, unsigned int mode)
++{
++	if (mode == S2ASL01_CURRENT_SMARTER_VOLTAGE_REGULATION)
++		mode = S2ASL01_CURRENT_VOLTAGE_REGULATION;
++
++	if (mode > S2ASL01_NO_REGULATION_FULLY_ON)
++		return -EINVAL;
++
++	return regmap_update_bits(chip->regmap, S2ASL01_REG_CORE_CTRL3,
++				  S2ASL01_CTRL3_DIS_MODE_MASK,
++				  mode << S2ASL01_CTRL3_DIS_MODE_SHIFT);
++}
++
++static int s2asl01_get_dischg_mode(struct s2asl01_chip *chip,
++				   unsigned int *mode)
++{
++	unsigned int data;
++	int ret;
++
++	ret = regmap_read(chip->regmap, S2ASL01_REG_CORE_CTRL3, &data);
++	if (ret)
++		return ret;
++
++	*mode = (data & S2ASL01_CTRL3_DIS_MODE_MASK) >>
++		S2ASL01_CTRL3_DIS_MODE_SHIFT;
++
++	if (*mode == S2ASL01_CURRENT_SMARTER_VOLTAGE_REGULATION)
++		*mode = S2ASL01_CURRENT_VOLTAGE_REGULATION;
++
++	return 0;
++}
++
++/* Power meter: VCHG, VBAT, ICHG and IDISCHG on continuous conversion (c:678-702) */
++static int s2asl01_powermeter_enable(struct s2asl01_chip *chip)
++{
++	unsigned int data;
++	int ret;
++
++	ret = regmap_read(chip->regmap, S2ASL01_REG_PM_ENABLE, &data);
++	if (ret)
++		return ret;
++
++	ret = regmap_update_bits(chip->regmap, S2ASL01_REG_PM_ENABLE,
++				 S2ASL01_PM_ENABLE_MASK,
++				 S2ASL01_PM_ENABLE_MASK);
++	if (ret)
++		return ret;
++
++	chip->power_meter = true;
++
++	/* First conversion needs 100 ms before the values are meaningful */
++	if (!(data & S2ASL01_PM_ENABLE_MASK))
++		msleep(S2ASL01_PM_SETTLE_MS);
++
++	return 0;
++}
++
++/* c:120-162: INOK and supplement mode, both cached in software */
++static int s2asl01_set_in_ok(struct s2asl01_chip *chip, bool on)
++{
++	int ret;
++
++	ret = regmap_update_bits(chip->regmap, S2ASL01_REG_CORE_CTRL3,
++				 S2ASL01_CTRL3_INOK,
++				 on ? S2ASL01_CTRL3_INOK : 0);
++	if (!ret)
++		chip->in_ok = on;
++
++	return ret;
++}
++
++static int s2asl01_set_supplement_mode(struct s2asl01_chip *chip, bool on)
++{
++	int ret;
++
++	ret = regmap_update_bits(chip->regmap, S2ASL01_REG_CORE_CTRL3,
++				 S2ASL01_CTRL3_SUPPLEMENT,
++				 on ? S2ASL01_CTRL3_SUPPLEMENT : 0);
++	if (!ret)
++		chip->supplement_mode = on;
++
++	return ret;
++}
++
++/* c:365-392: the health check is "power meter on and both readings non-zero" */
++static int s2asl01_get_health(struct s2asl01_chip *chip, int *health)
++{
++	unsigned int pm_enable;
++	unsigned int vchg, vbat;
++	int ret;
++
++	*health = POWER_SUPPLY_HEALTH_GOOD;
++
++	ret = regmap_read(chip->regmap, S2ASL01_REG_PM_ENABLE, &pm_enable);
++	if (ret) {
++		dev_warn(chip->dev, "power meter unreadable (%d), skipping health check\n",
++			 ret);
++		return 0;
++	}
++
++	if (!(pm_enable & S2ASL01_PM_ENABLE_MASK)) {
++		dev_warn(chip->dev, "power meter disabled, skipping health check\n");
++		return 0;
++	}
++
++	ret = s2asl01_get_vchg_uv(chip, &vchg);
++	if (ret)
++		return ret;
++
++	ret = s2asl01_get_vbat_uv(chip, &vbat);
++	if (ret)
++		return ret;
++
++	if (!vchg || !vbat)
++		*health = POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
++
++	return 0;
++}
++
++static int s2asl01_get_property(struct power_supply *psy,
++				enum power_supply_property psp,
++				union power_supply_propval *val)
++{
++	struct s2asl01_chip *chip = power_supply_get_drvdata(psy);
++	unsigned int ua_unsigned;
++	int ua, uv;
++	int ret;
++
++	switch (psp) {
++	case POWER_SUPPLY_PROP_HEALTH:
++		return s2asl01_get_health(chip, &val->intval);
++	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
++		ret = s2asl01_get_vbat_uv(chip, &uv);
++		if (ret)
++			return ret;
++		val->intval = uv;
++		return 0;
++	case POWER_SUPPLY_PROP_CURRENT_NOW:
++		ret = s2asl01_get_ichg_ua(chip, &ua);
++		if (ret)
++			return ret;
++		val->intval = ua;
++		return 0;
++	case POWER_SUPPLY_PROP_CURRENT_MAX:
++		ret = s2asl01_get_charge_current_limit(chip, &ua_unsigned);
++		if (ret)
++			return ret;
++		val->intval = ua_unsigned;
++		return 0;
++	default:
++		return -EINVAL;
++	}
++}
++
++static enum power_supply_property s2asl01_props[] = {
++	POWER_SUPPLY_PROP_HEALTH,
++	POWER_SUPPLY_PROP_VOLTAGE_NOW,
++	POWER_SUPPLY_PROP_CURRENT_NOW,
++	POWER_SUPPLY_PROP_CURRENT_MAX,
++};
++
++/*
++ * The rest of the knobs have no power supply property of their own upstream
++ * (Samsung exposed them as vendor EXT properties) and land in sysfs instead.
++ */
++enum s2asl01_attr {
++	S2ASL01_ATTR_CHARGE_CURRENT_LIMIT,
++	S2ASL01_ATTR_TRICKLE_CURRENT_LIMIT,
++	S2ASL01_ATTR_DISCHARGE_CURRENT_LIMIT,
++	S2ASL01_ATTR_RECHARGE_VOLTAGE,
++	S2ASL01_ATTR_EOC_VOLTAGE,
++	S2ASL01_ATTR_EOC_CURRENT,
++	S2ASL01_ATTR_CHARGE_MODE,
++	S2ASL01_ATTR_DISCHARGE_MODE,
++	S2ASL01_ATTR_CHGIN_OK,
++	S2ASL01_ATTR_SUPPLEMENT_MODE,
++	S2ASL01_ATTR_INPUT_VOLTAGE,
++	S2ASL01_ATTR_DISCHARGE_CURRENT,
++	S2ASL01_ATTR_BATTERY_DETECT,
++	S2ASL01_ATTR_BATTERY_ENABLE,
++};
++
++static struct s2asl01_chip *s2asl01_from_dev(struct device *dev)
++{
++	struct power_supply *psy = dev_get_drvdata(dev);
++
++	return psy ? power_supply_get_drvdata(psy) : NULL;
++}
++
++/* The full stock initialisation sequence (c:1143-1201) */
++static int s2asl01_init_hw(struct s2asl01_chip *chip)
++{
++	unsigned int hyst;
++	int ret;
++
++	/* SUB_PWR_OFF_MODE1, i.e. "power off mode disabled" (c:1150) */
++	ret = regmap_update_bits(chip->regmap, S2ASL01_REG_CORE_CTRL2,
++				 S2ASL01_CTRL2_SUB_PWR_OFF_MODE,
++				 S2ASL01_CTRL2_SUB_PWR_OFF_MODE);
++	if (ret)
++		return ret;
++
++	ret = s2asl01_powermeter_enable(chip);
++	if (ret)
++		return ret;
++
++	ret = s2asl01_set_chg_mode(chip, chip->fully_on_at_init ?
++				   S2ASL01_NO_REGULATION_FULLY_ON :
++				   S2ASL01_CURRENT_REGULATION);
++	if (ret)
++		return ret;
++
++	/* Discharging is never regulated in stock (c:1162) */
++	ret = s2asl01_set_dischg_mode(chip, S2ASL01_NO_REGULATION_FULLY_ON);
++	if (ret)
++		return ret;
++
++	ret = s2asl01_set_dischg_current_limit(chip, 6400000);
++	if (ret)
++		return ret;
++
++	ret = s2asl01_set_charge_current_limit(chip, chip->charge_current_ua);
++	if (ret)
++		return ret;
++
++	ret = s2asl01_set_eoc_current(chip, chip->eoc_current_ua);
++	if (ret)
++		return ret;
++
++	ret = s2asl01_set_eoc_voltage(chip, chip->eoc_voltage_uv);
++	if (ret)
++		return ret;
++
++	/* c:1176: INOK is left alone; only the end-of-charge bit is set */
++	ret = regmap_update_bits(chip->regmap, S2ASL01_REG_CORE_CTRL1,
++				 S2ASL01_CTRL1_EOC, S2ASL01_CTRL1_EOC);
++	if (ret)
++		return ret;
++
++	hyst = (chip->hyst_levels[0] << 5) | (chip->hyst_levels[1] << 2);
++	ret = regmap_update_bits(chip->regmap, S2ASL01_REG_PM_HYST_LEVEL1,
++				 S2ASL01_PM_HYST_MASK, hyst);
++	if (ret)
++		return ret;
++
++	hyst = (chip->hyst_levels[2] << 5) | (chip->hyst_levels[3] << 2);
++	ret = regmap_update_bits(chip->regmap, S2ASL01_REG_PM_HYST_LEVEL2,
++				 S2ASL01_PM_HYST_MASK, hyst);
++	if (ret)
++		return ret;
++
++	/* Everything unmasked: no interrupt line is wired up (c:1188-1194) */
++	ret = regmap_update_bits(chip->regmap, S2ASL01_REG_CORE_INT1M,
++				 S2ASL01_CORE1_INT_MASK, 0);
++	if (ret)
++		return ret;
++
++	ret = regmap_update_bits(chip->regmap, S2ASL01_REG_CORE_INT2M,
++				 S2ASL01_CORE2_INT_MASK, 0);
++	if (ret)
++		return ret;
++
++	/*
++	 * Stock writes this mask into PM_INT (0x02), the status register, not
++	 * into PM_INTM (0x05); clearing it only drops pending power meter
++	 * interrupts. Reproduced as-is, see REPORT.md.
++	 */
++	ret = regmap_update_bits(chip->regmap, S2ASL01_REG_PM_INT,
++				 S2ASL01_PM_INT_MASK, 0);
++	if (ret)
++		return ret;
++
++	/* Only the 6030 revision has the thermal shutdown bit (c:704-720) */
++	if (chip->tsd_enable && chip->rev_id == 0) {
++		ret = regmap_update_bits(chip->regmap, S2ASL01_REG_COMMON1,
++					 S2ASL01_COMMON1_TSD_EN,
++					 S2ASL01_COMMON1_TSD_EN);
++		if (ret)
++			return ret;
++		chip->tsd = true;
++	}
++
++	return 0;
++}
++
++static int s2asl01_attr_get(struct s2asl01_chip *chip, enum s2asl01_attr attr,
++			    long *val)
++{
++	unsigned int mode;
++	int ret;
++	int tmp;
++
++	switch (attr) {
++	case S2ASL01_ATTR_CHARGE_CURRENT_LIMIT:
++		ret = s2asl01_get_charge_current_limit(chip, &mode);
++		*val = mode;
++		return ret;
++	case S2ASL01_ATTR_TRICKLE_CURRENT_LIMIT:
++		ret = s2asl01_get_trickle_current_limit(chip, &mode);
++		*val = mode;
++		return ret;
++	case S2ASL01_ATTR_DISCHARGE_CURRENT_LIMIT:
++		ret = s2asl01_get_dischg_current_limit(chip, &mode);
++		*val = mode;
++		return ret;
++	case S2ASL01_ATTR_RECHARGE_VOLTAGE:
++		ret = s2asl01_get_rechg_voltage(chip, &mode);
++		*val = mode;
++		return ret;
++	case S2ASL01_ATTR_EOC_VOLTAGE:
++		ret = s2asl01_get_eoc_voltage(chip, &mode);
++		*val = mode;
++		return ret;
++	case S2ASL01_ATTR_EOC_CURRENT:
++		ret = s2asl01_get_eoc_current(chip, &mode);
++		*val = mode;
++		return ret;
++	case S2ASL01_ATTR_CHARGE_MODE:
++		ret = s2asl01_get_chg_mode(chip, &mode);
++		*val = mode;
++		return ret;
++	case S2ASL01_ATTR_DISCHARGE_MODE:
++		ret = s2asl01_get_dischg_mode(chip, &mode);
++		*val = mode;
++		return ret;
++	case S2ASL01_ATTR_CHGIN_OK:
++		*val = chip->in_ok;
++		return 0;
++	case S2ASL01_ATTR_SUPPLEMENT_MODE:
++		*val = chip->supplement_mode;
++		return 0;
++	case S2ASL01_ATTR_INPUT_VOLTAGE:
++		ret = s2asl01_get_vchg_uv(chip, &tmp);
++		*val = tmp;
++		return ret;
++	case S2ASL01_ATTR_DISCHARGE_CURRENT:
++		ret = s2asl01_get_idischg_ua(chip, &tmp);
++		*val = tmp;
++		return ret;
++	case S2ASL01_ATTR_BATTERY_DETECT:
++		if (!chip->det_gpio)
++			return -ENODATA;
++		ret = gpiod_get_value_cansleep(chip->det_gpio);
++		if (ret < 0)
++			return ret;
++		*val = ret;
++		return 0;
++	case S2ASL01_ATTR_BATTERY_ENABLE:
++		if (!chip->enb_gpio)
++			return -ENODATA;
++		ret = gpiod_get_value_cansleep(chip->enb_gpio);
++		if (ret < 0)
++			return ret;
++		*val = ret;
++		return 0;
++	default:
++		return -EINVAL;
++	}
++}
++
++static int s2asl01_attr_set(struct s2asl01_chip *chip, enum s2asl01_attr attr,
++			    long val)
++{
++	if (val < 0 || val > UINT_MAX)
++		return -EINVAL;
++
++	switch (attr) {
++	case S2ASL01_ATTR_CHARGE_CURRENT_LIMIT:
++		return s2asl01_set_charge_current_limit(chip, val);
++	case S2ASL01_ATTR_TRICKLE_CURRENT_LIMIT:
++		return s2asl01_set_trickle_current_limit(chip, val);
++	case S2ASL01_ATTR_DISCHARGE_CURRENT_LIMIT:
++		return s2asl01_set_dischg_current_limit(chip, val);
++	case S2ASL01_ATTR_RECHARGE_VOLTAGE:
++		return s2asl01_set_rechg_voltage(chip, val);
++	case S2ASL01_ATTR_EOC_VOLTAGE:
++		return s2asl01_set_eoc_voltage(chip, val);
++	case S2ASL01_ATTR_EOC_CURRENT:
++		return s2asl01_set_eoc_current(chip, val);
++	case S2ASL01_ATTR_CHARGE_MODE:
++		return s2asl01_set_chg_mode(chip, val);
++	case S2ASL01_ATTR_DISCHARGE_MODE:
++		return s2asl01_set_dischg_mode(chip, val);
++	case S2ASL01_ATTR_CHGIN_OK:
++		return s2asl01_set_in_ok(chip, val);
++	case S2ASL01_ATTR_SUPPLEMENT_MODE:
++		return s2asl01_set_supplement_mode(chip, val);
++	default:
++		return -EINVAL;
++	}
++}
++
++static ssize_t limiter_data_show(struct device *dev,
++				 struct device_attribute *attr, char *buf)
++{
++	struct s2asl01_chip *chip = s2asl01_from_dev(dev);
++	unsigned int reg, val;
++	ssize_t len = 0;
++	int ret;
++
++	for (reg = S2ASL01_REG_CORE_INT1; reg <= S2ASL01_REG_PM_I_OPTION; reg++) {
++		ret = regmap_read(chip->regmap, reg, &val);
++		if (ret)
++			return ret;
++
++		len += sysfs_emit_at(buf, len, "0x%02x:\t0x%02x\n", reg, val);
++	}
++
++	return len;
++}
++
++/* Stock lets this attribute write a register too, "0x%02x 0x%02x" (c:1085-1115) */
++static ssize_t limiter_data_store(struct device *dev,
++				  struct device_attribute *attr,
++				  const char *buf, size_t count)
++{
++	struct s2asl01_chip *chip = s2asl01_from_dev(dev);
++	unsigned int reg, val;
++	int ret;
++
++	ret = sscanf(buf, "0x%2x 0x%2x", &reg, &val);
++	if (ret != 2)
++		return -EINVAL;
++
++	ret = regmap_write(chip->regmap, reg, val);
++	if (ret)
++		return ret;
++
++	return count;
++}
++
++/* Writing 1 re-runs the whole stock initialisation, whatever the value is (c:863-866) */
++static ssize_t powermeter_enable_store(struct device *dev,
++				       struct device_attribute *attr,
++				       const char *buf, size_t count)
++{
++	struct s2asl01_chip *chip = s2asl01_from_dev(dev);
++	int ret;
++
++	ret = s2asl01_init_hw(chip);
++	if (ret)
++		return ret;
++
++	return count;
++}
++
++static ssize_t powermeter_enable_show(struct device *dev,
++				      struct device_attribute *attr, char *buf)
++{
++	struct s2asl01_chip *chip = s2asl01_from_dev(dev);
++
++	return sysfs_emit(buf, "%d\n", chip->power_meter);
++}
++
++#define S2ASL01_ATTR_RW(_name, _suffix)					\
++static ssize_t _name##_show(struct device *dev,				\
++			    struct device_attribute *attr, char *buf)	\
++{									\
++	struct s2asl01_chip *chip = s2asl01_from_dev(dev);		\
++	long val;							\
++	int ret;							\
++									\
++	ret = s2asl01_attr_get(chip, S2ASL01_ATTR_##_suffix, &val);	\
++	if (ret)							\
++		return ret;						\
++									\
++	return sysfs_emit(buf, "%ld\n", val);				\
++}									\
++									\
++static ssize_t _name##_store(struct device *dev,			\
++			     struct device_attribute *attr,		\
++			     const char *buf, size_t count)		\
++{									\
++	struct s2asl01_chip *chip = s2asl01_from_dev(dev);		\
++	long val;							\
++	int ret;							\
++									\
++	ret = kstrtol(buf, 0, &val);					\
++	if (ret)							\
++		return ret;						\
++									\
++	ret = s2asl01_attr_set(chip, S2ASL01_ATTR_##_suffix, val);	\
++	if (ret)							\
++		return ret;						\
++									\
++	return count;							\
++}									\
++static DEVICE_ATTR_RW(_name)
++
++#define S2ASL01_ATTR_RO(_name, _suffix)					\
++static ssize_t _name##_show(struct device *dev,				\
++			    struct device_attribute *attr, char *buf)	\
++{									\
++	struct s2asl01_chip *chip = s2asl01_from_dev(dev);		\
++	long val;							\
++	int ret;							\
++									\
++	ret = s2asl01_attr_get(chip, S2ASL01_ATTR_##_suffix, &val);	\
++	if (ret)							\
++		return ret;						\
++									\
++	return sysfs_emit(buf, "%ld\n", val);				\
++}									\
++static DEVICE_ATTR_RO(_name)
++
++S2ASL01_ATTR_RW(charge_current_limit, CHARGE_CURRENT_LIMIT);
++S2ASL01_ATTR_RW(trickle_charge_current_limit, TRICKLE_CURRENT_LIMIT);
++S2ASL01_ATTR_RW(discharge_current_limit, DISCHARGE_CURRENT_LIMIT);
++S2ASL01_ATTR_RW(recharge_voltage, RECHARGE_VOLTAGE);
++S2ASL01_ATTR_RW(eoc_voltage, EOC_VOLTAGE);
++S2ASL01_ATTR_RW(eoc_current, EOC_CURRENT);
++S2ASL01_ATTR_RW(charge_mode, CHARGE_MODE);
++S2ASL01_ATTR_RW(discharge_mode, DISCHARGE_MODE);
++S2ASL01_ATTR_RW(chgin_ok, CHGIN_OK);
++S2ASL01_ATTR_RW(supplement_mode, SUPPLEMENT_MODE);
++S2ASL01_ATTR_RO(input_voltage, INPUT_VOLTAGE);
++S2ASL01_ATTR_RO(discharge_current, DISCHARGE_CURRENT);
++S2ASL01_ATTR_RO(battery_detect, BATTERY_DETECT);
++S2ASL01_ATTR_RO(battery_enable, BATTERY_ENABLE);
++static DEVICE_ATTR_RW(powermeter_enable);
++static DEVICE_ATTR_RW(limiter_data);
++
++static struct attribute *s2asl01_attrs[] = {
++	&dev_attr_charge_current_limit.attr,
++	&dev_attr_trickle_charge_current_limit.attr,
++	&dev_attr_discharge_current_limit.attr,
++	&dev_attr_recharge_voltage.attr,
++	&dev_attr_eoc_voltage.attr,
++	&dev_attr_eoc_current.attr,
++	&dev_attr_charge_mode.attr,
++	&dev_attr_discharge_mode.attr,
++	&dev_attr_chgin_ok.attr,
++	&dev_attr_supplement_mode.attr,
++	&dev_attr_powermeter_enable.attr,
++	&dev_attr_input_voltage.attr,
++	&dev_attr_discharge_current.attr,
++	&dev_attr_battery_detect.attr,
++	&dev_attr_battery_enable.attr,
++	&dev_attr_limiter_data.attr,
++	NULL,
++};
++
++static const struct attribute_group s2asl01_attr_group = {
++	.attrs = s2asl01_attrs,
++};
++
++static const struct attribute_group *s2asl01_attr_groups[] = {
++	&s2asl01_attr_group,
++	NULL,
++};
++
++static int s2asl01_parse_dt(struct s2asl01_chip *chip)
++{
++	struct device *dev = chip->dev;
++	struct device_node *np = dev_of_node(dev);
++	const char *cell;
++	unsigned int val;
++	unsigned int i;
++	int ret;
++
++	ret = of_property_read_string(np, "samsung,cell", &cell);
++	if (ret)
++		return dev_err_probe(dev, ret, "missing samsung,cell\n");
++
++	if (!strcmp(cell, "main")) {
++		chip->psy_name = "s2asl01-limiter-main";
++	} else if (!strcmp(cell, "sub")) {
++		chip->psy_name = "s2asl01-limiter-sub";
++	} else {
++		return dev_err_probe(dev, -EINVAL, "bad samsung,cell \"%s\"\n",
++				     cell);
++	}
++
++	ret = of_property_read_u32(np, "samsung,charge-current-limit-microamp",
++				   &val);
++	chip->charge_current_ua = ret ? S2ASL01_DEFAULT_CHARGE_CURRENT_UA : val;
++
++	ret = of_property_read_u32(np, "samsung,eoc-current-microamp", &val);
++	chip->eoc_current_ua = ret ? S2ASL01_DEFAULT_EOC_CURRENT_UA : val;
++
++	ret = of_property_read_u32(np, "samsung,eoc-voltage-microvolt", &val);
++	chip->eoc_voltage_uv = ret ? S2ASL01_DEFAULT_EOC_VOLTAGE_UV : val;
++
++	ret = of_property_read_u32_array(np,
++					 "samsung,powermeter-hysteresis-levels",
++					 chip->hyst_levels, 4);
++	if (ret) {
++		chip->hyst_levels[0] = S2ASL01_DEFAULT_HYST_LEVEL;
++		chip->hyst_levels[1] = S2ASL01_DEFAULT_HYST_LEVEL;
++		chip->hyst_levels[2] = S2ASL01_DEFAULT_HYST_LEVEL;
++		chip->hyst_levels[3] = S2ASL01_DEFAULT_HYST_LEVEL;
++	} else {
++		for (i = 0; i < ARRAY_SIZE(chip->hyst_levels); i++) {
++			if (chip->hyst_levels[i] > 7)
++				return dev_err_probe(dev, -EINVAL,
++						     "hysteresis level %u out of range\n",
++						     chip->hyst_levels[i]);
++		}
++	}
++
++	chip->fully_on_at_init =
++		of_property_read_bool(np, "samsung,charge-current-fully-turn-on");
++	chip->tsd_enable =
++		of_property_read_bool(np, "samsung,thermal-shutdown-enable");
++
++	return 0;
++}
++
++/* ID register: bit 0 is the IC generation, 7:6 the ES number, 5:4 the revision */
++static int s2asl01_read_id(struct s2asl01_chip *chip)
++{
++	unsigned int id;
++	int ret;
++
++	ret = regmap_read(chip->regmap, S2ASL01_REG_ID, &id);
++	if (ret)
++		return ret;
++
++	chip->ic_version = (id & 0x01) ? S2ASL01_VER_6130 : S2ASL01_VER_6030;
++	chip->es_num = (id & 0xc0) >> 6;
++	chip->rev_id = (id & 0x30) >> 4;
++
++	dev_info(chip->dev, "ID 0x%02x: revision %u, ES %u, IC %s\n", id,
++		 chip->rev_id, chip->es_num,
++		 chip->ic_version == S2ASL01_VER_6130 ? "6130" : "6030");
++
++	return 0;
++}
++
++static int s2asl01_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	struct s2asl01_chip *chip;
++	struct power_supply_config psy_cfg = {};
++	int ret;
++
++	chip = devm_kzalloc(dev, sizeof(*chip), GFP_KERNEL);
++	if (!chip)
++		return -ENOMEM;
++
++	chip->dev = dev;
++	i2c_set_clientdata(client, chip);
++
++	chip->regmap = devm_regmap_init_i2c(client, &s2asl01_regmap_config);
++	if (IS_ERR(chip->regmap))
++		return dev_err_probe(dev, PTR_ERR(chip->regmap),
++				     "cannot set up the register map\n");
++
++	ret = s2asl01_parse_dt(chip);
++	if (ret)
++		return ret;
++
++	/* Detection and enable pins are only ever read, as in stock */
++	chip->det_gpio = devm_gpiod_get_optional(dev, "battery-detect",
++						 GPIOD_IN);
++	if (IS_ERR(chip->det_gpio))
++		return dev_err_probe(dev, PTR_ERR(chip->det_gpio),
++				     "cannot get the battery detect GPIO\n");
++
++	chip->enb_gpio = devm_gpiod_get_optional(dev, "battery-enable",
++						 GPIOD_ASIS);
++	if (IS_ERR(chip->enb_gpio))
++		return dev_err_probe(dev, PTR_ERR(chip->enb_gpio),
++				     "cannot get the battery enable GPIO\n");
++
++	chip->enb2_gpio = devm_gpiod_get_optional(dev, "battery-enable2",
++						  GPIOD_ASIS);
++	if (IS_ERR(chip->enb2_gpio))
++		return dev_err_probe(dev, PTR_ERR(chip->enb2_gpio),
++				     "cannot get the second battery enable GPIO\n");
++
++	ret = s2asl01_read_id(chip);
++	if (ret)
++		return dev_err_probe(dev, ret, "cannot read the ID register\n");
++
++	/*
++	 * Unlike stock, which initialises after registering the power supply,
++	 * program the chip first: nothing should be able to read a half
++	 * configured limiter.
++	 */
++	ret = s2asl01_init_hw(chip);
++	if (ret)
++		return dev_err_probe(dev, ret, "cannot initialise the limiter\n");
++
++	chip->psy_desc.name = chip->psy_name;
++	chip->psy_desc.type = POWER_SUPPLY_TYPE_UNKNOWN;
++	chip->psy_desc.properties = s2asl01_props;
++	chip->psy_desc.num_properties = ARRAY_SIZE(s2asl01_props);
++	chip->psy_desc.get_property = s2asl01_get_property;
++	chip->psy_desc.no_thermal = true;
++
++	psy_cfg.drv_data = chip;
++	psy_cfg.fwnode = dev_fwnode(dev);
++	psy_cfg.attr_grp = s2asl01_attr_groups;
++
++	chip->psy = devm_power_supply_register(dev, &chip->psy_desc, &psy_cfg);
++	if (IS_ERR(chip->psy))
++		return dev_err_probe(dev, PTR_ERR(chip->psy),
++				     "cannot register %s\n", chip->psy_name);
++
++	if (chip->det_gpio)
++		dev_info(dev, "%s: battery %s\n", chip->psy_name,
++			 gpiod_get_value_cansleep(chip->det_gpio) ?
++			 "connected" : "not connected");
++	else
++		dev_info(dev, "%s: registered\n", chip->psy_name);
++
++	return 0;
++}
++
++static const struct of_device_id s2asl01_of_match[] = {
++	{ .compatible = "samsung,s2asl01-limiter" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, s2asl01_of_match);
++
++static const struct i2c_device_id s2asl01_i2c_id[] = {
++	{ "s2asl01-limiter" },
++	{ }
++};
++MODULE_DEVICE_TABLE(i2c, s2asl01_i2c_id);
++
++static struct i2c_driver s2asl01_driver = {
++	.driver = {
++		.name = "s2asl01-limiter",
++		.of_match_table = s2asl01_of_match,
++	},
++	.probe = s2asl01_probe,
++	.id_table = s2asl01_i2c_id,
++};
++module_i2c_driver(s2asl01_driver);
++
++MODULE_DESCRIPTION("Samsung S2ASL01 battery current limiter");
++MODULE_AUTHOR("Noa Himesaka <himesaka@noa.codes>");
++MODULE_LICENSE("GPL");
+-- 
+2.56.0
+

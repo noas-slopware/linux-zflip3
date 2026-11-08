@@ -1,0 +1,944 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] drm/panel: add Samsung S6E3HAD AMF670ZA01 panel driver
+
+The Galaxy Z Flip3's main display: an S6E3HAD DDI driving the 1080x2640
+AMF670ZA01 OLED, in DSI command mode with DSC (two 540x40 slices, 8 bpc,
+8 bpp). Stock picks this panel by its ID (DA/DB/DC = 91 10 46, revision D
+by ID2); the dtbo's default panel, S6E3FAC AMF670BS01, is a different one.
+
+The initialization, display-on and off sequences, the brightness packet
+(ACL, gamma, IRC, VINT, VRR) and FFC are the stock ones from Samsung's
+ss_dsi_panel_S6E3HAD_AMF670ZA01_FHD panel device tree, with the edits
+Samsung's panel code makes to them. Three stock timings are offered:
+fhd120hs (default), fhd60hs and fhd60ns, switched by a full modeset.
+
+The panel's frame rate follows the DSI lane rate, and stock runs the lanes
+at 910 Mbps. MSM derives the lane rate from the mode clock, so each mode's
+horizontal front porch is stretched until that comes to 910 Mbps at the
+stock refresh rate; at the stock porches the panel runs at 114.5 Hz.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+---
+diff --git a/drivers/gpu/drm/panel/Kconfig b/drivers/gpu/drm/panel/Kconfig
+--- a/drivers/gpu/drm/panel/Kconfig
++++ b/drivers/gpu/drm/panel/Kconfig
+@@ -1015,6 +1015,19 @@ config DRM_PANEL_SAMSUNG_S6E3HA2
+ 	depends on BACKLIGHT_CLASS_DEVICE
+ 	select VIDEOMODE_HELPERS
+ 
++config DRM_PANEL_SAMSUNG_S6E3HAD
++	tristate "Samsung S6E3HAD DSI command mode panel"
++	depends on GPIOLIB
++	depends on OF
++	depends on DRM_MIPI_DSI
++	depends on BACKLIGHT_CLASS_DEVICE
++	select DRM_DISPLAY_HELPER
++	select DRM_DISPLAY_DSC_HELPER
++	help
++	  Say Y or M here if you want to enable support for the Samsung
++	  S6E3HAD DDIC with the AMF670ZA01 panel, the main display of the
++	  Galaxy Z Flip3 (1080x2640, DSC, command mode, 120 Hz).
++
+ config DRM_PANEL_SAMSUNG_S6E3HA8
+ 	tristate "Samsung S6E3HA8 DSI video mode panel"
+ 	depends on GPIOLIB
+diff --git a/drivers/gpu/drm/panel/Makefile b/drivers/gpu/drm/panel/Makefile
+--- a/drivers/gpu/drm/panel/Makefile
++++ b/drivers/gpu/drm/panel/Makefile
+@@ -98,6 +98,7 @@ obj-$(CONFIG_DRM_PANEL_SAMSUNG_S6D7AA0)
+ obj-$(CONFIG_DRM_PANEL_SAMSUNG_S6E3FA7) += panel-samsung-s6e3fa7.o
+ obj-$(CONFIG_DRM_PANEL_SAMSUNG_S6E3FC2X01) += panel-samsung-s6e3fc2x01.o
+ obj-$(CONFIG_DRM_PANEL_SAMSUNG_S6E3HA2) += panel-samsung-s6e3ha2.o
++obj-$(CONFIG_DRM_PANEL_SAMSUNG_S6E3HAD) += panel-samsung-s6e3had.o
+ obj-$(CONFIG_DRM_PANEL_SAMSUNG_S6E3HA8) += panel-samsung-s6e3ha8.o
+ obj-$(CONFIG_DRM_PANEL_SAMSUNG_S6E63J0X03) += panel-samsung-s6e63j0x03.o
+ obj-$(CONFIG_DRM_PANEL_SAMSUNG_S6E63M0) += panel-samsung-s6e63m0.o
+diff --git a/drivers/gpu/drm/panel/panel-samsung-s6e3had.c b/drivers/gpu/drm/panel/panel-samsung-s6e3had.c
+new file mode 100644
+--- /dev/null
++++ b/drivers/gpu/drm/panel/panel-samsung-s6e3had.c
+@@ -0,0 +1,884 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Samsung S6E3HAD DDI with the AMF670ZA01 panel (Galaxy Z Flip3 main display)
++ *
++ * 1080x2640 command mode OLED with DSC, 120 Hz. The command sequences are the
++ * stock ones from Samsung's ss_dsi_panel_S6E3HAD_AMF670ZA01_FHD panel device
++ * tree (fhd120hs timing, its default), with the edits Samsung's panel code
++ * (ss_dsi_panel_S6E3HAD_AMF670ZA01.c) makes to them for 120HS.
++ *
++ * Copyright (C) 2026 Noa Himesaka <himesaka@noa.codes>
++ */
++
++#include <linux/backlight.h>
++#include <linux/delay.h>
++#include <linux/gpio/consumer.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/regulator/consumer.h>
++
++#include <drm/display/drm_dsc.h>
++#include <drm/display/drm_dsc_helper.h>
++#include <drm/drm_atomic.h>
++#include <drm/drm_mipi_dsi.h>
++#include <drm/drm_modes.h>
++#include <drm/drm_panel.h>
++#include <drm/drm_probe_helper.h>
++
++#include <video/mipi_display.h>
++
++#define S6E3HAD_BRIGHTNESS_MAX		0x7ff
++
++struct s6e3had {
++	struct drm_panel panel;
++	struct mipi_dsi_device *dsi;
++	struct drm_dsc_config dsc;
++	struct gpio_desc *reset_gpio;
++	struct regulator_bulk_data *supplies;
++	struct drm_connector *connector;
++	const struct s6e3had_timing *timing;
++};
++
++/* Stock order and delays: vdd3, vddr, then vci and 11 ms. */
++static const struct regulator_bulk_data s6e3had_supplies[] = {
++	{ .supply = "vdd3" },
++	{ .supply = "vddr" },
++	{ .supply = "vci" },
++};
++
++static inline struct s6e3had *to_s6e3had(struct drm_panel *panel)
++{
++	return container_of(panel, struct s6e3had, panel);
++}
++
++/*
++ * Stock command sets: DSI packet type, the "last" flag (unused: the packets go
++ * out one by one), the post wait in ms and the payload, in the order of the
++ * panel device tree.
++ */
++struct s6e3had_cmd {
++	u8 type;
++	u8 last;
++	u8 wait;
++	u16 len;
++	const u8 *data;
++};
++
++#define S6E3HAD_CMD(_type, _last, _wait, ...) {				\
++	.type = _type, .last = _last, .wait = _wait,			\
++	.len = sizeof((const u8[]){ __VA_ARGS__ }),			\
++	.data = (const u8[]){ __VA_ARGS__ },				\
++}
++
++/* qcom,mdss-dsi-on-command (fhd120hs) */
++static const struct s6e3had_cmd s6e3had_on_120hs_cmds[] = {
++	S6E3HAD_CMD(0x29, 0, 0, 0x9f, 0xa5, 0xa5),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf0, 0x5a, 0x5a),
++	S6E3HAD_CMD(0x29, 0, 0, 0xfc, 0x5a, 0x5a),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf1, 0x5a, 0x5a),
++	S6E3HAD_CMD(0x29, 0, 0, 0xd0, 0x08),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x43, 0xd7),
++	S6E3HAD_CMD(0x29, 0, 0, 0xd7, 0x40),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x47, 0xd7),
++	S6E3HAD_CMD(0x29, 0, 0, 0xd7, 0x40),
++	S6E3HAD_CMD(0x29, 0, 0, 0xfe, 0xb0),
++	S6E3HAD_CMD(0x29, 0, 0, 0xfe, 0x30),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x04, 0xc5),
++	S6E3HAD_CMD(0x29, 0, 0, 0xc5, 0x40, 0x6a, 0x42, 0x9a, 0x26, 0x52, 0x25, 0x94),
++	S6E3HAD_CMD(0x29, 0, 0, 0xc5, 0x02, 0x80),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x0b, 0xc1),
++	S6E3HAD_CMD(0x29, 0, 0, 0xc1, 0xc9),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x59, 0xf2),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf2, 0x3a, 0x3a, 0x26, 0x26),
++	S6E3HAD_CMD(0x29, 1, 2, 0xf1, 0xa5, 0xa5),
++	S6E3HAD_CMD(0x05, 1, 110, 0x11),
++	S6E3HAD_CMD(0x07, 0, 0, 0x01),
++	S6E3HAD_CMD(0x0a, 0, 0, 0x11, 0x00, 0x00, 0x89, 0x30, 0x80, 0x0a, 0x50, 0x04, 0x38, 0x00, 0x28,
++		    0x02, 0x1c, 0x02, 0x1c, 0x02, 0x00, 0x02, 0x0e, 0x00, 0x20, 0x03, 0xdd, 0x00, 0x07, 0x00,
++		    0x0c, 0x02, 0x77, 0x02, 0x8b, 0x18, 0x00, 0x10, 0xf0, 0x03, 0x0c, 0x20, 0x00, 0x06, 0x0b,
++		    0x0b, 0x33, 0x0e, 0x1c, 0x2a, 0x38, 0x46, 0x54, 0x62, 0x69, 0x70, 0x77, 0x79, 0x7b, 0x7d,
++		    0x7e, 0x01, 0x02, 0x01, 0x00, 0x09, 0x40, 0x09, 0xbe, 0x19, 0xfc, 0x19, 0xfa, 0x19, 0xf8,
++		    0x1a, 0x38, 0x1a, 0x78, 0x1a, 0xb6, 0x2a, 0xf6, 0x2b, 0x34, 0x2b, 0x74, 0x3b, 0x74, 0x6b,
++		    0xf4, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++		    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++		    0x00, 0x00, 0x00),
++	S6E3HAD_CMD(0x29, 0, 0, 0x35, 0x00),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x2c, 0xf4),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf4, 0x18),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x01, 0xed),
++	S6E3HAD_CMD(0x29, 0, 0, 0xed, 0x40, 0x20),
++	S6E3HAD_CMD(0x29, 0, 0, 0x2a, 0x00, 0x00, 0x04, 0x37),
++	S6E3HAD_CMD(0x29, 0, 0, 0x2b, 0x00, 0x00, 0x0a, 0x4f),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb9, 0x09, 0x0a, 0x70, 0x00, 0x18),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb9, 0x00),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x0d, 0xb9),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb9, 0xb1, 0x21),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x18, 0xb9),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb9, 0x0f),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0xa6, 0xc7),
++	S6E3HAD_CMD(0x29, 0, 0, 0xc7, 0x09, 0xa8, 0x09, 0xa8, 0x01, 0xad, 0x01, 0xad, 0x01, 0xad),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x68, 0xc7),
++	S6E3HAD_CMD(0x29, 0, 0, 0xc7, 0x00, 0x90, 0x29, 0x15, 0x07, 0xff, 0xff, 0xf0),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x06, 0xbd),
++	S6E3HAD_CMD(0x29, 0, 0, 0xbd, 0x08, 0x00, 0x14, 0x00, 0x01),
++	S6E3HAD_CMD(0x29, 0, 0, 0xbd, 0x01),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x17, 0xbd),
++	S6E3HAD_CMD(0x29, 0, 0, 0xbd, 0x40),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x03, 0xf2),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf2, 0x00),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x06, 0xf2),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf2, 0x00, 0x10),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x0d, 0xf2),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf2, 0x00, 0x10),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x44, 0xf2),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf2, 0x00),
++	S6E3HAD_CMD(0x29, 0, 0, 0x60, 0x00, 0x00),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x34, 0x6a),
++	S6E3HAD_CMD(0x29, 0, 0, 0x6a, 0x00),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf7, 0x0f),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x3e, 0x91),
++	S6E3HAD_CMD(0x29, 0, 0, 0x91, 0x02),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x67, 0x91),
++	S6E3HAD_CMD(0x29, 0, 0, 0x91, 0x81),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x0d, 0xc2),
++	S6E3HAD_CMD(0x29, 0, 0, 0xc2, 0x01),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf7, 0x0f),
++	S6E3HAD_CMD(0x29, 0, 0, 0xe7, 0x2c),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x0c, 0xc2),
++	S6E3HAD_CMD(0x29, 0, 0, 0xc2, 0x60),
++	S6E3HAD_CMD(0x29, 0, 0, 0x53, 0x28),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x11, 0xc2),
++	S6E3HAD_CMD(0x29, 0, 0, 0xc2, 0x16),
++	S6E3HAD_CMD(0x29, 0, 0, 0x51, 0x07, 0xff),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf7, 0x0f),
++	S6E3HAD_CMD(0x29, 0, 0, 0xfc, 0xa5, 0xa5),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf0, 0xa5, 0xa5),
++	S6E3HAD_CMD(0x29, 1, 0, 0x9f, 0x5a, 0x5a),
++};
++
++/* qcom,mdss-dsi-on-command (fhd60hs) */
++static const struct s6e3had_cmd s6e3had_on_60hs_cmds[] = {
++	S6E3HAD_CMD(0x29, 0, 0, 0x9f, 0xa5, 0xa5),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf0, 0x5a, 0x5a),
++	S6E3HAD_CMD(0x29, 0, 0, 0xfc, 0x5a, 0x5a),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf1, 0x5a, 0x5a),
++	S6E3HAD_CMD(0x29, 0, 0, 0xd0, 0x08),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x43, 0xd7),
++	S6E3HAD_CMD(0x29, 0, 0, 0xd7, 0x40),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x47, 0xd7),
++	S6E3HAD_CMD(0x29, 0, 0, 0xd7, 0x40),
++	S6E3HAD_CMD(0x29, 0, 0, 0xfe, 0xb0),
++	S6E3HAD_CMD(0x29, 0, 0, 0xfe, 0x30),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x04, 0xc5),
++	S6E3HAD_CMD(0x29, 0, 0, 0xc5, 0x40, 0x6a, 0x42, 0x9a, 0x26, 0x52, 0x25, 0x94),
++	S6E3HAD_CMD(0x29, 0, 0, 0xc5, 0x02, 0x80),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x0b, 0xc1),
++	S6E3HAD_CMD(0x29, 0, 0, 0xc1, 0xc9),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x59, 0xf2),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf2, 0x3a, 0x3a, 0x26, 0x26),
++	S6E3HAD_CMD(0x29, 1, 2, 0xf1, 0xa5, 0xa5),
++	S6E3HAD_CMD(0x05, 1, 110, 0x11),
++	S6E3HAD_CMD(0x07, 0, 0, 0x01),
++	S6E3HAD_CMD(0x0a, 0, 0, 0x11, 0x00, 0x00, 0x89, 0x30, 0x80, 0x0a, 0x50, 0x04, 0x38, 0x00, 0x28,
++		    0x02, 0x1c, 0x02, 0x1c, 0x02, 0x00, 0x02, 0x0e, 0x00, 0x20, 0x03, 0xdd, 0x00, 0x07, 0x00,
++		    0x0c, 0x02, 0x77, 0x02, 0x8b, 0x18, 0x00, 0x10, 0xf0, 0x03, 0x0c, 0x20, 0x00, 0x06, 0x0b,
++		    0x0b, 0x33, 0x0e, 0x1c, 0x2a, 0x38, 0x46, 0x54, 0x62, 0x69, 0x70, 0x77, 0x79, 0x7b, 0x7d,
++		    0x7e, 0x01, 0x02, 0x01, 0x00, 0x09, 0x40, 0x09, 0xbe, 0x19, 0xfc, 0x19, 0xfa, 0x19, 0xf8,
++		    0x1a, 0x38, 0x1a, 0x78, 0x1a, 0xb6, 0x2a, 0xf6, 0x2b, 0x34, 0x2b, 0x74, 0x3b, 0x74, 0x6b,
++		    0xf4, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++		    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++		    0x00, 0x00, 0x00),
++	S6E3HAD_CMD(0x29, 0, 0, 0x35, 0x00),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x2c, 0xf4),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf4, 0x18),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x01, 0xed),
++	S6E3HAD_CMD(0x29, 0, 0, 0xed, 0x40, 0x20),
++	S6E3HAD_CMD(0x29, 0, 0, 0x2a, 0x00, 0x00, 0x04, 0x37),
++	S6E3HAD_CMD(0x29, 0, 0, 0x2b, 0x00, 0x00, 0x0a, 0x4f),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb9, 0x19, 0x0a, 0x70, 0x00, 0x18),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb9, 0x00),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x0d, 0xb9),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb9, 0xb1, 0x21),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x18, 0xb9),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb9, 0x0f),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0xa6, 0xc7),
++	S6E3HAD_CMD(0x29, 0, 0, 0xc7, 0x09, 0xa8, 0x09, 0xa8, 0x01, 0xad, 0x01, 0xad, 0x01, 0xad),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x68, 0xc7),
++	S6E3HAD_CMD(0x29, 0, 0, 0xc7, 0x00, 0x90, 0x29, 0x15, 0x07, 0xff, 0xff, 0xf0),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x06, 0xbd),
++	S6E3HAD_CMD(0x29, 0, 0, 0xbd, 0x08, 0x00, 0x14, 0x00, 0x01),
++	S6E3HAD_CMD(0x29, 0, 0, 0xbd, 0x01),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x17, 0xbd),
++	S6E3HAD_CMD(0x29, 0, 0, 0xbd, 0x40),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x03, 0xf2),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf2, 0x00),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x06, 0xf2),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf2, 0x00, 0x10),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x0d, 0xf2),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf2, 0x00, 0x10),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x44, 0xf2),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf2, 0x00),
++	S6E3HAD_CMD(0x29, 0, 0, 0x60, 0x00, 0x04),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x34, 0x6a),
++	S6E3HAD_CMD(0x29, 0, 0, 0x6a, 0x00),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf7, 0x0f),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x3e, 0x91),
++	S6E3HAD_CMD(0x29, 0, 0, 0x91, 0x02),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x67, 0x91),
++	S6E3HAD_CMD(0x29, 0, 0, 0x91, 0x81),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x0d, 0xc2),
++	S6E3HAD_CMD(0x29, 0, 0, 0xc2, 0x01),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf7, 0x0f),
++	S6E3HAD_CMD(0x29, 0, 0, 0xe7, 0x2c),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x0c, 0xc2),
++	S6E3HAD_CMD(0x29, 0, 0, 0xc2, 0x60),
++	S6E3HAD_CMD(0x29, 0, 0, 0x53, 0x28),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x11, 0xc2),
++	S6E3HAD_CMD(0x29, 0, 0, 0xc2, 0x16),
++	S6E3HAD_CMD(0x29, 0, 0, 0x51, 0x07, 0xff),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf7, 0x0f),
++	S6E3HAD_CMD(0x29, 0, 0, 0xfc, 0xa5, 0xa5),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf0, 0xa5, 0xa5),
++	S6E3HAD_CMD(0x29, 1, 0, 0x9f, 0x5a, 0x5a),
++};
++
++/* qcom,mdss-dsi-on-command (fhd60ns) */
++static const struct s6e3had_cmd s6e3had_on_60ns_cmds[] = {
++	S6E3HAD_CMD(0x29, 0, 0, 0x9f, 0xa5, 0xa5),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf0, 0x5a, 0x5a),
++	S6E3HAD_CMD(0x29, 0, 0, 0xfc, 0x5a, 0x5a),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf1, 0x5a, 0x5a),
++	S6E3HAD_CMD(0x29, 0, 0, 0xd0, 0x08),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x43, 0xd7),
++	S6E3HAD_CMD(0x29, 0, 0, 0xd7, 0x40),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x47, 0xd7),
++	S6E3HAD_CMD(0x29, 0, 0, 0xd7, 0x40),
++	S6E3HAD_CMD(0x29, 0, 0, 0xfe, 0xb0),
++	S6E3HAD_CMD(0x29, 0, 0, 0xfe, 0x30),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x04, 0xc5),
++	S6E3HAD_CMD(0x29, 0, 0, 0xc5, 0x40, 0x6a, 0x42, 0x9a, 0x26, 0x52, 0x25, 0x94),
++	S6E3HAD_CMD(0x29, 0, 0, 0xc5, 0x02, 0x80),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x0b, 0xc1),
++	S6E3HAD_CMD(0x29, 0, 0, 0xc1, 0xc9),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x59, 0xf2),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf2, 0x3a, 0x3a, 0x26, 0x26),
++	S6E3HAD_CMD(0x29, 1, 2, 0xf1, 0xa5, 0xa5),
++	S6E3HAD_CMD(0x05, 1, 110, 0x11),
++	S6E3HAD_CMD(0x07, 0, 0, 0x01),
++	S6E3HAD_CMD(0x0a, 0, 0, 0x11, 0x00, 0x00, 0x89, 0x30, 0x80, 0x0a, 0x50, 0x04, 0x38, 0x00, 0x28,
++		    0x02, 0x1c, 0x02, 0x1c, 0x02, 0x00, 0x02, 0x0e, 0x00, 0x20, 0x03, 0xdd, 0x00, 0x07, 0x00,
++		    0x0c, 0x02, 0x77, 0x02, 0x8b, 0x18, 0x00, 0x10, 0xf0, 0x03, 0x0c, 0x20, 0x00, 0x06, 0x0b,
++		    0x0b, 0x33, 0x0e, 0x1c, 0x2a, 0x38, 0x46, 0x54, 0x62, 0x69, 0x70, 0x77, 0x79, 0x7b, 0x7d,
++		    0x7e, 0x01, 0x02, 0x01, 0x00, 0x09, 0x40, 0x09, 0xbe, 0x19, 0xfc, 0x19, 0xfa, 0x19, 0xf8,
++		    0x1a, 0x38, 0x1a, 0x78, 0x1a, 0xb6, 0x2a, 0xf6, 0x2b, 0x34, 0x2b, 0x74, 0x3b, 0x74, 0x6b,
++		    0xf4, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++		    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++		    0x00, 0x00, 0x00),
++	S6E3HAD_CMD(0x29, 0, 0, 0x35, 0x00),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x2c, 0xf4),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf4, 0x18),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x01, 0xed),
++	S6E3HAD_CMD(0x29, 0, 0, 0xed, 0x40, 0x20),
++	S6E3HAD_CMD(0x29, 0, 0, 0x2a, 0x00, 0x00, 0x04, 0x37),
++	S6E3HAD_CMD(0x29, 0, 0, 0x2b, 0x00, 0x00, 0x0a, 0x4f),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb9, 0x09, 0x0a, 0x70, 0x00, 0x18),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb9, 0x00),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x0d, 0xb9),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb9, 0xb1, 0x21),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x18, 0xb9),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb9, 0x0f),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x86, 0xc7),
++	S6E3HAD_CMD(0x29, 0, 0, 0xc7, 0x09, 0xa8, 0x09, 0xa8, 0x01, 0xad, 0x01, 0xad, 0x01, 0xad),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x68, 0xc7),
++	S6E3HAD_CMD(0x29, 0, 0, 0xc7, 0x00, 0x90, 0x29, 0x15, 0x07, 0xff, 0xff, 0xf0),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x06, 0xbd),
++	S6E3HAD_CMD(0x29, 0, 0, 0xbd, 0x00, 0x04, 0x00, 0x00, 0x01),
++	S6E3HAD_CMD(0x29, 0, 0, 0xbd, 0x01),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x17, 0xbd),
++	S6E3HAD_CMD(0x29, 0, 0, 0xbd, 0x40),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x03, 0xf2),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf2, 0x50),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x0d, 0xf2),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf2, 0x00, 0x10),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x44, 0xf2),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf2, 0x80),
++	S6E3HAD_CMD(0x29, 0, 0, 0x60, 0x00, 0x00),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x34, 0x6a),
++	S6E3HAD_CMD(0x29, 0, 0, 0x6a, 0x00),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf7, 0x0f),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x3e, 0x91),
++	S6E3HAD_CMD(0x29, 0, 0, 0x91, 0x02),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x67, 0x91),
++	S6E3HAD_CMD(0x29, 0, 0, 0x91, 0x81),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x0d, 0xc2),
++	S6E3HAD_CMD(0x29, 0, 0, 0xc2, 0x01),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf7, 0x0f),
++	S6E3HAD_CMD(0x29, 0, 0, 0xe7, 0x2c),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x0c, 0xc2),
++	S6E3HAD_CMD(0x29, 0, 0, 0xc2, 0x60),
++	S6E3HAD_CMD(0x29, 0, 0, 0x53, 0x28),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x11, 0xc2),
++	S6E3HAD_CMD(0x29, 0, 0, 0xc2, 0x16),
++	S6E3HAD_CMD(0x29, 0, 0, 0x51, 0x07, 0xff),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf7, 0x0f),
++	S6E3HAD_CMD(0x29, 0, 0, 0xfc, 0xa5, 0xa5),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf0, 0xa5, 0xa5),
++	S6E3HAD_CMD(0x29, 1, 0, 0x9f, 0x5a, 0x5a),
++};
++
++/* __ss_vrr() for 120HS: samsung,vrr_tx_cmds_revA, LFD 10-120 Hz (min_div 12), frame insertion 14 00 01 */
++static const struct s6e3had_cmd s6e3had_vrr_120hs_cmds[] = {
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0xa6, 0xc7),
++	S6E3HAD_CMD(0x29, 0, 0, 0xc7, 0x09, 0xa8, 0x09, 0xa8, 0x01, 0xad, 0x01, 0xad, 0x01, 0xad),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x06, 0xbd),
++	S6E3HAD_CMD(0x29, 0, 0, 0xbd, 0x00, 0x2c, 0x14, 0x00, 0x01),
++	S6E3HAD_CMD(0x29, 0, 0, 0xbd, 0x01),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x17, 0xbd),
++	S6E3HAD_CMD(0x29, 0, 0, 0xbd, 0x40),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x03, 0xf2),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf2, 0x00),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x06, 0xf2),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf2, 0x00, 0x10),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x0d, 0xf2),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf2, 0x00, 0x10),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x44, 0xf2),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf2, 0x00),
++	S6E3HAD_CMD(0x29, 0, 0, 0x60, 0x00, 0x00),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb9, 0x09),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x34, 0x6a),
++	S6E3HAD_CMD(0x29, 0, 0, 0x6a, 0x00),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x03, 0xe3, 0xc6),
++	S6E3HAD_CMD(0x29, 0, 0, 0xc6, 0x00),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x53, 0xc7),
++	S6E3HAD_CMD(0x29, 0, 0, 0xc7, 0x00),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf7, 0x0f),
++};
++
++/* __ss_vrr() for 60HS: samsung,vrr_tx_cmds_revA, LFD 10-60 Hz (base 120, max_div 2, min_div 12), frame insertion 00 00 02 */
++static const struct s6e3had_cmd s6e3had_vrr_60hs_cmds[] = {
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0xa6, 0xc7),
++	S6E3HAD_CMD(0x29, 0, 0, 0xc7, 0x09, 0xa8, 0x09, 0xa8, 0x01, 0xad, 0x01, 0xad, 0x01, 0xad),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x06, 0xbd),
++	S6E3HAD_CMD(0x29, 0, 0, 0xbd, 0x00, 0x2c, 0x00, 0x00, 0x02),
++	S6E3HAD_CMD(0x29, 0, 0, 0xbd, 0x01),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x17, 0xbd),
++	S6E3HAD_CMD(0x29, 0, 0, 0xbd, 0x40),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x03, 0xf2),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf2, 0x00),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x06, 0xf2),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf2, 0x00, 0x10),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x0d, 0xf2),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf2, 0x00, 0x10),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x44, 0xf2),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf2, 0x00),
++	S6E3HAD_CMD(0x29, 0, 0, 0x60, 0x00, 0x04),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb9, 0x19),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x34, 0x6a),
++	S6E3HAD_CMD(0x29, 0, 0, 0x6a, 0x00),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x03, 0xe3, 0xc6),
++	S6E3HAD_CMD(0x29, 0, 0, 0xc6, 0x00),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x53, 0xc7),
++	S6E3HAD_CMD(0x29, 0, 0, 0xc7, 0x00),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf7, 0x0f),
++};
++
++/* __ss_vrr() for 60NS: samsung,vrr_tx_cmds_revA, LFD 30-60 Hz (min_div 2), frame insertion 00 00 01 */
++static const struct s6e3had_cmd s6e3had_vrr_60ns_cmds[] = {
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x86, 0xc7),
++	S6E3HAD_CMD(0x29, 0, 0, 0xc7, 0x09, 0xa8, 0x09, 0xa8, 0x01, 0xad, 0x01, 0xad, 0x01, 0xad),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x06, 0xbd),
++	S6E3HAD_CMD(0x29, 0, 0, 0xbd, 0x00, 0x04, 0x00, 0x00, 0x01),
++	S6E3HAD_CMD(0x29, 0, 0, 0xbd, 0x01),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x17, 0xbd),
++	S6E3HAD_CMD(0x29, 0, 0, 0xbd, 0x40),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x03, 0xf2),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf2, 0x50),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x06, 0xf2),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf2, 0x00, 0x10),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x0d, 0xf2),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf2, 0x00, 0x10),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x44, 0xf2),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf2, 0x80),
++	S6E3HAD_CMD(0x29, 0, 0, 0x60, 0x00, 0x00),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb9, 0x09),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x34, 0x6a),
++	S6E3HAD_CMD(0x29, 0, 0, 0x6a, 0x00),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x03, 0xe3, 0xc6),
++	S6E3HAD_CMD(0x29, 0, 0, 0xc6, 0x00),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x53, 0xc7),
++	S6E3HAD_CMD(0x29, 0, 0, 0xc7, 0x00),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf7, 0x0f),
++};
++
++/* qcom,mdss-dsi-off-command (fhd120hs) */
++static const struct s6e3had_cmd s6e3had_off_cmds[] = {
++	S6E3HAD_CMD(0x29, 0, 0, 0x9f, 0xa5, 0xa5),
++	S6E3HAD_CMD(0x05, 0, 0, 0x28),
++	S6E3HAD_CMD(0x05, 0, 0, 0x10),
++	S6E3HAD_CMD(0x29, 1, 120, 0x9f, 0x5a, 0x5a),
++};
++
++/* samsung,display_on_tx_cmds_revD */
++static const struct s6e3had_cmd s6e3had_display_on_cmds[] = {
++	S6E3HAD_CMD(0x29, 0, 0, 0xf0, 0x5a, 0x5a),
++	S6E3HAD_CMD(0x29, 0, 0, 0x9f, 0xa5, 0xa5),
++	S6E3HAD_CMD(0x29, 0, 0, 0xfc, 0x5a, 0x5a),
++	S6E3HAD_CMD(0x05, 1, 20, 0x29),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x0d, 0xc2),
++	S6E3HAD_CMD(0x29, 0, 0, 0xc2, 0x18),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf7, 0x0f),
++	S6E3HAD_CMD(0x29, 0, 0, 0xfc, 0xa5, 0xa5),
++	S6E3HAD_CMD(0x29, 0, 0, 0x9f, 0x5a, 0x5a),
++	S6E3HAD_CMD(0x29, 1, 0, 0xf0, 0xa5, 0xa5),
++};
++
++/* ss_acl_on(): samsung,acl_on_tx_cmds_revA, cmds[6] = 55 01 */
++static const struct s6e3had_cmd s6e3had_acl_on_cmds[] = {
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x02, 0xa3, 0xc7),
++	S6E3HAD_CMD(0x29, 0, 0, 0xc7, 0x0a, 0xd5),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x02, 0x91, 0xc7),
++	S6E3HAD_CMD(0x29, 0, 0, 0xc7, 0x55, 0x80, 0x01, 0x25, 0x49, 0x99),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x02, 0x9f, 0xc7),
++	S6E3HAD_CMD(0x29, 0, 0, 0xc7, 0x00, 0x00, 0x1f, 0x00),
++	S6E3HAD_CMD(0x29, 0, 0, 0x55, 0x01),
++};
++
++/* ss_brightness_gamma_mode2_normal(): samsung,gamma_mode2_normal_tx_cmds_revA, TSET 20; 51h is filled in at run time */
++static const struct s6e3had_cmd s6e3had_gamma_cmds[] = {
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x0c, 0xc2),
++	S6E3HAD_CMD(0x29, 0, 0, 0xc2, 0x60),
++	S6E3HAD_CMD(0x29, 0, 0, 0x53, 0x28),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x11, 0xc2),
++	S6E3HAD_CMD(0x29, 0, 0, 0xc2, 0x16),
++	S6E3HAD_CMD(0x29, 0, 0, 0x51, 0x07, 0xff),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x0d, 0xb1),
++	S6E3HAD_CMD(0x29, 1, 1, 0xb1, 0x14),
++	S6E3HAD_CMD(0x29, 1, 1, 0xf7, 0x0f),
++};
++
++/* ss_irc(), IRC_MODERATO_MODE: samsung,irc_off_tx_cmds_revA */
++static const struct s6e3had_cmd s6e3had_irc_cmds[] = {
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0xc2, 0x91),
++	S6E3HAD_CMD(0x29, 0, 0, 0x91, 0x27, 0x65, 0xff, 0x01, 0x00, 0x86, 0x0b, 0xff, 0x0e, 0xff, 0xff,
++		    0x0e, 0xff, 0x5c, 0x7a, 0xe5, 0x06, 0x06, 0x06, 0x18, 0x18, 0x18, 0x20, 0x20, 0x20, 0x26,
++		    0x26, 0x26, 0x28, 0x28, 0x28, 0x1b, 0x2f, 0xc7, 0x18, 0x74, 0x80, 0x00, 0x00, 0x22),
++};
++
++/* ss_vint(), xtalk off: samsung,vint_tx_cmds_revA, F4h 0x0E */
++static const struct s6e3had_cmd s6e3had_vint_cmds[] = {
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x1e, 0xf4),
++	S6E3HAD_CMD(0x29, 1, 0, 0xf4, 0x0e),
++};
++
++/* ss_ffc(), clock index 0 (910 Mbps): samsung,ffc_tx_cmds_revA */
++static const struct s6e3had_cmd s6e3had_ffc_cmds[] = {
++	S6E3HAD_CMD(0x29, 0, 0, 0xf0, 0x5a, 0x5a),
++	S6E3HAD_CMD(0x29, 0, 0, 0xfc, 0x5a, 0x5a),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x12, 0xc5),
++	S6E3HAD_CMD(0x29, 0, 0, 0xc5, 0x11, 0x10, 0x50, 0x05),
++	S6E3HAD_CMD(0x29, 0, 0, 0xb0, 0x00, 0x16, 0xc5),
++	S6E3HAD_CMD(0x29, 0, 0, 0xc5, 0x73, 0xf9, 0x77, 0xe9, 0x44, 0xfe, 0x43, 0xa8),
++	S6E3HAD_CMD(0x29, 0, 0, 0xfc, 0xa5, 0xa5),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf0, 0xa5, 0xa5),
++};
++static const struct s6e3had_cmd s6e3had_keys_on_cmds[] = {
++	S6E3HAD_CMD(0x29, 0, 0, 0xf0, 0x5a, 0x5a),
++	S6E3HAD_CMD(0x29, 0, 0, 0xfc, 0x5a, 0x5a),
++};
++
++static const struct s6e3had_cmd s6e3had_keys_off_cmds[] = {
++	S6E3HAD_CMD(0x29, 0, 0, 0xfc, 0xa5, 0xa5),
++	S6E3HAD_CMD(0x29, 0, 0, 0xf0, 0xa5, 0xa5),
++};
++
++/*
++ * The stock timings this driver offers. All of them run the DSI lanes at
++ * 910 Mbps (qcom,mdss-dsi-panel-clockrate), because the panel's frame rate
++ * follows the lane rate. MSM derives the lane rate from the mode clock,
++ * compressed by DSC to a third of hdisplay, so the horizontal front porch is
++ * stretched until that comes to 910 Mbps at the stock refresh rate; the other
++ * porches are stock. 96 and 48 Hz are left out: stock corrects their gamma
++ * with values computed from the panel's flash, which this driver doesn't do.
++ */
++struct s6e3had_timing {
++	struct drm_display_mode mode;
++	const struct s6e3had_cmd *on;
++	int on_count;
++	const struct s6e3had_cmd *vrr;
++	int vrr_count;
++};
++
++#define S6E3HAD_MODE(_rr, _hfp, _vfp, _vbp) {				\
++	.clock = (1080 + (_hfp) + 28 + 28) * (2640 + (_vfp) + 28 + (_vbp)) * (_rr) / 1000, \
++	.hdisplay = 1080,							\
++	.hsync_start = 1080 + (_hfp),						\
++	.hsync_end = 1080 + (_hfp) + 28,					\
++	.htotal = 1080 + (_hfp) + 28 + 28,					\
++	.vdisplay = 2640,							\
++	.vsync_start = 2640 + (_vfp),						\
++	.vsync_end = 2640 + (_vfp) + 28,					\
++	.vtotal = 2640 + (_vfp) + 28 + (_vbp),					\
++	.width_mm = 64,								\
++	.height_mm = 158,							\
++}
++
++static const struct s6e3had_timing s6e3had_timings[] = {
++	{	/* fhd120hs, the stock default */
++		.mode = S6E3HAD_MODE(120, 50, 16, 28),
++		.on = s6e3had_on_120hs_cmds, .on_count = ARRAY_SIZE(s6e3had_on_120hs_cmds),
++		.vrr = s6e3had_vrr_120hs_cmds, .vrr_count = ARRAY_SIZE(s6e3had_vrr_120hs_cmds),
++	},
++	{	/* fhd60hs */
++		.mode = S6E3HAD_MODE(60, 513, 24, 28),
++		.on = s6e3had_on_60hs_cmds, .on_count = ARRAY_SIZE(s6e3had_on_60hs_cmds),
++		.vrr = s6e3had_vrr_60hs_cmds, .vrr_count = ARRAY_SIZE(s6e3had_vrr_60hs_cmds),
++	},
++	{	/* fhd60ns */
++		.mode = S6E3HAD_MODE(60, 512, 28, 28),
++		.on = s6e3had_on_60ns_cmds, .on_count = ARRAY_SIZE(s6e3had_on_60ns_cmds),
++		.vrr = s6e3had_vrr_60ns_cmds, .vrr_count = ARRAY_SIZE(s6e3had_vrr_60ns_cmds),
++	},
++};
++
++/*
++ * Send a command set packet by packet, with the stock post waits.
++ * @override replaces the payload of the packet starting with its first byte.
++ */
++static int s6e3had_send(struct s6e3had *ctx, const struct s6e3had_cmd *cmds, int count,
++			const u8 *override, size_t override_len)
++{
++	struct mipi_dsi_device *dsi = ctx->dsi;
++	int i;
++
++	for (i = 0; i < count; i++) {
++		const struct s6e3had_cmd *c = &cmds[i];
++		struct mipi_dsi_msg msg = {
++			.channel = dsi->channel,
++			.type = c->type,
++			.tx_buf = c->data,
++			.tx_len = c->len,
++		};
++		ssize_t ret;
++
++		if (override && c->len == override_len && c->data[0] == override[0])
++			msg.tx_buf = override;
++
++		if (dsi->mode_flags & MIPI_DSI_MODE_LPM)
++			msg.flags |= MIPI_DSI_MSG_USE_LPM;
++
++		ret = dsi->host->ops->transfer(dsi->host, &msg);
++		if (ret < 0) {
++			dev_err(&dsi->dev, "failed to send %02x: %zd\n", c->data[0], ret);
++			return ret;
++		}
++
++		if (c->wait)
++			msleep(c->wait);
++	}
++
++	return 0;
++}
++
++#define s6e3had_send_set(ctx, set) \
++	s6e3had_send(ctx, set, ARRAY_SIZE(set), NULL, 0)
++
++/*
++ * Samsung's brightness packet (ss_brightness_dcs() with this panel's
++ * make_brightness_packet() and ss_brightness_tot_level()): F0h and FCh
++ * unlocked, then ACL on, gamma, IRC, VINT and VRR, then locked again.
++ */
++static int s6e3had_send_brightness(struct s6e3had *ctx, u16 level)
++{
++	u8 wrdisbv[] = { MIPI_DCS_SET_DISPLAY_BRIGHTNESS, level >> 8, level & 0xff };
++	int ret;
++
++	ret = s6e3had_send_set(ctx, s6e3had_keys_on_cmds);
++	if (!ret)
++		ret = s6e3had_send_set(ctx, s6e3had_acl_on_cmds);
++	if (!ret)
++		ret = s6e3had_send(ctx, s6e3had_gamma_cmds, ARRAY_SIZE(s6e3had_gamma_cmds),
++				   wrdisbv, sizeof(wrdisbv));
++	if (!ret)
++		ret = s6e3had_send_set(ctx, s6e3had_irc_cmds);
++	if (!ret)
++		ret = s6e3had_send_set(ctx, s6e3had_vint_cmds);
++	if (!ret)
++		ret = s6e3had_send(ctx, ctx->timing->vrr, ctx->timing->vrr_count, NULL, 0);
++	if (!ret)
++		ret = s6e3had_send_set(ctx, s6e3had_keys_off_cmds);
++
++	return ret;
++}
++
++static int s6e3had_power_on(struct s6e3had *ctx)
++{
++	int ret;
++
++	ret = regulator_enable(ctx->supplies[0].consumer);
++	if (ret)
++		return ret;
++
++	ret = regulator_enable(ctx->supplies[1].consumer);
++	if (ret)
++		goto err_vdd3;
++
++	ret = regulator_enable(ctx->supplies[2].consumer);
++	if (ret)
++		goto err_vddr;
++	usleep_range(11000, 12000);
++
++	/* Stock reset sequence: release reset and wait 10 ms. */
++	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
++	usleep_range(1000, 2000);
++	gpiod_set_value_cansleep(ctx->reset_gpio, 0);
++	usleep_range(10000, 11000);
++
++	return 0;
++
++err_vddr:
++	regulator_disable(ctx->supplies[1].consumer);
++err_vdd3:
++	regulator_disable(ctx->supplies[0].consumer);
++	return ret;
++}
++
++static void s6e3had_power_off(struct s6e3had *ctx)
++{
++	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
++
++	regulator_disable(ctx->supplies[2].consumer);
++	regulator_disable(ctx->supplies[1].consumer);
++	regulator_disable(ctx->supplies[0].consumer);
++}
++
++static int s6e3had_on(struct s6e3had *ctx)
++{
++	int ret;
++
++	ctx->dsi->mode_flags |= MIPI_DSI_MODE_LPM;	/* on-command state: dsi_lp_mode */
++
++	ret = s6e3had_send(ctx, ctx->timing->on, ctx->timing->on_count, NULL, 0);
++	if (ret)
++		return ret;
++
++	/* ss_panel_on_post(): brightness packet, then FFC */
++	ret = s6e3had_send_brightness(ctx, backlight_get_brightness(ctx->panel.backlight));
++	if (ret)
++		return ret;
++
++	return s6e3had_send_set(ctx, s6e3had_ffc_cmds);
++}
++
++/*
++ * drm_panel isn't told which mode was set, so look it up in the state of the
++ * connector the modes were handed to. A mode change is a full modeset, which
++ * powers the panel down and back up through here.
++ */
++static const struct s6e3had_timing *s6e3had_current_timing(struct s6e3had *ctx)
++{
++	struct drm_connector_state *conn_state;
++	int i;
++
++	conn_state = ctx->connector ? ctx->connector->state : NULL;
++	if (conn_state && conn_state->crtc && conn_state->crtc->state) {
++		const struct drm_display_mode *mode = &conn_state->crtc->state->mode;
++
++		for (i = 0; i < ARRAY_SIZE(s6e3had_timings); i++)
++			if (drm_mode_match(mode, &s6e3had_timings[i].mode,
++					   DRM_MODE_MATCH_TIMINGS | DRM_MODE_MATCH_CLOCK))
++				return &s6e3had_timings[i];
++	}
++
++	return &s6e3had_timings[0];
++}
++
++static int s6e3had_prepare(struct drm_panel *panel)
++{
++	struct s6e3had *ctx = to_s6e3had(panel);
++	int ret;
++
++	ctx->timing = s6e3had_current_timing(ctx);
++
++	ret = s6e3had_power_on(ctx);
++	if (ret)
++		return ret;
++
++	ret = s6e3had_on(ctx);
++	if (ret) {
++		dev_err(&ctx->dsi->dev, "failed to initialize panel: %d\n", ret);
++		s6e3had_power_off(ctx);
++	}
++
++	return ret;
++}
++
++static int s6e3had_enable(struct drm_panel *panel)
++{
++	return s6e3had_send_set(to_s6e3had(panel), s6e3had_display_on_cmds);
++}
++
++static int s6e3had_disable(struct drm_panel *panel)
++{
++	struct s6e3had *ctx = to_s6e3had(panel);
++	int ret;
++
++	ctx->dsi->mode_flags &= ~MIPI_DSI_MODE_LPM;	/* off-command state: dsi_hs_mode */
++	ret = s6e3had_send_set(ctx, s6e3had_off_cmds);
++	ctx->dsi->mode_flags |= MIPI_DSI_MODE_LPM;
++
++	return ret;
++}
++
++static int s6e3had_unprepare(struct drm_panel *panel)
++{
++	s6e3had_power_off(to_s6e3had(panel));
++
++	return 0;
++}
++
++static int s6e3had_get_modes(struct drm_panel *panel, struct drm_connector *connector)
++{
++	struct s6e3had *ctx = to_s6e3had(panel);
++	int i;
++
++	for (i = 0; i < ARRAY_SIZE(s6e3had_timings); i++) {
++		struct drm_display_mode *mode;
++
++		mode = drm_mode_duplicate(connector->dev, &s6e3had_timings[i].mode);
++		if (!mode)
++			return -ENOMEM;
++
++		drm_mode_set_name(mode);
++		mode->type = DRM_MODE_TYPE_DRIVER;
++		if (i == 0)
++			mode->type |= DRM_MODE_TYPE_PREFERRED;
++		drm_mode_probed_add(connector, mode);
++	}
++
++	connector->display_info.width_mm = s6e3had_timings[0].mode.width_mm;
++	connector->display_info.height_mm = s6e3had_timings[0].mode.height_mm;
++	ctx->connector = connector;
++
++	return ARRAY_SIZE(s6e3had_timings);
++}
++
++static const struct drm_panel_funcs s6e3had_panel_funcs = {
++	.prepare = s6e3had_prepare,
++	.enable = s6e3had_enable,
++	.disable = s6e3had_disable,
++	.unprepare = s6e3had_unprepare,
++	.get_modes = s6e3had_get_modes,
++};
++
++static int s6e3had_bl_update_status(struct backlight_device *bl)
++{
++	struct s6e3had *ctx = bl_get_data(bl);
++	unsigned long flags = ctx->dsi->mode_flags;
++	int ret;
++
++	ctx->dsi->mode_flags &= ~MIPI_DSI_MODE_LPM;
++	ret = s6e3had_send_brightness(ctx, backlight_get_brightness(bl));
++	ctx->dsi->mode_flags = flags;
++
++	return ret;
++}
++
++static const struct backlight_ops s6e3had_bl_ops = {
++	.update_status = s6e3had_bl_update_status,
++};
++
++static int s6e3had_probe(struct mipi_dsi_device *dsi)
++{
++	struct device *dev = &dsi->dev;
++	struct backlight_properties props = {
++		.type = BACKLIGHT_RAW,
++		.brightness = S6E3HAD_BRIGHTNESS_MAX / 2,
++		.max_brightness = S6E3HAD_BRIGHTNESS_MAX,
++	};
++	struct s6e3had *ctx;
++	int ret;
++
++	ctx = devm_drm_panel_alloc(dev, struct s6e3had, panel, &s6e3had_panel_funcs,
++				   DRM_MODE_CONNECTOR_DSI);
++	if (IS_ERR(ctx))
++		return PTR_ERR(ctx);
++
++	ret = devm_regulator_bulk_get_const(dev, ARRAY_SIZE(s6e3had_supplies),
++					    s6e3had_supplies, &ctx->supplies);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to get regulators\n");
++
++	/* The bootloader leaves the panel running; keep it out of reset. */
++	ctx->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_LOW);
++	if (IS_ERR(ctx->reset_gpio))
++		return dev_err_probe(dev, PTR_ERR(ctx->reset_gpio), "failed to get reset-gpios\n");
++
++	ctx->dsi = dsi;
++	ctx->timing = &s6e3had_timings[0];
++	mipi_dsi_set_drvdata(dsi, ctx);
++
++	dsi->lanes = 4;
++	dsi->format = MIPI_DSI_FMT_RGB888;
++	dsi->mode_flags = MIPI_DSI_CLOCK_NON_CONTINUOUS | MIPI_DSI_MODE_LPM;
++
++	ctx->panel.prepare_prev_first = true;
++
++	ctx->panel.backlight = devm_backlight_device_register(dev, dev_name(dev), dev, ctx,
++							       &s6e3had_bl_ops, &props);
++	if (IS_ERR(ctx->panel.backlight))
++		return dev_err_probe(dev, PTR_ERR(ctx->panel.backlight),
++				     "failed to register backlight\n");
++
++	drm_panel_add(&ctx->panel);
++
++	/* Stock PPS: DSC 1.1, two 540x40 slices, 8 bpc, 8 bpp, block prediction */
++	ctx->dsc.dsc_version_major = 1;
++	ctx->dsc.dsc_version_minor = 1;
++	ctx->dsc.slice_height = 40;
++	ctx->dsc.slice_width = 540;
++	ctx->dsc.slice_count = 1080 / ctx->dsc.slice_width;
++	ctx->dsc.bits_per_component = 8;
++	ctx->dsc.bits_per_pixel = 8 << 4; /* 4 fractional bits */
++	ctx->dsc.block_pred_enable = true;
++	dsi->dsc = &ctx->dsc;
++
++	ret = mipi_dsi_attach(dsi);
++	if (ret) {
++		drm_panel_remove(&ctx->panel);
++		return dev_err_probe(dev, ret, "failed to attach to DSI host\n");
++	}
++
++	return 0;
++}
++
++static void s6e3had_remove(struct mipi_dsi_device *dsi)
++{
++	struct s6e3had *ctx = mipi_dsi_get_drvdata(dsi);
++	int ret;
++
++	ret = mipi_dsi_detach(dsi);
++	if (ret)
++		dev_err(&dsi->dev, "failed to detach from DSI host: %d\n", ret);
++
++	drm_panel_remove(&ctx->panel);
++}
++
++static const struct of_device_id s6e3had_of_match[] = {
++	{ .compatible = "samsung,s6e3had-amf670za01" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, s6e3had_of_match);
++
++static struct mipi_dsi_driver s6e3had_driver = {
++	.probe = s6e3had_probe,
++	.remove = s6e3had_remove,
++	.driver = {
++		.name = "panel-samsung-s6e3had",
++		.of_match_table = s6e3had_of_match,
++	},
++};
++module_mipi_dsi_driver(s6e3had_driver);
++
++MODULE_AUTHOR("Noa Himesaka <himesaka@noa.codes>");
++MODULE_DESCRIPTION("DRM driver for the Samsung S6E3HAD AMF670ZA01 panel");
++MODULE_LICENSE("GPL");

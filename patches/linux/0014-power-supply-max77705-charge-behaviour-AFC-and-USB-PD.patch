@@ -1,0 +1,623 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] power: supply: max77705: charge_behaviour, AFC and USB PD
+
+charge_behaviour inhibit-charge turns charging off with the buck left
+on, Samsung's SEC_BAT_CHG_MODE_CHARGING_OFF for a full battery.
+
+Fast charging as Samsung's muic and pdic drivers do it through the USB-C
+block's opcode mailbox: AFC asks a DCP for 9 V (tx byte 0x46, the
+charger's own byte when it offers one, three retries, DP/DM back to 5 V
+when it gives up), and USB PD reads the source caps on PS_RDY, requests
+the 9 V fixed PDO (or the highest one below), and sets the input and
+charge current from it within 15 W, 3 A and the board's charge limit.
+The sink caps are sent at probe like stock's SET_SNKCAP. QC 2.0 and PPS
+are not ported.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+---
+diff --git a/Documentation/devicetree/bindings/power/supply/maxim,max77705.yaml b/Documentation/devicetree/bindings/power/supply/maxim,max77705.yaml
+--- a/Documentation/devicetree/bindings/power/supply/maxim,max77705.yaml
++++ b/Documentation/devicetree/bindings/power/supply/maxim,max77705.yaml
+@@ -73,6 +73,35 @@ properties:
+     type: boolean
+     description: 100 ms blanking instead of 6 ms on the BAT to SYS OCP.
+ 
++  maxim,hv-input-current-microamp:
++    description: Input current limit once AFC has raised VBUS to 9 V.
++
++  maxim,hv-charge-current-microamp:
++    description: Charge current once AFC has raised VBUS to 9 V.
++
++  maxim,pd-max-power-microwatt:
++    description:
++      Highest input power taken from a USB PD fixed PDO. Enables USB PD
++      PDO selection.
++
++  maxim,pd-max-voltage-microvolt:
++    description:
++      Voltage of the fixed PDO to ask for; without it, the highest PDO
++      below it.
++
++  maxim,pd-max-input-current-microamp:
++    description: Highest input current taken from a USB PD source.
++
++  maxim,pd-max-charge-current-microamp:
++    description: Highest charge current on USB PD.
++
++  maxim,pd-sink-caps:
++    $ref: /schemas/types.yaml#/definitions/uint8-array
++    maxItems: 32
++    description:
++      Data of the USB-C block's SET_SNKCAP command, the sink capabilities
++      offered to sources.
++
+   reg:
+     maxItems: 1
+ 
+diff --git a/drivers/power/supply/max77705_charger.c b/drivers/power/supply/max77705_charger.c
+--- a/drivers/power/supply/max77705_charger.c
++++ b/drivers/power/supply/max77705_charger.c
+@@ -18,6 +18,7 @@
+ #include <linux/platform_device.h>
+ #include <linux/power/max77705_charger.h>
+ #include <linux/power_supply.h>
++#include <linux/unaligned.h>
+ #include <linux/property.h>
+ #include <linux/regmap.h>
+ 
+@@ -41,6 +42,7 @@ static enum power_supply_property max77705_charger_props[] = {
+ 	POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE,
+ 	POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT,
+ 	POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT,
++	POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR,
+ };
+ 
+ static irqreturn_t max77705_aicl_irq(int irq, void *irq_drv_data)
+@@ -406,6 +408,51 @@ static int max77705_get_float_voltage(struct max77705_charger_data *chg,
+ 	return 0;
+ }
+ 
++/*
++ * Charging off with the buck left on, as Samsung's driver does for a full
++ * battery (SEC_BAT_CHG_MODE_CHARGING_OFF: mode 5, buck and charger, becomes
++ * mode 4, buck only). Only the CHG bit of the mode field changes.
++ */
++static int max77705_set_charge_behaviour(struct max77705_charger_data *chg,
++					 int behaviour)
++{
++	unsigned int mode;
++	int err;
++
++	err = regmap_field_read(chg->rfield[MAX77705_MODE], &mode);
++	if (err)
++		return err;
++
++	switch (behaviour) {
++	case POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO:
++		mode |= MAX77705_CHG_MASK;
++		break;
++	case POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE:
++		mode &= ~MAX77705_CHG_MASK;
++		break;
++	default:
++		return -EINVAL;
++	}
++
++	return regmap_field_write(chg->rfield[MAX77705_MODE], mode);
++}
++
++static int max77705_get_charge_behaviour(struct max77705_charger_data *chg,
++					 int *behaviour)
++{
++	unsigned int mode;
++	int err;
++
++	err = regmap_field_read(chg->rfield[MAX77705_MODE], &mode);
++	if (err)
++		return err;
++
++	*behaviour = (mode & MAX77705_CHG_MASK) ?
++		     POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO :
++		     POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE;
++	return 0;
++}
++
+ static int max77705_chg_get_property(struct power_supply *psy,
+ 					enum power_supply_property psp,
+ 					union power_supply_propval *val)
+@@ -433,6 +480,8 @@ static int max77705_chg_get_property(struct power_supply *psy,
+ 	case POWER_SUPPLY_PROP_VOLTAGE_MAX_DESIGN:
+ 		val->intval = chg->bat_info->voltage_max_design_uv;
+ 		break;
++	case POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR:
++		return max77705_get_charge_behaviour(chg, &val->intval);
+ 	case POWER_SUPPLY_PROP_MODEL_NAME:
+ 		val->strval = max77705_charger_model;
+ 		break;
+@@ -459,6 +508,9 @@ static int max77705_set_property(struct power_supply *psy,
+ 	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
+ 		err = max77705_set_input_current(chg, val->intval);
+ 		break;
++	case POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR:
++		err = max77705_set_charge_behaviour(chg, val->intval);
++		break;
+ 	default:
+ 		err = -EINVAL;
+ 	}
+@@ -472,6 +524,7 @@ static int max77705_property_is_writeable(struct power_supply *psy,
+ 	switch (psp) {
+ 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
+ 	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
++	case POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR:
+ 		return true;
+ 	default:
+ 		return false;
+@@ -486,6 +539,8 @@ static const struct power_supply_desc max77705_charger_psy_desc = {
+ 	.num_properties = ARRAY_SIZE(max77705_charger_props),
+ 	.get_property = max77705_chg_get_property,
+ 	.set_property = max77705_set_property,
++	.charge_behaviours = BIT(POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO) |
++			     BIT(POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE),
+ };
+ 
+ static void max77705_chgin_isr_work(struct work_struct *work)
+@@ -534,6 +589,7 @@ static int max77705_charger_parse_dt(struct max77705_charger_data *chg)
+ 	struct device *dev = chg->dev;
+ 	unsigned int fsw_hz = 1500000;
+ 	unsigned int b2sovrc_ua = 4800000;
++	int ret;
+ 
+ 	device_property_read_u32(dev, "maxim,switching-frequency-hz", &fsw_hz);
+ 
+@@ -580,6 +636,27 @@ static int max77705_charger_parse_dt(struct max77705_charger_data *chg)
+ 				       chg->charge_current_limit,
+ 				       MAX77705_NUM_PORT_TYPES);
+ 
++	/* fast charging, all optional: without them AFC and PD stay off */
++	device_property_read_u32(dev, "maxim,hv-input-current-microamp",
++				 &chg->hv_input_current);
++	device_property_read_u32(dev, "maxim,hv-charge-current-microamp",
++				 &chg->hv_charge_current);
++	if (!device_property_read_u32(dev, "maxim,pd-max-power-microwatt",
++				      &chg->pd_max_power_mw))
++		chg->pd_max_power_mw /= 1000;
++	if (!device_property_read_u32(dev, "maxim,pd-max-voltage-microvolt",
++				      &chg->pd_max_voltage_mv))
++		chg->pd_max_voltage_mv /= 1000;
++	device_property_read_u32(dev, "maxim,pd-max-input-current-microamp",
++				 &chg->pd_max_input_ua);
++	device_property_read_u32(dev, "maxim,pd-max-charge-current-microamp",
++				 &chg->pd_max_charge_ua);
++	ret = device_property_count_u8(dev, "maxim,pd-sink-caps");
++	if (ret > 0 && ret <= MAX77705_USBC_OPCODE_DATA_LEN &&
++	    !device_property_read_u8_array(dev, "maxim,pd-sink-caps",
++					   chg->snkcap, ret))
++		chg->snkcap_len = ret;
++
+ 	return 0;
+ }
+ 
+@@ -633,29 +710,301 @@ static int max77705_charger_update_port(struct max77705_charger_data *chg)
+ 		return ret;
+ 
+ 	port = status & MAX77705_USBC_BC_STATUS_CHGTYP;
+-	ret = max77705_charger_apply_port_current(chg, port);
+-	if (ret)
+-		return ret;
++	if (!(status & MAX77705_USBC_BC_STATUS_VBUSDET)) {
++		/* detach: the next cable starts from BC1.2 again */
++		cancel_delayed_work(&chg->afc_work);
++		chg->pd_contract = false;
++		chg->afc_retry = 0;
++		chg->pdo_num = 0;
++		chg->pd_target = 0;
++		port = MAX77705_PORT_NONE;
++	}
++
++	if (!chg->pd_contract && port != chg->port) {
++		ret = max77705_charger_apply_port_current(chg, port);
++		if (ret)
++			return ret;
++		/* stock muic: AFC 500 ms after a DCP, "Maxim's request" */
++		if (port == MAX77705_PORT_DCP && chg->hv_input_current)
++			mod_delayed_work(chg->wqueue, &chg->afc_work,
++					 msecs_to_jiffies(500));
++	}
++	chg->port = port;
+ 
+ 	power_supply_changed(chg->psy_chg);
+ 
+ 	return 0;
+ }
+ 
++/*
++ * The USB-C block's opcode mailbox (Samsung max77705_i2c_opcode_write/read):
++ * the opcode and its data go to 0x21, 0x41 ends a short command, the block
++ * answers with APCmdResI and the response sits at 0x51.
++ */
++static int max77705_usbc_cmd(struct max77705_charger_data *chg, u8 opcode,
++			     const u8 *wdata, unsigned int wlen,
++			     u8 *resp, unsigned int rlen)
++{
++	u8 buf[MAX77705_USBC_OPCODE_DATA_LEN + 1];
++	int ret;
++
++	if (wlen > MAX77705_USBC_OPCODE_DATA_LEN ||
++	    rlen > MAX77705_USBC_OPCODE_DATA_LEN)
++		return -EINVAL;
++
++	mutex_lock(&chg->cmd_lock);
++	reinit_completion(&chg->cmd_done);
++
++	buf[0] = opcode;
++	if (wlen)
++		memcpy(&buf[1], wdata, wlen);
++	ret = regmap_bulk_write(chg->regmap_muic, MAX77705_USBC_REG_OPCODE,
++				buf, wlen + 1);
++	if (!ret && wlen < MAX77705_USBC_OPCODE_DATA_LEN)
++		ret = regmap_write(chg->regmap_muic,
++				   MAX77705_USBC_REG_OPCODE_END, 0);
++	if (ret)
++		goto out;
++
++	/* OPCODE_WAIT_TIMEOUT */
++	if (!wait_for_completion_timeout(&chg->cmd_done,
++					 msecs_to_jiffies(3000))) {
++		dev_warn(chg->dev, "opcode 0x%02x: no response\n", opcode);
++		ret = -ETIMEDOUT;
++		goto out;
++	}
++
++	if (resp) {
++		ret = regmap_bulk_read(chg->regmap_muic,
++				       MAX77705_USBC_REG_OPCODE_RES, buf,
++				       rlen + 1);
++		if (ret)
++			goto out;
++		if (buf[0] != opcode) {
++			dev_warn(chg->dev, "opcode 0x%02x answered as 0x%02x\n",
++				 opcode, buf[0]);
++			ret = -EIO;
++			goto out;
++		}
++		memcpy(resp, buf, rlen + 1);
++	}
++out:
++	mutex_unlock(&chg->cmd_lock);
++	return ret;
++}
++
++static void max77705_charger_set_fast(struct max77705_charger_data *chg,
++				      unsigned int input_ua,
++				      unsigned int charge_ua)
++{
++	max77705_set_input_current(chg, input_ua);
++	max77705_set_charge_current(chg, charge_ua);
++	power_supply_changed(chg->psy_chg);
++}
++
++/*
++ * AFC on a DCP (stock max77705_muic_afc_work/handle_detect_dev_afc): ask for
++ * 9 V with tx byte 0x46, take the charger's own byte if it offers one,
++ * retry three times, and charge at the 9 V TA currents once VBUS is at 9 V.
++ */
++static void max77705_afc_work(struct work_struct *work)
++{
++	struct max77705_charger_data *chg =
++		container_of(work, struct max77705_charger_data, afc_work.work);
++	u8 tx = 0x46, resp[11];
++	unsigned int vbadc;
++	int i, ret;
++
++	for (chg->afc_retry = 0; chg->afc_retry <= 3; chg->afc_retry++) {
++		if (chg->pd_contract || chg->port != MAX77705_PORT_DCP)
++			return;
++
++		ret = max77705_usbc_cmd(chg, MAX77705_OP_AFC_RESULT_READ,
++					&tx, 1, resp, 10);
++		if (ret)
++			return;
++
++		vbadc = resp[2];
++		dev_dbg(chg->dev, "AFC result 0x%02x vbadc 0x%02x\n",
++			resp[1], vbadc);
++
++		switch (resp[1]) {
++		case 0:
++			/* VBADC 0x5..0x7: 7.5 to 10.5 V */
++			if (vbadc >= 0x5 && vbadc <= 0x7) {
++				dev_info(chg->dev, "AFC 9 V\n");
++				max77705_charger_set_fast(chg,
++							  chg->hv_input_current,
++							  chg->hv_charge_current);
++			}
++			return;
++		case 5:
++			/* the charger answered with its own 9 V byte */
++			for (i = 3; i <= 10 && resp[i]; i++) {
++				if ((resp[i] & 0xf0) == 0x40) {
++					tx = resp[i];
++					break;
++				}
++			}
++			continue;
++		case 4:
++			/* no AFC: stock tries QC 2.0 here, not ported */
++			return;
++		case 8:
++		case 9:
++		case 10:
++			/* cable short, stays a plain TA */
++			return;
++		default:
++			continue;
++		}
++	}
++
++	/* given up with VBUS raised: back to 5 V, DP to GND, DM open */
++	if (vbadc >= 0x5) {
++		u8 ctrl2 = 0x13;
++
++		max77705_usbc_cmd(chg, MAX77705_OP_BC_CTRL2_WRITE, &ctrl2, 1,
++				  NULL, 0);
++	}
++}
++
++static unsigned int max77705_pdo_mv(u32 pdo)
++{
++	return ((pdo >> 10) & 0x3ff) * 50;
++}
++
++static unsigned int max77705_pdo_ma(u32 pdo)
++{
++	return (pdo & 0x3ff) * 10;
++}
++
++static bool max77705_pdo_fixed(u32 pdo)
++{
++	return !(pdo >> 30);
++}
++
++/* stock usb_typec_handle_id_power_status: 15 W and 3 A at most */
++static unsigned int max77705_pdo_input_ma(struct max77705_charger_data *chg,
++					  u32 pdo)
++{
++	unsigned int mv = max77705_pdo_mv(pdo), ma = max77705_pdo_ma(pdo);
++
++	if (mv && mv * ma / 1000 > chg->pd_max_power_mw)
++		ma = chg->pd_max_power_mw * 1000 / mv;
++
++	return min(ma, chg->pd_max_input_ua / 1000);
++}
++
++/*
++ * USB PD as stock: on PS_RDY read the source caps, ask for the 9 V fixed PDO
++ * (or the highest one below 9 V, sec_bat_check_pdo_index), and once it is in
++ * place charge with its current, the charge current from its power at the
++ * float voltage (sec_bat_get_charging_current_in_power_list).
++ */
++static void max77705_pd_work(struct work_struct *work)
++{
++	struct max77705_charger_data *chg =
++		container_of(work, struct max77705_charger_data, pd_work);
++	unsigned int status, now, num, i, first = 0, second = 0, target;
++	unsigned int in_ma, chg_ua, float_mv;
++	u8 resp[MAX77705_USBC_OPCODE_DATA_LEN + 1], req, res[2];
++	int ret, retry;
++
++	ret = regmap_read(chg->regmap_muic, MAX77705_USBC_REG_PD_STATUS1, &status);
++	if (ret || !(status & MAX77705_USBC_PD_STATUS1_PSRDY))
++		return;
++
++	ret = max77705_usbc_cmd(chg, MAX77705_OP_CURRENT_SRCCAP, NULL, 0,
++				resp, 31);
++	if (ret)
++		return;
++
++	cancel_delayed_work(&chg->afc_work);
++	chg->pd_contract = true;
++
++	now = (resp[1] >> 3) & 0x7;
++	num = min_t(unsigned int, resp[1] & 0x7, MAX77705_MAX_PDO);
++	for (i = 0; i < num; i++)
++		chg->pdo[i] = get_unaligned_le32(&resp[2 + 4 * i]);
++	chg->pdo_num = num;
++	if (!now || now > num)
++		return;
++
++	for (i = 1; i <= num; i++) {
++		u32 pdo = chg->pdo[i - 1];
++		unsigned int mv = max77705_pdo_mv(pdo);
++
++		if (!max77705_pdo_fixed(pdo) || mv > chg->pd_max_voltage_mv)
++			continue;
++		if (mv == chg->pd_max_voltage_mv)
++			first = i;
++		if (mv < chg->pd_max_voltage_mv)
++			second = i;
++	}
++	target = max(first, second);
++	if (!target)
++		target = now;
++	chg->pd_target = target;
++
++	if (target != now) {
++		/* lower the input first if the new PDO allows less */
++		max77705_set_input_current(chg, 1000 *
++			min(max77705_pdo_input_ma(chg, chg->pdo[target - 1]),
++			    max77705_pdo_input_ma(chg, chg->pdo[now - 1])));
++
++		req = target;
++		for (retry = 0; retry < 3; retry++) {
++			ret = max77705_usbc_cmd(chg, MAX77705_OP_SRCCAP_REQUEST,
++						&req, 1, res, 1);
++			/* 0xfe SinkTxNg, 0xff not in SNK ready: try again */
++			if (ret || (res[1] != 0xfe && res[1] != 0xff))
++				break;
++		}
++		dev_info(chg->dev, "PD: PDO %u -> %u (%u mV)\n", now, target,
++			 max77705_pdo_mv(chg->pdo[target - 1]));
++		/* the next PS_RDY lands here again with the new PDO */
++		return;
++	}
++
++	in_ma = max77705_pdo_input_ma(chg, chg->pdo[now - 1]);
++	float_mv = chg->bat_info->voltage_max_design_uv > 0 ?
++		   chg->bat_info->voltage_max_design_uv / 1000 : 4200;
++	chg_ua = min_t(unsigned int, chg->pd_max_charge_ua,
++		       max77705_pdo_mv(chg->pdo[now - 1]) * in_ma / float_mv * 1000);
++
++	dev_info(chg->dev, "PD: %u mV, input %u mA, charge %u uA\n",
++		 max77705_pdo_mv(chg->pdo[now - 1]), in_ma, chg_ua);
++	max77705_charger_set_fast(chg, in_ma * 1000, chg_ua);
++}
++
+ static irqreturn_t max77705_charger_usbc_irq(int irq, void *data)
+ {
+ 	struct max77705_charger_data *chg = data;
+ 	unsigned int int_status;
+ 	int ret;
+ 
+-	/* UIC_INT is cleared by reading it */
++	unsigned int pd_status;
++
++	/* UIC_INT and PD_INT are cleared by reading them */
+ 	ret = regmap_read(chg->regmap_muic, MAX77705_USBC_REG_UIC_INT, &int_status);
+ 	if (ret)
+ 		return IRQ_HANDLED;
++	ret = regmap_read(chg->regmap_muic, MAX77705_USBC_REG_PD_INT, &pd_status);
++	if (ret)
++		pd_status = 0;
++
++	dev_dbg(chg->dev, "UIC_INT 0x%02x PD_INT 0x%02x\n", int_status, pd_status);
+ 
+-	dev_dbg(chg->dev, "UIC_INT 0x%02x\n", int_status);
++	if (int_status & MAX77705_USBC_UIC_INT_APCMDRES)
++		complete(&chg->cmd_done);
+ 
+-	max77705_charger_update_port(chg);
++	if (int_status & (MAX77705_USBC_UIC_INT_VBUSDET |
++			  MAX77705_USBC_UIC_INT_CHGTYP))
++		max77705_charger_update_port(chg);
++
++	if (pd_status & MAX77705_USBC_PD_INT_PSRDY)
++		queue_work(chg->wqueue, &chg->pd_work);
+ 
+ 	return IRQ_HANDLED;
+ }
+@@ -691,13 +1040,40 @@ static int max77705_charger_setup_usbc(struct max77705_charger_data *chg)
+ 	if (ret)
+ 		return ret;
+ 
++	ret = regmap_read(chg->regmap_muic, MAX77705_USBC_REG_PD_INT, &val);
++	if (ret)
++		return ret;
++
+ 	ret = regmap_update_bits(chg->regmap_muic, MAX77705_USBC_REG_UIC_INT_M,
++				 MAX77705_USBC_UIC_INT_APCMDRES |
+ 				 MAX77705_USBC_UIC_INT_VBUSDET |
+ 				 MAX77705_USBC_UIC_INT_CHGTYP, 0);
+ 	if (ret)
+ 		return ret;
+ 
+-	return max77705_charger_update_port(chg);
++	if (chg->pd_max_power_mw) {
++		ret = regmap_update_bits(chg->regmap_muic,
++					 MAX77705_USBC_REG_PD_INT_M,
++					 MAX77705_USBC_PD_INT_PSRDY, 0);
++		if (ret)
++			return ret;
++	}
++
++	/* stock max77705_set_snkcap(): the sink caps it offers to sources */
++	if (chg->snkcap_len)
++		max77705_usbc_cmd(chg, MAX77705_OP_SET_SNKCAP, chg->snkcap,
++				  chg->snkcap_len, NULL, 0);
++
++	chg->port = MAX77705_PORT_NONE;
++	ret = max77705_charger_update_port(chg);
++	if (ret)
++		return ret;
++
++	/* a contract made before we were here raises no PS_RDY */
++	if (chg->pd_max_power_mw)
++		queue_work(chg->wqueue, &chg->pd_work);
++
++	return 0;
+ }
+ 
+ static int max77705_charger_initialize(struct max77705_charger_data *chg)
+@@ -949,6 +1325,15 @@ static int max77705_charger_probe(struct i2c_client *i2c)
+ 	if (ret)
+ 		return dev_err_probe(dev, ret, "failed to initialize interrupt work\n");
+ 
++	mutex_init(&chg->cmd_lock);
++	init_completion(&chg->cmd_done);
++	ret = devm_work_autocancel(dev, &chg->pd_work, max77705_pd_work);
++	if (ret)
++		return ret;
++	ret = devm_delayed_work_autocancel(dev, &chg->afc_work, max77705_afc_work);
++	if (ret)
++		return ret;
++
+ 	ret = max77705_charger_initialize(chg);
+ 	if (ret)
+ 		return dev_err_probe(dev, ret, "failed to initialize charger IC\n");
+diff --git a/include/linux/power/max77705_charger.h b/include/linux/power/max77705_charger.h
+--- a/include/linux/power/max77705_charger.h
++++ b/include/linux/power/max77705_charger.h
+@@ -149,6 +149,25 @@
+ #define MAX77705_USBC_UIC_INT_CHGTYP	BIT(1)
+ #define MAX77705_USBC_BC_STATUS_VBUSDET	BIT(7)
+ #define MAX77705_USBC_BC_STATUS_CHGTYP	GENMASK(1, 0)
++#define MAX77705_USBC_UIC_INT_APCMDRES	BIT(7)
++#define MAX77705_USBC_REG_PD_INT	0x04
++#define MAX77705_USBC_REG_PD_STATUS1	0x0d
++#define MAX77705_USBC_REG_PD_INT_M	0x10
++#define MAX77705_USBC_PD_INT_PSRDY	BIT(6)
++#define MAX77705_USBC_PD_STATUS1_PSRDY	BIT(4)
++#define MAX77705_USBC_REG_OPCODE	0x21
++#define MAX77705_USBC_REG_OPCODE_END	0x41
++#define MAX77705_USBC_REG_OPCODE_RES	0x51
++#define MAX77705_USBC_OPCODE_DATA_LEN	32
++
++/* USB-C block opcodes (Samsung max77705.h, max77705-muic.h) */
++#define MAX77705_OP_BC_CTRL2_WRITE	0x04
++#define MAX77705_OP_AFC_RESULT_READ	0x21
++#define MAX77705_OP_SET_SNKCAP		0x2e
++#define MAX77705_OP_CURRENT_SRCCAP	0x30
++#define MAX77705_OP_SRCCAP_REQUEST	0x32
++
++#define MAX77705_MAX_PDO		7
+ 
+ #define AICL_WORK_DELAY_MS		100
+ 
+@@ -231,6 +250,28 @@ struct max77705_charger_data {
+ 	unsigned int		fsw;
+ 	unsigned int		topoff_minutes;
+ 	bool			b2sovrc_dtc_100ms;
++
++	/* opcode mailbox of the USB-C block */
++	struct mutex		cmd_lock;	/* one opcode at a time */
++	struct completion	cmd_done;
++
++	/* fast charging: AFC on a DCP, USB PD fixed PDOs */
++	struct work_struct	pd_work;
++	struct delayed_work	afc_work;
++	unsigned int		port;
++	bool			pd_contract;
++	unsigned int		afc_retry;
++	u32			pdo[MAX77705_MAX_PDO];
++	unsigned int		pdo_num;
++	unsigned int		pd_target;
++	u8			snkcap[MAX77705_USBC_OPCODE_DATA_LEN];
++	unsigned int		snkcap_len;
++	unsigned int		hv_input_current;
++	unsigned int		hv_charge_current;
++	unsigned int		pd_max_power_mw;
++	unsigned int		pd_max_voltage_mv;
++	unsigned int		pd_max_input_ua;
++	unsigned int		pd_max_charge_ua;
+ };
+ 
+ #endif /* __MAX77705_CHARGER_H */

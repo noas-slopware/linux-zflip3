@@ -1,0 +1,22 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] ASoC: dt-bindings: qcom,lpass-va-macro: add SM8350
+
+The SM8350 VA macro is programmed like the SM8250 one, with the same
+clocks from the ADSP, so describe it with the SM8250 compatible as
+fallback.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+--- a/Documentation/devicetree/bindings/sound/qcom,lpass-va-macro.yaml
++++ b/Documentation/devicetree/bindings/sound/qcom,lpass-va-macro.yaml
+@@ -28,6 +28,9 @@
+               - qcom,sm8750-lpass-va-macro
+               - qcom,x1e80100-lpass-va-macro
+           - const: qcom,sm8550-lpass-va-macro
++      - items:
++          - const: qcom,sm8350-lpass-va-macro
++          - const: qcom,sm8250-lpass-va-macro
+ 
+   reg:
+     maxItems: 1

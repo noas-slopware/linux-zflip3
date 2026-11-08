@@ -1,0 +1,141 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] drm/msm/a6xx: don't map GMU regions with devm
+
+a6xx_gmu_init() maps RSCC, and a6xx_gmu_rpmh_init() the PDC regions, with
+devm_platform_ioremap_resource_byname() on the GMU platform device. That
+device never has a driver bound, so the devres entries are only released
+when the device itself goes away: if the GPU probe fails after these
+mappings, for example because it defers, the next attempt fails with
+
+  platform 3d6a000.gmu: error -EBUSY: can't request region for resource [mem 0x03de0000-0x03deffff]
+  adreno 3d00000.gpu: failed to load adreno gpu
+
+and the GPU never comes up. Seen on SM8350 (Adreno 660) with
+msm.separate_gpu_kms=1: the first probe at boot fails and is retried,
+and the retry hit the stale RSCC mapping, then the stale PDC one.
+
+Map RSCC with ioremap() like the GMU core and unmap it on the error and
+remove paths, and map the PDC regions only for the duration of
+a6xx_gmu_rpmh_init(), which is their only user.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+---
+diff --git a/$f b/$f
+--- a/drivers/gpu/drm/msm/adreno/a6xx_gmu.c
++++ b/drivers/gpu/drm/msm/adreno/a6xx_gmu.c
+@@ -665,6 +665,18 @@
+ 	writel(value, ptr + (offset << 2));
+ }
+ 
++/*
++ * The PDC regions are only written here, once per GPU probe. Map them for the
++ * duration only: devm mappings on the GMU device, which never has a driver
++ * bound, outlive the GPU and make the next probe fail with -EBUSY.
++ */
++static void __iomem *a6xx_gmu_ioremap_byname(struct platform_device *pdev, const char *name)
++{
++	struct resource *res = platform_get_resource_byname(pdev, IORESOURCE_MEM, name);
++
++	return res ? ioremap(res->start, resource_size(res)) : NULL;
++}
++
+ static void a6xx_gmu_rpmh_init(struct a6xx_gmu *gmu)
+ {
+ 	struct a6xx_gpu *a6xx_gpu = container_of(gmu, struct a6xx_gpu, gmu);
+@@ -680,8 +692,8 @@
+ 	if (adreno_is_a8xx(adreno_gpu))
+ 		return;
+ 
+-	pdcptr = devm_platform_ioremap_resource_byname(pdev, "gmu_pdc");
+-	if (IS_ERR(pdcptr))
++	pdcptr = a6xx_gmu_ioremap_byname(pdev, "gmu_pdc");
++	if (!pdcptr)
+ 		return;
+ 
+ 	if (adreno_is_a650_family(adreno_gpu) ||
+@@ -695,9 +707,11 @@
+ 		pdc_address_offset = 0x30080;
+ 
+ 	if (!pdc_in_aop) {
+-		seqptr = devm_platform_ioremap_resource_byname(pdev, "gmu_pdc_seq");
+-		if (IS_ERR(seqptr))
++		seqptr = a6xx_gmu_ioremap_byname(pdev, "gmu_pdc_seq");
++		if (!seqptr) {
++			iounmap(pdcptr);
+ 			return;
++		}
+ 	}
+ 
+ 	/* Disable SDE clock gating */
+@@ -788,6 +802,10 @@
+ 
+ 	/* ensure no writes happen before the uCode is fully written */
+ 	wmb();
++
++	if (seqptr)
++		iounmap(seqptr);
++	iounmap(pdcptr);
+ }
+ 
+ /*
+@@ -2113,6 +2131,24 @@
+ 	pm_runtime_put(&gpu->pdev->dev);
+ }
+ 
++/*
++ * a650-family and a7xx GMUs have RSCC in a region of their own. It is mapped
++ * with plain ioremap() like the GMU core: the GMU device never has a driver
++ * bound, so devm mappings on it would only be released when the device goes
++ * away, and a GPU probe that defers would find the region still busy.
++ */
++static bool a6xx_gmu_has_rscc_region(struct adreno_gpu *adreno_gpu)
++{
++	return adreno_is_a650_family(adreno_gpu) || adreno_is_a7xx(adreno_gpu);
++}
++
++static void a6xx_gmu_unmap_rscc(struct adreno_gpu *adreno_gpu, struct a6xx_gmu *gmu)
++{
++	if (a6xx_gmu_has_rscc_region(adreno_gpu) && gmu->rscc)
++		iounmap(gmu->rscc);
++	gmu->rscc = NULL;
++}
++
+ void a6xx_gmu_remove(struct a6xx_gpu *a6xx_gpu)
+ {
+ 	struct adreno_gpu *adreno_gpu = &a6xx_gpu->base;
+@@ -2144,9 +2180,9 @@
+ 	if (!IS_ERR_OR_NULL(gmu->qmp))
+ 		qmp_put(gmu->qmp);
+ 
++	a6xx_gmu_unmap_rscc(adreno_gpu, gmu);
+ 	iounmap(gmu->mmio);
+ 	gmu->mmio = NULL;
+-	gmu->rscc = NULL;
+ 
+ 	if (!adreno_has_gmu_wrapper(adreno_gpu) &&
+ 	    !adreno_has_rgmu(adreno_gpu)) {
+@@ -2399,10 +2435,12 @@
+ 	/* Identify gmu base offset from gpu base address */
+ 	gmu->mmio_offset = (u32)(start - res->start);
+ 
+-	if (adreno_is_a650_family(adreno_gpu) ||
+-	    adreno_is_a7xx(adreno_gpu)) {
+-		gmu->rscc = devm_platform_ioremap_resource_byname(pdev, "rscc");
+-		if (IS_ERR(gmu->rscc)) {
++	if (a6xx_gmu_has_rscc_region(adreno_gpu)) {
++		struct resource *rscc_res =
++			platform_get_resource_byname(pdev, IORESOURCE_MEM, "rscc");
++
++		gmu->rscc = rscc_res ? ioremap(rscc_res->start, resource_size(rscc_res)) : NULL;
++		if (!gmu->rscc) {
+ 			ret = -ENODEV;
+ 			goto err_mmio;
+ 		}
+@@ -2485,6 +2523,7 @@
+ 	dev_pm_domain_detach(gmu->cxpd, false);
+ 
+ err_mmio:
++	a6xx_gmu_unmap_rscc(adreno_gpu, gmu);
+ 	iounmap(gmu->mmio);
+ 	free_irq(gmu->gmu_irq, gmu);
+ 	free_irq(gmu->hfi_irq, gmu);
