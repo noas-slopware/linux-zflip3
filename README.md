@@ -5,10 +5,12 @@ install tools and notes needed to run Arch Linux on it. Port by Noa Himesaka. No
 Samsung.
 
 **Status: daily-usable bring-up.** Arch Linux Ports with Plasma Mobile runs from UFS with
-display, touch, Wi-Fi, Bluetooth, GPU, charging, speakers, cellular data, SMS, MMS and VoLTE
-calls. Not yet: waking from suspend for an incoming call or SMS, the earpiece, the cover
-display. [`STATE.md`](STATE.md) has the details. The roadmap and the reasoning behind each
-step live on the `docs` branch ([`docs/plan.md`](https://github.com/noas-slopware/linux-zflip3/blob/docs/docs/plan.md)).
+display, touch, Wi-Fi, Bluetooth, GPU, charging, speakers, microphone, cellular data, SMS,
+MMS and VoLTE calls. Not yet: waking from suspend for an incoming call or SMS, the earpiece,
+DTMF, the cameras and hardware video decode, the cover display, the fingerprint sensor,
+motion and environment sensors, NFC, GNSS, wireless charging, the camera flash, and the
+hinge angle beyond open/closed. [`STATE.md`](STATE.md) has the details. The roadmap and the reasoning behind
+each step live on the `docs` branch ([`docs/plan.md`](https://github.com/noas-slopware/linux-zflip3/blob/docs/docs/plan.md)).
 
 ## The device
 
@@ -47,7 +49,33 @@ unlockable.
 | SMS send and receive, received while ModemManager or the phone was down | verified |
 | MMS send and receive (Spacebar) | verified |
 | VoLTE calls in and out, to and from other networks, AMR-WB / AMR-NB | verified |
+
+## Not working yet
+
+"Not started" means there is no driver, no DT node, or no userspace integration in this tree,
+not that the hardware is broken on this unit.
+
+| Subsystem | State |
+|---|---|
 | Incoming call or SMS waking the phone from suspend | not yet: delivered at the next wake |
+| Earpiece during calls | calls play on the speaker; no Voice Call UCM profile yet |
+| Emergency and supplementary calls | DTMF is never sent; call waiting, hold and conference are not implemented |
+| Wi-Fi calling (VoWiFi) | not implemented |
+| 5G NR | the modem reports the capability; data and voice have only been verified on LTE |
+| Cameras (rear 12 MP wide + 12 MP ultrawide, front 10 MP) | not started: no sensor, CCI or CAMSS nodes |
+| Hardware video decode and encode (qcom-iris) | nodes exist but firmware load fails, so no VA-API and no V4L2 decode |
+| Camera flash and torch | no LED driver |
+| Fingerprint sensor in the power button | not started: the pins are TZ-owned, see `STATE.md` |
+| Accelerometer, gyro, magnetometer, proximity, ambient light | not started: no IIO drivers or DT nodes |
+| NFC | not started: the GPIO names are reserved only, there is no PN553/SN100 node |
+| GNSS | not started: no GNSS driver or modem LOC integration |
+| Cover display | not driven; only the main S6E3HAD panel is |
+| USB host/OTG | untested |
+| Wireless charging and reverse wireless charging | not ported; the WPC GPIOs are named but unused |
+| Hinge angle | only open/closed via `SW_LID`, no angle sensor |
+| Bluetooth audio (A2DP/HFP) and USB-C audio | untested |
+| Idle power, thermal limits, charge curves | not tuned; QC 2.0, PPS and wireless charging are not ported |
+| RTC alarm waking from suspend | untested |
 
 ## Boot chain
 
@@ -83,13 +111,21 @@ partitions over USB.
 
 ### Next
 
-- Fold: closing suspends and opening wakes (done); still to do is the cover display
-  while closed.
+Priority order for a daily driver:
+
+- Incoming calls and SMS waking the phone from suspend: the IPA wakeup source never fires.
+- Earpiece during calls, then Bluetooth and USB-C audio.
+- DTMF, call waiting, hold, conference, and emergency calls.
+- Modem recovery after suspend, airplane mode or a modem crash.
+- Cameras and hardware video decode, both Iris work: CAMSS/CCI, the three sensors and the
+  flash LED, then the iris firmware loading and VA-API.
+- Fingerprint sensor.
+- Motion and environment sensors, so auto-rotate, proximity and auto-brightness work.
+- NFC and GNSS.
+- Cover display while folded.
+- Wireless charging, QC 2.0, PPS, thermal limits and idle drain.
 - Power and volume keys handled by Plasma Mobile (lock and sleep) instead of logind's poweroff.
-- Misc sensors (skipped for now).
-- Battery: AFC 9 V needs a test with a Samsung AFC brick; QC 2.0 and PPS not ported.
-- Cellular: an incoming call or SMS must wake the phone (the IPA wakeup source never fires),
-  call audio on the earpiece, DTMF, and the rest of the list in `STATE.md`.
+- The rest of the list in `STATE.md`.
 
 ### For the rootfs rebuild
 
@@ -100,9 +136,17 @@ everything, cellular included, works:
   plasma-settings qmlkonsole bluedevil kscreen firefox feedbackd evtest i2c-tools plasma-dialer`
   (plus the Adreno zap shader),
 - the cellular stack built on the phone: `b2q-imsd` from `userspace/imsd/packaging`,
-  ModemManager with `patches/modemmanager/`, Spacebar from `userspace/spacebar`, and
-  `opencore-amr` plus `vo-amrwbenc` for the call codecs,
-- user `mogumo` (groups wheel, video, audio, input, render), no password set by the
+  ModemManager with `patches/modemmanager/`, Spacebar from `userspace/spacebar` with
+  `patches/spacebar/`, and `opencore-amr` plus `vo-amrwbenc` for the call codecs,
+- the audio bits: `tools/extract-amp-firmware.sh` output in `/usr/lib/firmware/cirrus/`,
+  the UCM files under `userspace/rootfs/usr/share/alsa/ucm2/`, the WirePlumber drop-in
+  under `userspace/rootfs/etc/wireplumber/`, and the CS35L41 module once the 15 ms
+  mailbox build is final,
+- the IMS runtime directories: `/var/lib/b2q-imsd/inbox` and `/run/b2q-imsd` for the
+  durable SMS inbox and the call audio socket,
+- the Spacebar MMSC default for `<user>` (`http://omammsc.uplus.co.kr:9084`,
+  no proxy) so a reimage can send MMS without opening settings,
+- user `<user>` (groups wheel, video, audio, input, render), no password set by the
   build, and `plasmalogin.service` enabled; the autologin and `LockOnStart` files are
   already in `userspace/rootfs/etc/`, so the first screen is Plasma Mobile's lock screen,
 - mobile-config-firefox 5.5.0 with the four Fenix patches from linux-hiby-rs6

@@ -1,6 +1,0 @@
-#!/bin/bash
-killall tayga 2>/dev/null || true
-ip route del default via 192.0.0.1 dev clat0 metric 700 2>/dev/null || true
-ip link set clat0 down 2>/dev/null || true
-ip link delete clat0 2>/dev/null || true
-echo "CLAT stopped"
