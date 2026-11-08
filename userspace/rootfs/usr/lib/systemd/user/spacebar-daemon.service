@@ -1,0 +1,12 @@
+[Unit]
+Description=Plasma Mobile SMS Daemon
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=/usr/lib/spacebar-daemon
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

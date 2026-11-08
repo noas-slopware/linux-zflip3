@@ -1,0 +1,138 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# PID 1 of the bring-up initramfs.
+#
+# No UART, and the ACM console proved one-way silent on the stock kernel. So the data
+# channel is the USB descriptor itself: configfs lets us rewrite the gadget's product,
+# serial and manufacturer strings, and the host reads them back with lsusb -v. Roughly
+# 300 bytes per re-bind, which is plenty for the facts we are missing.
+#
+# PID 1 must never exit; doing so panics the kernel and the bootloader resets the phone.
+
+/bin/busybox --install -s /bin
+
+mount -t proc     proc     /proc
+mount -t sysfs    sys      /sys
+mount -t devtmpfs devtmpfs /dev
+mkdir -p /dev/pts && mount -t devpts devpts /dev/pts
+
+echo "##### INIT REACHED (PID 1) #####" > /dev/tty0
+
+# Whatever the previous boot left in ramoops goes on screen first, then hold it there
+# long enough to photograph.
+if mount -t pstore pstore /sys/fs/pstore 2>/dev/null && [ -n "$(ls /sys/fs/pstore 2>/dev/null)" ]; then
+  for f in /sys/fs/pstore/*; do
+    echo "=== $f" > /dev/tty0
+    tail -n 60 "$f" > /dev/tty0
+  done
+  sleep 60
+fi
+
+# --- collect -------------------------------------------------------------
+model=$(tr -d '\0' < /proc/device-tree/model 2>/dev/null)
+compat=$(tr -d '\0' < /proc/device-tree/compatible 2>/dev/null)
+memkb=$(awk '/MemTotal/{print $2}' /proc/meminfo 2>/dev/null)
+panel=$(cat /sys/class/lcd/panel/panel_name 2>/dev/null)
+[ -n "$panel" ] || panel=$(cat /sys/class/lcd/panel/panel_id 2>/dev/null)
+[ -n "$panel" ] || panel=$(ls /sys/class/lcd/panel 2>/dev/null | tr '\n' ',' )
+ufs=$(cat /sys/block/sda/device/model 2>/dev/null)
+slots=$(ls /sys/kernel/config/usb_gadget 2>/dev/null | tr '\n' ',')
+
+# Trim the strings so they fit the 126-character descriptor limit.
+short() { printf '%s' "$1" | cut -c1-120; }
+
+prod="b2q panel=${panel} ufs=${ufs}"
+manu="compat=${compat}"
+
+# --- display: fill the framebuffer so the screen visibly changes ---
+fb="none"
+if [ -e /dev/fb0 ]; then
+  start=$(cat /sys/class/graphics/fb0/smem_start 2>/dev/null)
+  size=$(cat /sys/class/graphics/fb0/virtual_size 2>/dev/null)
+  if dd if=/dev/zero of=/dev/fb0 bs=65536 count=16 2>/dev/null; then wr=ok; else wr=err; fi
+  fb="fb0@${start}/${size}/${wr}"
+elif [ -e /dev/dri/card0 ]; then
+  fb="dri0"
+fi
+
+ser="display=${fb} mem=${memkb}kB ${model}"
+
+# --- gadget --------------------------------------------------------------
+mount -t configfs none /sys/kernel/config 2>/dev/null || true
+G=/sys/kernel/config/usb_gadget/g1
+mkdir -p "$G" 2>/dev/null
+echo 0x1d6b > "$G/idVendor" 2>/dev/null
+echo 0x0104 > "$G/idProduct" 2>/dev/null
+mkdir -p "$G/strings/0x409" 2>/dev/null
+mkdir -p "$G/configs/c.1/strings/0x409" 2>/dev/null
+echo "diag" > "$G/configs/c.1/strings/0x409/configuration" 2>/dev/null
+# NCM first, so hosts that only look at the first function still get the network.
+# Fixed MACs keep the host's interface name stable across boots.
+mkdir -p "$G/functions/ncm.usb0" 2>/dev/null
+echo 02:00:00:b2:00:01 > "$G/functions/ncm.usb0/dev_addr" 2>/dev/null
+echo 02:00:00:b2:00:02 > "$G/functions/ncm.usb0/host_addr" 2>/dev/null
+ln -s "$G/functions/ncm.usb0" "$G/configs/c.1/" 2>/dev/null
+mkdir -p "$G/functions/acm.gs0" 2>/dev/null
+ln -s "$G/functions/acm.gs0" "$G/configs/c.1/" 2>/dev/null
+
+udc=$(ls /sys/class/udc 2>/dev/null | head -n1)
+
+rebind() {
+  [ -n "$udc" ] || return 1
+  echo "" > "$G/UDC" 2>/dev/null
+  sleep 1
+  echo "$udc" > "$G/UDC" 2>/dev/null
+}
+
+echo "$(short "$prod")" > "$G/strings/0x409/product" 2>/dev/null
+echo "$(short "$ser")" > "$G/strings/0x409/serialnumber" 2>/dev/null
+echo "$(short "$manu")" > "$G/strings/0x409/manufacturer" 2>/dev/null
+rebind
+
+# --- network -------------------------------------------------------------
+# The phone is 172.16.42.1 on the NCM link and hands the host 172.16.42.2 over DHCP;
+# telnet to it for a shell with a real pty.
+ifname=$(cat "$G/functions/ncm.usb0/ifname" 2>/dev/null)
+[ -n "$ifname" ] || ifname=usb0
+ip link set lo up 2>/dev/null
+ip addr add 172.16.42.1/24 dev "$ifname" 2>/dev/null
+ip link set "$ifname" up 2>/dev/null
+
+mkdir -p /etc /var/lib/misc
+touch /var/lib/misc/udhcpd.leases
+printf '%s\n' "start 172.16.42.2" "end 172.16.42.2" "interface $ifname" \
+  "max_leases 1" "option subnet 255.255.255.0" "option lease 3600" > /etc/udhcpd.conf
+udhcpd /etc/udhcpd.conf 2>/dev/null
+telnetd -l /bin/sh 2>/dev/null
+
+# --- root --------------------------------------------------------------
+# / is the F2FS on LVM that install-rootfs creates. Volume Up during the first three
+# seconds keeps us here instead, with the telnet and ACM shells.
+vol_up() { awk '/Volume Up/{print $2}' /proc/interrupts 2>/dev/null; }
+echo "Hold Volume Up for the rescue shell" > /dev/tty0
+before=$(vol_up)
+sleep 3
+rescue=0
+[ "$(vol_up)" = "$before" ] || rescue=1
+
+if [ "$rescue" = 0 ] && lvm vgchange -ay --sysinit b2q >/dev/null 2>&1 \
+   && mount -t f2fs -o rw,noatime /dev/b2q/root /newroot 2>/dev/null; then
+  if [ -x /newroot/usr/lib/systemd/systemd ]; then
+    echo "switching to /dev/b2q/root" > /dev/tty0
+    # systemd-networkd takes the link over with the same addresses.
+    killall telnetd udhcpd 2>/dev/null
+    ip addr flush dev "$ifname" 2>/dev/null
+    for m in /dev /proc /sys; do mount --move "$m" "/newroot$m"; done
+    exec switch_root /newroot /usr/lib/systemd/systemd
+  fi
+  umount /newroot
+fi
+[ "$rescue" = 1 ] && echo "rescue shell: telnet 172.16.42.1" > /dev/tty0
+
+# Keep offering a console on the ACM port as well.
+while :; do
+  if [ -c /dev/ttyGS0 ]; then
+    setsid /bin/sh -i </dev/ttyGS0 >/dev/ttyGS0 2>&1
+  fi
+  sleep 2
+done

@@ -1,0 +1,15 @@
+[Unit]
+Description=Set the Bluetooth public address from Samsung efs
+# The QCA6390 has no public address of its own, so hci0 stays unconfigured
+# (invisible to bluetoothd) until one is set. udev starts this when hci0 is
+# registered, but the controller only accepts the address once its firmware
+# download has finished (about 1 s later), so a failed attempt is retried.
+Before=bluetooth.service
+StartLimitIntervalSec=60
+StartLimitBurst=20
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'exec /usr/bin/btmgmt --index 0 public-addr "$(/usr/lib/b2q/efs-addr bt)"'
+Restart=on-failure
+RestartSec=1

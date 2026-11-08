@@ -1,0 +1,16 @@
+[Unit]
+Description=Activate the USIM as the modem's primary GW provisioning session
+# The modem firmware does not open the session by itself; on stock Android
+# the radio layer does it. ModemManager sees no SIM without one.
+After=rmtfs.service
+Wants=rmtfs.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/b2q/sim-provision
+# The script itself waits up to 3 minutes for the card.
+TimeoutStartSec=240
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
