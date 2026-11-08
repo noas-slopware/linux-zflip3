@@ -1,0 +1,8 @@
+2026-11-06T17:39:16.073 [INFO] Using device: /dev/bus/usb/009/024
+2026-11-06T17:39:16.093 [INFO] USB device opened. Path: /dev/bus/usb/009/024, Interface: 1, EP IN: 0x81, EP OUT: 0x01, OUT wMaxPacketSize: 512
+2026-11-06T17:39:16.093 [INFO] Starting handshake
+2026-11-06T17:40:07.596 [ERROR] USB handshake failed.
+2026-11-06T17:40:10.775 [INFO] Using device: /dev/bus/usb/009/024
+2026-11-06T17:40:10.795 [INFO] USB device opened. Path: /dev/bus/usb/009/024, Interface: 1, EP IN: 0x81, EP OUT: 0x01, OUT wMaxPacketSize: 512
+2026-11-06T17:40:10.795 [INFO] Starting handshake
+2026-11-06T17:41:02.298 [ERROR] USB handshake failed.

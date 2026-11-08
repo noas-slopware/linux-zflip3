@@ -1,0 +1,140 @@
+# Repository instructions
+
+## USB access: `usbip-helper`
+
+This VM does not have the phone plugged in directly. USB devices live on
+`yuifunami@192.168.0.6` and are attached over USB/IP. **Every time the phone
+re-enumerates** (reboot, unplug, mode switch into download mode, or after a flash), it
+disappears from this VM and must be re-attached:
+
+```sh
+usbip-helper list            # local devices on 192.168.0.6, with busids
+usbip-helper bind  <busid>   # export on the host, then attach here
+usbip-helper unbind <busid>  # detach
+```
+
+`usbip-helper` is a thin Python wrapper: `list` runs `ssh yuifunami@192.168.0.6 sudo usbip
+list -l`, `bind` runs `usbip bind` there and then `sudo usbip attach -r 192.168.0.6 -b
+<busid>` locally, `unbind` runs `usbip unbind` there. It only supports those three
+subcommands.
+
+**Never reuse a busid.** It changes across re-enumeration, so always `list` first and check
+the vendor/product ID before binding:
+
+| id | what |
+|---|---|
+| `04e8:6860`, `04e8:6863`, `04e8:6866` | the phone (MTP/ADB) |
+| `04e8:685d` | the phone in download mode |
+| `04e8:3321` | **the Samsung M2020 printer on this desk, not the phone** |
+
+`04e8:3321` reports as "M2020 Series" with a Printer-class interface. It is the only
+`04e8` device that was visible on 192.168.0.6 at the start of this project; binding it by
+mistake attached the printer to this VM. Check `lsusb -d <id> -v | grep bInterfaceClass`
+before assuming a `04e8` device is the phone.
+
+After attaching, `lsusb` should show the device and `adb devices` should list it. If
+`adb devices` is empty while `lsusb` shows a device, it is the wrong device or the phone is
+in charging-only USB mode.
+
+## The device
+
+SM-F711N, CSC `LUC`/OKR, One UI 7 (Android 15). USB debugging on, OEM unlocking enabled.
+Unlocking the bootloader itself (and the wipe it forces) has not happened yet.
+
+Do not flash anything without `B2Q_UNLOCKED=1`, and never without the stock 4-file firmware
+saved first.
+
+## USB/IP does not work for this phone in Android
+
+The phone resets its USB gadget as soon as `usbip bind` detaches its interfaces. On the host:
+
+```
+usbip-host 7-3.2: stub up
+usbip-host 7-3.2: USB disconnect, device number 44
+usb 7-3.2: new high-speed USB device number 45 ...
+```
+
+After that `7-3.2/driver` is `usb`, not `usbip-host`, usbipd has no export, and `usbip attach`
+fails with "Device not found" no matter how fresh the busid is. It is not the cable and not a
+stale busid, so re-listing and retrying does not help.
+
+- **Android / adb:** use wireless debugging on the LAN instead. This VM is 192.168.0.154/24,
+  the phone and the desktop are on the same subnet: `adb pair <ip>:<port> <code>`, then
+  `adb connect <ip>:5555`.
+- **Download mode (`04e8:685d`):** a single bulk interface that does not churn, so usbip attach
+  is worth trying there when flashing. If it still fails, run `odin4` on the desktop.
+
+## adb lives on the Proxmox host, not here
+
+The phone is plugged into `yuruyuri-san-hai` (192.168.0.6, Debian 13), so run adb there rather
+than dragging the device over USB/IP:
+
+```sh
+ssh yuifunami@192.168.0.6 "sg plugdev -c 'adb devices -l'"
+ssh yuifunami@192.168.0.6 "sg plugdev -c 'adb -s <adb-serial> shell getprop'"
+```
+
+`adb` and `android-sdk-platform-tools-common` are installed there; `yuifunami` was added to
+`plugdev` on 2026-11-06, but the existing login session does not have it yet, hence `sg plugdev`.
+A new login gets it without `sg`. Her shell on that host is fish, so wrap anything POSIX in
+`bash -c` or keep it to single commands.
+
+Serial: `<adb-serial>`. There is a second device on that host, `<other-adb-serial>`, with no udev
+rules — not this project, leave it alone.
+
+## Flasher: heimdall works, odin4 does not
+
+`odin4` 7.3.0 fails the download-mode handshake on this phone every time — 50 s of silence,
+then `USB handshake failed`, both over usbip and natively on san-hai. It is not the link.
+
+`heimdall` 2.1.0 (`heimdall-flash` on Debian) detects the device and `print-pit` works, so it
+is the flasher to use:
+
+```sh
+sudo heimdall flash --BOOT boot.img          # tools/flash.sh wraps this
+```
+
+Heimdall takes raw images, not tars, and accepts any PIT partition name via `--<name>`.
+
+The phone drops off USB on its own after a while in download mode (it vanished in the middle
+of a `print-pit`), so flash in one command rather than doing several round trips.
+
+## The boot gate (KG / VaultKeeper), and what it does not block
+
+Flashing always succeeds — heimdall writes the partitions and says so. The refusal happens
+later, in ABL, when it loads the image: the phone shows the Galaxy logo, then falls back to
+download mode. Observed on this unit, with stock and with our identically-packaged images:
+
+- stock `boot`/`vendor_boot`/`dtbo` → Android boots
+- our `boot`/`vendor_boot` (same header fields, same board string, same flasher) → refused
+- a valid-header kernel whose entry is an infinite loop → also refused, so ABL never jumps
+
+So the gate is content-independent, and the state that matters is `knox.kg.state`.
+`Checking` is still blocking here; `Completed` is the green light. Check with `tools/gate.sh`.
+
+Do not flash custom images while it is `Checking` or `Prenormal`: each failed boot appears to
+re-arm the timer, which is how one afternoon turned into a loop.
+
+## Standing order: hands off the device unless asked (2026-11-06)
+
+Do not run anything that touches the phone without an explicit request in that message.
+That includes `adb` (even a read-only `getprop`), `heimdall`, `usbip-helper bind/unbind`,
+`scp` to the host for a flash, and anything else that opens the device.
+
+Local work — building the kernel, editing DTS, reading dumps under `evidence/`, git —
+is fine and does not need permission.
+
+When a device action is genuinely the next step, say what it is and what it is for, in one
+or two lines, and wait. No "I went ahead and". Repeated flashing without being asked is
+what turned one afternoon into hours of download-mode round trips.
+
+## Boot chain since U-Boot (2026-11-06)
+
+`boot` holds U-Boot, `recovery` holds Linux (`tools/mkimages.sh`). A new kernel, initramfs
+or DT goes in from the running phone over ssh, no download mode:
+`tools/install-images.sh --host root@<phone> --reboot recovery=out/linux.img` (it reads
+each partition back and compares hashes). A new U-Boot goes the same way with
+`boot=out/boot.img`. If Linux does not come up, U-Boot sits in fastboot:
+`sudo /tmp/platform-tools/fastboot boot linux.img` on san-hai (re-plug the cable if
+`fastboot devices` is empty), and `fastboot oem console` dumps U-Boot's log.
+The kernel command line is `configs/cmdline`, in the image header.
