@@ -1,0 +1,153 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Wed, 11 Nov 2026 03:23:58 +0900
+Subject: [PATCH 11/14] libcamera: software_isp: Compute the focus statistic
+
+The variance in SwIspStats is never filled in, so the Af algorithm sees
+0 on every frame. Fill it from the samples the line functions already
+take: the mean squared luminance difference between horizontally
+adjacent samples, divided by the squared mean luminance so that an
+exposure change during a scan does not look like a focus change.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../internal/software_isp/swisp_stats.h       | 16 +++++
+ src/libcamera/software_isp/swstats_cpu.cpp    | 64 ++++++++++++++++---
+ 2 files changed, 72 insertions(+), 8 deletions(-)
+
+diff --git a/include/libcamera/internal/software_isp/swisp_stats.h b/include/libcamera/internal/software_isp/swisp_stats.h
+index 7ceabb78..df5ffca9 100644
+--- a/include/libcamera/internal/software_isp/swisp_stats.h
++++ b/include/libcamera/internal/software_isp/swisp_stats.h
+@@ -49,6 +49,22 @@ struct SwIspStats {
+ 	 * \brief A variance value for the autofocus algorithm
+ 	 */
+ 	double variance;
++	/**
++	 * \brief Sum of the luminance samples behind the focus measure
++	 */
++	uint64_t focusSumY;
++	/**
++	 * \brief Sum of the squared differences of adjacent luminance samples
++	 */
++	uint64_t focusSumDiff2;
++	/**
++	 * \brief Number of luminance samples behind the focus measure
++	 */
++	uint64_t focusSamples;
++	/**
++	 * \brief Number of adjacent sample pairs in focusSumDiff2
++	 */
++	uint64_t focusDiffs;
+ };
+ 
+ } /* namespace libcamera */
+diff --git a/src/libcamera/software_isp/swstats_cpu.cpp b/src/libcamera/software_isp/swstats_cpu.cpp
+index 0d2bbd68..c8f6a332 100644
+--- a/src/libcamera/software_isp/swstats_cpu.cpp
++++ b/src/libcamera/software_isp/swstats_cpu.cpp
+@@ -171,13 +171,27 @@ static constexpr unsigned int kRedYMul = 77; /* 0.299 * 256 */
+ static constexpr unsigned int kGreenYMul = 150; /* 0.587 * 256 */
+ static constexpr unsigned int kBlueYMul = 29; /* 0.114 * 256 */
+ 
++static constexpr double kFocusScale = 1000000.0;
++
++/*
++ * Besides the colour sums and the luminance histogram, every line adds to a
++ * focus measure: the squared luminance differences between horizontally
++ * adjacent samples, and the luminance they were taken from, so that
++ * finishFrame() can normalise the measure by the mean luminance.
++ */
+ #define SWSTATS_START_LINE_STATS(pixel_t) \
+ 	pixel_t r, g, g2, b;              \
+ 	uint64_t yVal;                    \
+                                           \
+ 	uint64_t sumR = 0;                \
+ 	uint64_t sumG = 0;                \
+-	uint64_t sumB = 0;
++	uint64_t sumB = 0;                \
++                                          \
++	int64_t focusY;                   \
++	int64_t focusPrevY = -1;          \
++	uint64_t focusSumY = 0;           \
++	uint64_t focusSumDiff2 = 0;       \
++	uint64_t focusSamples = 0;
+ 
+ #define SWSTATS_ACCUMULATE_LINE_STATS(div) \
+ 	sumR += r;                         \
+@@ -187,12 +201,24 @@ static constexpr unsigned int kBlueYMul = 29; /* 0.114 * 256 */
+ 	yVal = r * kRedYMul;               \
+ 	yVal += g * kGreenYMul;            \
+ 	yVal += b * kBlueYMul;             \
+-	stats.yHistogram[yVal * SwIspStats::kYHistogramSize / (256 * 256 * (div))]++;
+-
+-#define SWSTATS_FINISH_LINE_STATS() \
+-	stats.sum_.r() += sumR;     \
+-	stats.sum_.g() += sumG;     \
+-	stats.sum_.b() += sumB;
++	stats.yHistogram[yVal * SwIspStats::kYHistogramSize / (256 * 256 * (div))]++; \
++                                           \
++	focusY = yVal / (256 * (div));     \
++	if (focusPrevY >= 0)               \
++		focusSumDiff2 += (focusY - focusPrevY) * (focusY - focusPrevY); \
++	focusPrevY = focusY;               \
++	focusSumY += focusY;               \
++	focusSamples++;
++
++#define SWSTATS_FINISH_LINE_STATS()          \
++	stats.sum_.r() += sumR;              \
++	stats.sum_.g() += sumG;              \
++	stats.sum_.b() += sumB;              \
++	stats.focusSumY += focusSumY;        \
++	stats.focusSumDiff2 += focusSumDiff2; \
++	stats.focusSamples += focusSamples;  \
++	if (focusSamples > 1)                \
++		stats.focusDiffs += focusSamples - 1;
+ 
+ void SwStatsCpu::statsBGGR8Line0(const uint8_t *src[], SwIspStats &stats)
+ {
+@@ -392,6 +418,10 @@ void SwStatsCpu::startFrame(uint32_t frame)
+ 	for (auto &s : stats_) {
+ 		s.sum_ = RGB<uint64_t>({ 0, 0, 0 });
+ 		s.variance = 0.0;
++		s.focusSumY = 0;
++		s.focusSumDiff2 = 0;
++		s.focusSamples = 0;
++		s.focusDiffs = 0;
+ 		s.yHistogram.fill(0);
+ 	}
+ }
+@@ -411,13 +441,31 @@ void SwStatsCpu::finishFrame(uint32_t frame, uint32_t bufferId)
+ 		sharedStats_->sum_ = RGB<uint64_t>({ 0, 0, 0 });
+ 		sharedStats_->variance = 0.0;
+ 		sharedStats_->yHistogram.fill(0);
++		uint64_t focusSumY = 0, focusSumDiff2 = 0;
++		uint64_t focusSamples = 0, focusDiffs = 0;
+ 		for (const auto &s : stats_) {
+ 			sharedStats_->sum_ += s.sum_;
+-			sharedStats_->variance += s.variance;
++			focusSumY += s.focusSumY;
++			focusSumDiff2 += s.focusSumDiff2;
++			focusSamples += s.focusSamples;
++			focusDiffs += s.focusDiffs;
+ 			for (unsigned int j = 0; j < SwIspStats::kYHistogramSize; j++)
+ 				sharedStats_->yHistogram[j] += s.yHistogram[j];
+ 		}
+ 
++		/*
++		 * The mean squared difference grows with the square of the
++		 * brightness, so divide it by the squared mean luminance: an
++		 * exposure change in the middle of a focus scan must not look
++		 * like a change of focus. kFocusScale keeps the values in the
++		 * range the autofocus algorithm compares in integers.
++		 */
++		if (focusDiffs && focusSumY) {
++			const double meanY = static_cast<double>(focusSumY) / focusSamples;
++			const double meanDiff2 = static_cast<double>(focusSumDiff2) / focusDiffs;
++			sharedStats_->variance = kFocusScale * meanDiff2 / (meanY * meanY);
++		}
++
+ 		sharedStats_->sum_ >>= sumShift_;
+ 	}
+ 

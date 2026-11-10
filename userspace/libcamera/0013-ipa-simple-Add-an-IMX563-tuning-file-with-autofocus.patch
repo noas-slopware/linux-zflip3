@@ -1,0 +1,47 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Wed, 11 Nov 2026 03:23:58 +0900
+Subject: [PATCH 13/14] ipa: simple: Add an IMX563 tuning file with autofocus
+
+The IMX563 on the Galaxy Z Flip3 sits behind an AK7377 focus
+actuator. Use the uncalibrated algorithms plus Af.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ src/ipa/simple/data/imx563.yaml | 13 +++++++++++++
+ src/ipa/simple/data/meson.build |  1 +
+ 2 files changed, 14 insertions(+)
+ create mode 100644 src/ipa/simple/data/imx563.yaml
+
+diff --git a/src/ipa/simple/data/imx563.yaml b/src/ipa/simple/data/imx563.yaml
+new file mode 100644
+index 00000000..31d6fb3e
+--- /dev/null
++++ b/src/ipa/simple/data/imx563.yaml
+@@ -0,0 +1,13 @@
++# SPDX-License-Identifier: CC0-1.0
++%YAML 1.1
++---
++# Sony IMX563 behind an AK7377 focus actuator (Samsung Galaxy Z Flip3 rear
++# wide camera). No calibration yet: uncalibrated.yaml with autofocus on.
++version: 1
++algorithms:
++  - BlackLevel:
++  - Af:
++  - Awb:
++  - Adjust:
++  - Agc:
++...
+diff --git a/src/ipa/simple/data/meson.build b/src/ipa/simple/data/meson.build
+index 92795ee4..de37046d 100644
+--- a/src/ipa/simple/data/meson.build
++++ b/src/ipa/simple/data/meson.build
+@@ -1,6 +1,7 @@
+ # SPDX-License-Identifier: CC0-1.0
+ 
+ conf_files = files([
++    'imx563.yaml',
+     'uncalibrated.yaml',
+ ])
+ 

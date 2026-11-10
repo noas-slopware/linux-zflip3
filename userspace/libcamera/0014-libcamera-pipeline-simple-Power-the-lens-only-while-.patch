@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Wed, 11 Nov 2026 03:23:58 +0900
+Subject: [PATCH 14/14] libcamera: pipeline: simple: Power the lens only while
+ the camera runs
+
+Like the IPU3 pipeline handler, open the focus lens when the camera
+starts and close it when it stops, so that a long-lived camera manager
+such as the WirePlumber libcamera monitor does not keep the lens
+powered.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ src/libcamera/pipeline/simple/simple.cpp | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/src/libcamera/pipeline/simple/simple.cpp b/src/libcamera/pipeline/simple/simple.cpp
+index f3554688..28fd585e 100644
+--- a/src/libcamera/pipeline/simple/simple.cpp
++++ b/src/libcamera/pipeline/simple/simple.cpp
+@@ -1675,6 +1675,18 @@ int SimplePipelineHandler::start(Camera *camera, [[maybe_unused]] const ControlL
+ 		return ret;
+ 	}
+ 
++	/* Power the lens, if any, for the duration of the capture session. */
++	CameraLens *lens = data->sensor_->focusLens();
++	if (lens) {
++		ret = lens->open();
++		if (ret) {
++			video->releaseBuffers();
++			data->conversionBuffers_.clear();
++			releasePipeline(data);
++			return ret;
++		}
++	}
++
+ 	video->bufferReady.connect(data, &SimpleCameraData::imageBufferReady);
+ 
+ 	data->delayedCtrls_->reset();
+@@ -1745,6 +1757,10 @@ void SimplePipelineHandler::stopDevice(Camera *camera)
+ 	data->conversionBuffers_.clear();
+ 
+ 	releasePipeline(data);
++
++	CameraLens *lens = data->sensor_->focusLens();
++	if (lens)
++		lens->close();
+ }
+ 
+ int SimplePipelineHandler::queueRequestDevice(Camera *camera, Request *request)

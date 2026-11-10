@@ -119,3 +119,5 @@ CONFIG_VIDEO_IMX258=m
 CONFIG_VIDEO_IMX374=m
 # Cameras: the rear wide IMX563 (patches/linux/0076-0077).
 CONFIG_VIDEO_IMX563=m
+# Cameras: the rear wide's AK7377 focus actuator (patches/linux/0099-0100).
+CONFIG_VIDEO_AK7375=m

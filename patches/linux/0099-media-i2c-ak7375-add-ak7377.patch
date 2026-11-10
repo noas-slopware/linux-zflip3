@@ -1,0 +1,45 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] media: i2c: ak7375: add AK7377
+
+The AK7377 takes the same writes as the AK7375: standby is 0x40 in
+register 2, the 12-bit position goes left-justified into registers 0
+and 1, and 0 in register 2 makes it active. Samsung's Galaxy Z Flip3
+kernel drives its AK7377 with exactly those writes.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+
+diff --git a/Documentation/devicetree/bindings/media/i2c/asahi-kasei,ak7375.yaml b/Documentation/devicetree/bindings/media/i2c/asahi-kasei,ak7375.yaml
+index fe312cc..1a69d40 100644
+--- a/Documentation/devicetree/bindings/media/i2c/asahi-kasei,ak7375.yaml
++++ b/Documentation/devicetree/bindings/media/i2c/asahi-kasei,ak7375.yaml
+@@ -11,13 +11,15 @@ maintainers:
+ 
+ description:
+   AK7375 is a voice coil motor (VCM) camera lens actuator that
+-  is controlled over I2C.
++  is controlled over I2C. AK7377 uses the same 12-bit position and
++  control registers.
+ 
+ properties:
+   compatible:
+     enum:
+       - asahi-kasei,ak7345
+       - asahi-kasei,ak7375
++      - asahi-kasei,ak7377
+ 
+   reg:
+     maxItems: 1
+diff --git a/drivers/media/i2c/ak7375.c b/drivers/media/i2c/ak7375.c
+index 9a2432c..790dcb1 100644
+--- a/drivers/media/i2c/ak7375.c
++++ b/drivers/media/i2c/ak7375.c
+@@ -331,6 +331,7 @@ static int __maybe_unused ak7375_vcm_resume(struct device *dev)
+ static const struct of_device_id ak7375_of_table[] = {
+ 	{ .compatible = "asahi-kasei,ak7345", .data = &ak7345_cdef, },
+ 	{ .compatible = "asahi-kasei,ak7375", .data = &ak7375_cdef, },
++	{ .compatible = "asahi-kasei,ak7377", .data = &ak7375_cdef, },
+ 	{ /* sentinel */ }
+ };
+ MODULE_DEVICE_TABLE(of, ak7375_of_table);

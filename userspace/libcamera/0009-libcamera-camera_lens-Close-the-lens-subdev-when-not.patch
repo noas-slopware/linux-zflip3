@@ -1,0 +1,105 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Marco Ziliani <rylos78@gmail.com>
+Date: Tue, 27 Oct 2026 22:32:39 +0100
+Subject: [PATCH 09/14] libcamera: camera_lens: Close the lens subdev when not
+ in use
+
+Lens drivers such as dw9714, dw9719 and ak7375 power the lens up when
+the subdev is opened and down when it is closed. On ACPI platforms
+ipu-bridge also adds a runtime PM device link from the lens to its
+camera sensor, so an open lens subdev keeps the sensor powered too.
+
+CameraLens opens the subdev in init() and keeps it open for the lifetime
+of the CameraManager. With a long-lived camera manager, such as the
+WirePlumber libcamera monitor, the lens and the sensor are then never
+powered down, even when no camera is in use.
+
+Close the subdev at the end of init(), once the lens driver has been
+validated and the controls have been cached, and add open() and close()
+functions that pipeline handlers can use to power the lens for the
+duration of a capture session. setFocusPosition() reopens the subdev on
+demand, so pipeline handlers that don't call open() keep working as
+before, the lens being powered from the first focus change on.
+
+Signed-off-by: Marco Ziliani <rylos78@gmail.com>
+---
+ include/libcamera/internal/camera_lens.h |  2 ++
+ src/libcamera/camera_lens.cpp            | 42 ++++++++++++++++++++++++
+ 2 files changed, 44 insertions(+)
+
+diff --git a/include/libcamera/internal/camera_lens.h b/include/libcamera/internal/camera_lens.h
+index f347c5e0..f63bcfa2 100644
+--- a/include/libcamera/internal/camera_lens.h
++++ b/include/libcamera/internal/camera_lens.h
+@@ -27,6 +27,8 @@ public:
+ 	~CameraLens();
+ 
+ 	int init();
++	int open();
++	void close();
+ 	int setFocusPosition(int32_t position);
+ 
+ 	const std::string &model() const { return model_; }
+diff --git a/src/libcamera/camera_lens.cpp b/src/libcamera/camera_lens.cpp
+index ccc2a6a6..7be5bfd2 100644
+--- a/src/libcamera/camera_lens.cpp
++++ b/src/libcamera/camera_lens.cpp
+@@ -73,9 +73,47 @@ int CameraLens::init()
+ 		return ret;
+ 
+ 	model_ = subdev_->model();
++
++	/*
++	 * Lens drivers commonly keep the lens powered for as long as the
++	 * subdev is open, and the lens power often depends on the camera
++	 * sensor (e.g. through a runtime PM device link). Close the subdev
++	 * until the lens is actually used, so that a long-lived camera
++	 * manager doesn't keep the lens and the sensor powered.
++	 */
++	subdev_->close();
++
+ 	return 0;
+ }
+ 
++/**
++ * \brief Open the lens subdev
++ *
++ * Pipeline handlers call this function when the camera starts, to power the
++ * lens for the duration of the capture session. The subdev is also opened on
++ * demand by setFocusPosition().
++ *
++ * \return 0 on success or a negative error code otherwise
++ */
++int CameraLens::open()
++{
++	if (subdev_->isOpen())
++		return 0;
++
++	return subdev_->open();
++}
++
++/**
++ * \brief Close the lens subdev
++ *
++ * Pipeline handlers call this function when the camera stops, to let the lens
++ * driver power the lens down.
++ */
++void CameraLens::close()
++{
++	subdev_->close();
++}
++
+ /**
+  * \brief This function sets the focal point of the lens to a specific position.
+  * \param[in] position The focal point of the lens
+@@ -86,6 +124,10 @@ int CameraLens::init()
+  */
+ int CameraLens::setFocusPosition(int32_t position)
+ {
++	int ret = open();
++	if (ret)
++		return ret;
++
+ 	ControlList lensCtrls(subdev_->controls());
+ 	lensCtrls.set(V4L2_CID_FOCUS_ABSOLUTE, static_cast<int32_t>(position));
+ 

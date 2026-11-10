@@ -1,0 +1,67 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] arm64: dts: qcom: sm8350-b2q: wide camera focus actuator
+
+The rear wide's AK7377 sits on CCI1 master 1 at 0x0c and is powered
+from S2MPB02 LDO13 (2.8 V) and LDO8 (1.8 V), as in stock's actuator
+node. Link it to the IMX563 with lens-focus so V4L2 and libcamera see
+it as the sensor's lens.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+index 49d6353..42fc11c 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+@@ -616,6 +616,16 @@
+ 					regulator-boot-on;
+ 				};
+ 
++				/*
++				 * Stock's cam_vaf, 2.8 V: the rear wide's focus actuator.
++				 * Stock's OIS MCU takes it too.
++				 */
++				s2mpb02_l13: ldo13 {
++					regulator-name = "s2mpb02-l13";
++					regulator-min-microvolt = <2800000>;
++					regulator-max-microvolt = <2800000>;
++				};
++
+ 				/* Stock's cam_vana for the rear wide, 2.8 V */
+ 				s2mpb02_l14: ldo14 {
+ 					regulator-name = "s2mpb02-l14";
+@@ -2736,6 +2746,8 @@
+ 		vdig-supply = <&s2mpb02_l3>;
+ 		vif-supply = <&s2mpb02_l8>;
+ 
++		lens-focus = <&wide_lens>;
++
+ 		orientation = <1>;
+ 		/*
+ 		 * Stock sensor-position-roll 90 (qcom,cam-sensor0) is clockwise, like
+@@ -2797,6 +2809,24 @@
+ 	status = "okay";
+ };
+ 
++/*
++ * The rear wide's AK7377 focus actuator. Stock's actuator node has
++ * cci-master 1 and slave address 0x18 in 8-bit form, and powers cam_vaf,
++ * then cam_vio, with 1 and 12 ms delays.
++ */
++&cci1_i2c1 {
++	#address-cells = <1>;
++	#size-cells = <0>;
++
++	wide_lens: camera-lens@c {
++		compatible = "asahi-kasei,ak7377";
++		reg = <0x0c>;
++
++		vdd-supply = <&s2mpb02_l13>;
++		vio-supply = <&s2mpb02_l8>;
++	};
++};
++
+ &cci1_i2c0 {
+ 	#address-cells = <1>;
+ 	#size-cells = <0>;

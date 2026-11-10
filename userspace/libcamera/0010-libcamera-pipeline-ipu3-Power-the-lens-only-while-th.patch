@@ -1,0 +1,17 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Marco Ziliani <rylos78@gmail.com>
+Date: Tue, 27 Oct 2026 22:32:40 +0100
+Subject: [PATCH 10/14] libcamera: pipeline: ipu3: Power the lens only while
+ the camera runs
+
+Open the lens subdev when the camera starts and close it when the camera
+stops, so that the lens, and through the runtime PM device link the
+camera sensor, can be powered down while the camera is idle.
+
+On the Microsoft Surface Pro 5 the rear ov8865 sensor with its dw9719
+lens otherwise stays powered permanently as soon as WirePlumber is
+running. With this change both are runtime suspended while the camera
+is idle, are resumed when it starts, autofocus moves the lens as before,
+and both are suspended again about one second after the camera stops.
+
+Signed-off-by: Marco Ziliani <rylos78@gmail.com>
