@@ -1,10 +1,15 @@
 From: Noa Himesaka <himesaka@noa.codes>
 Subject: [PATCH] media: i2c: ak7375: add AK7377
 
-The AK7377 takes the same writes as the AK7375: standby is 0x40 in
-register 2, the 12-bit position goes left-justified into registers 0
-and 1, and 0 in register 2 makes it active. Samsung's Galaxy Z Flip3
-kernel drives its AK7377 with exactly those writes.
+The AK7377 takes the AK7375's registers: the 12-bit position goes
+left-justified into registers 0 and 1, and register 2 selects standby
+(0x40) or active (0x00). After power-up its control register reads 0x20
+and it NAKs the write that makes it active (seen on the Galaxy Z Flip3);
+Samsung's driver writes standby first and waits 2 ms, so the AK7377
+chipdef does the same.
+
+While here, power the supplies off again when resume fails: the device
+is not active then, so suspend leaves them alone and they stayed on.
 
 Signed-off-by: Noa Himesaka <himesaka@noa.codes>
 Assisted-by: Claude:claude-opus-5-5
@@ -32,14 +37,85 @@ index fe312cc..1a69d40 100644
    reg:
      maxItems: 1
 diff --git a/drivers/media/i2c/ak7375.c b/drivers/media/i2c/ak7375.c
-index 9a2432c..790dcb1 100644
+index 9a2432c..1335535 100644
 --- a/drivers/media/i2c/ak7375.c
 +++ b/drivers/media/i2c/ak7375.c
-@@ -331,6 +331,7 @@ static int __maybe_unused ak7375_vcm_resume(struct device *dev)
+@@ -17,6 +17,8 @@ struct ak73xx_chipdef {
+ 	u8 mode_active;
+ 	u8 mode_standby;
+ 	bool has_standby;	/* Some chips may not have standby mode */
++	/* Some chips only leave power-on sleep for standby, not for active */
++	bool standby_first;
+ 	u16 focus_pos_max;
+ 	/*
+ 	 * This sets the minimum granularity for the focus positions.
+@@ -65,6 +67,26 @@ static const struct ak73xx_chipdef ak7375_cdef = {
+ 	.power_delay_us	= 10000,
+ };
+ 
++/*
++ * The AK7377 takes the AK7375's registers, but after power-up (control
++ * register 0x20) it NAKs the write that makes it active. Samsung's driver
++ * for it writes standby first and waits 2 ms.
++ */
++static const struct ak73xx_chipdef ak7377_cdef = {
++	.reg_position	= 0x0,
++	.reg_cont	= 0x2,
++	.shift_pos	= 4,	/* 12 bits position values, need to << 4 */
++	.mode_active	= 0x0,
++	.mode_standby	= 0x40,
++	.has_standby	= true,
++	.standby_first	= true,
++	.focus_pos_max	= 4095,
++	.focus_steps	= 1,
++	.ctrl_steps	= 64,
++	.ctrl_delay_us	= 1000,
++	.power_delay_us	= 10000,
++};
++
+ static const char * const ak7375_supply_names[] = {
+ 	"vdd",
+ 	"vio",
+@@ -305,12 +327,18 @@ static int __maybe_unused ak7375_vcm_resume(struct device *dev)
+ 	/* Wait for vcm to become ready */
+ 	usleep_range(cdef->power_delay_us, cdef->power_delay_us + 500);
+ 
++	if (cdef->standby_first) {
++		ret = ak7375_i2c_write(ak7375_dev, cdef->reg_cont,
++				       cdef->mode_standby, 1);
++		if (ret)
++			goto err_power_off;
++		usleep_range(2000, 2500);
++	}
++
+ 	ret = ak7375_i2c_write(ak7375_dev, cdef->reg_cont,
+ 			       cdef->mode_active, 1);
+-	if (ret) {
+-		dev_err(dev, "%s I2C failure: %d\n", __func__, ret);
+-		return ret;
+-	}
++	if (ret)
++		goto err_power_off;
+ 
+ 	for (val = ak7375_dev->focus->val % cdef->ctrl_steps;
+ 	     val <= ak7375_dev->focus->val;
+@@ -326,11 +354,19 @@ static int __maybe_unused ak7375_vcm_resume(struct device *dev)
+ 	ak7375_dev->active = true;
+ 
+ 	return 0;
++
++err_power_off:
++	dev_err(dev, "%s I2C failure: %d\n", __func__, ret);
++	/* not active: suspend would leave the supplies on */
++	regulator_bulk_disable(ARRAY_SIZE(ak7375_supply_names),
++			       ak7375_dev->supplies);
++	return ret;
+ }
+ 
  static const struct of_device_id ak7375_of_table[] = {
  	{ .compatible = "asahi-kasei,ak7345", .data = &ak7345_cdef, },
  	{ .compatible = "asahi-kasei,ak7375", .data = &ak7375_cdef, },
-+	{ .compatible = "asahi-kasei,ak7377", .data = &ak7375_cdef, },
++	{ .compatible = "asahi-kasei,ak7377", .data = &ak7377_cdef, },
  	{ /* sentinel */ }
  };
  MODULE_DEVICE_TABLE(of, ak7375_of_table);
