@@ -25,6 +25,9 @@ usage: sudo build-rootfs.sh --authorized-keys FILE [options]
                           from tools/extract-wcn-firmware.sh; skipped if missing)
   --tree DIR              kernel tree to take modules from
                           (default: .cache/linux-$LINUX_VERSION)
+  --packages DIR          install every package in DIR (*.pkg.tar*), the ones built
+                          from userspace/ on the phone; their dependencies come from
+                          the repos
   --tarball NAME          bootstrap tarball name (default: ARCH_TARBALL from sources.lock)
   --keep-tarball          do not delete the downloaded tarball
 
@@ -36,6 +39,7 @@ DEST="$REPO_ROOT/out/rootfs"
 TAR="$REPO_ROOT/out/rootfs.tar"
 TREE="$REPO_ROOT/.cache/linux-$LINUX_VERSION"
 FIRMWARE="$REPO_ROOT/out/firmware"
+PACKAGES=""
 TARBALL="$ARCH_TARBALL"
 KEYS=""
 KEEP=0
@@ -48,6 +52,7 @@ while [ $# -gt 0 ]; do
     --tar) TAR=${2:?}; shift 2 ;;
     --tree) TREE=${2:?}; shift 2 ;;
     --firmware) FIRMWARE=${2:?}; shift 2 ;;
+    --packages) PACKAGES=${2:?}; shift 2 ;;
     --tarball) TARBALL=${2:?}; shift 2 ;;
     --keep-tarball) KEEP=1; shift ;;
     *) die "unknown option: $1 (try --help)" ;;
@@ -61,6 +66,7 @@ done
 [ -f "$TREE/arch/arm64/boot/Image" ] || die "no built kernel in $TREE (run tools/build-kernel.sh)"
 need curl tar zstd sha256sum gpg arch-chroot make systemd-firstboot
 [ -d "$DEST" ] && die "$DEST already exists; remove it first"
+[ -z "$PACKAGES" ] || [ -d "$PACKAGES" ] || die "no such directory: $PACKAGES"
 mkdir -p "$(dirname -- "$DEST")"
 
 CACHE="$REPO_ROOT/.cache"
@@ -123,6 +129,17 @@ log "installing archports-keyring $ROOTFS_PACKAGES"
 # shellcheck disable=SC2086
 chroot_run pacman -Sy --noconfirm --needed archports-keyring $ROOTFS_PACKAGES
 chroot_run pacman-key --populate archports
+
+if [ -n "$PACKAGES" ]; then
+  mapfile -t pkgs < <(find "$PACKAGES" -maxdepth 1 -name '*.pkg.tar*' ! -name '*.sig' \
+                        ! -name '*-debug-*' | sort)
+  [ "${#pkgs[@]}" -gt 0 ] || die "no packages in $PACKAGES"
+  log "installing ${#pkgs[@]} packages from $PACKAGES"
+  install -d "$DEST/root/pkgs"
+  cp "${pkgs[@]}" "$DEST/root/pkgs/"
+  chroot_run sh -c 'pacman -U --noconfirm --needed /root/pkgs/*'
+  rm -rf "$DEST/root/pkgs"
+fi
 rm -f "$DEST"/var/cache/pacman/pkg/*
 
 log "kernel modules from $TREE"
@@ -141,6 +158,17 @@ install -d -m700 "$DEST/root/.ssh"
 install -m600 "$KEYS" "$DEST/root/.ssh/authorized_keys"
 chroot_run systemctl enable systemd-networkd NetworkManager b2q-wifi-mac bluetooth sshd \
   serial-getty@ttyGS0
+# What the phone runs, for the units the overlay and --packages brought in: the
+# modem's file servers, the sensor hub's, IMS, the session.
+for unit in rmtfs tqftpserv hexagonrpcd-sdsp ModemManager 81voltd b2q-spud b2q-imsd \
+            b2q-ims-bearer b2q-sim-provision b2q-vss b2q-sensors-tree plasmalogin \
+            systemd-resolved systemd-timesyncd; do
+  if [ -e "$DEST/usr/lib/systemd/system/$unit.service" ]; then
+    chroot_run systemctl enable "$unit.service"
+  else
+    warn "$unit.service is not in the image; not enabled"
+  fi
+done
 # Without these, systemd-firstboot stops the first boot to ask on the console, and
 # the phone has no keyboard there.
 systemd-firstboot --root="$DEST" --force --locale=C.UTF-8 --keymap=us \
