@@ -1,0 +1,207 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] ASoC: cs35l41: resume the DSP once the ASP is clocked
+
+DSP1's POST_PMU sends CSPL_MBOX_CMD_RESUME as soon as DAPM powers the
+widget. On a stream start that is fine: __soc_pcm_prepare() prepares the
+DAIs, which starts the CPU side of the link, before the STREAM_START
+event powers the path.
+
+A route change on a running DPCM front end runs in the other order.
+snd_soc_dapm_mixer_update_power() powers the path first and only then
+calls snd_soc_dpcm_runtime_update(), which starts the back end. When a
+routing mixer is cleared and set again while the front end stays open,
+as UCM does on a verb change, DSP1 goes PRE_PMD while the back end still
+runs, so PAUSE succeeds, then POST_PMU while the back end is stopped and
+the ASP has no clock. The firmware stays PAUSED and the RESUME times out:
+
+  cs35l41 8-0041: Failed to set mailbox cmd 2 (status 1)
+  ASoC: POST_PMU: Earpiece DSP1 event failed: -42
+
+DAPM still counts DSP1 as powered, so nothing sends RESUME again and the
+stream that follows plays through a paused protection firmware.
+
+Track whether playback is prepared on the codec DAI. If DSP1 powers up
+before that, keep the resume pending and send it from the DAI prepare,
+after the CPU DAI has started the link. If DSP1 powers down while the
+resume is still pending, the firmware is already paused, so skip the
+PAUSE. A driver mutex guards both flags rather than the DAPM mutex,
+because codec-to-codec links call the DAI ops from inside a DAPM event.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ sound/soc/codecs/cs35l41.c |  102 +++++++++++++++++++++-----
+ sound/soc/codecs/cs35l41.h |    7 ++
+ 2 files changed, 90 insertions(+), 19 deletions(-)
+
+--- a/sound/soc/codecs/cs35l41.c
++++ b/sound/soc/codecs/cs35l41.c
+@@ -210,41 +210,69 @@
+ 	}
+ }
+ 
++static int cs35l41_dsp_resume(struct cs35l41_private *cs35l41)
++{
++	unsigned int fw_status;
++	int ret;
++
++	ret = regmap_read(cs35l41->regmap, CS35L41_DSP_MBOX_2, &fw_status);
++	if (ret < 0) {
++		dev_err(cs35l41->dev,
++			"Failed to read firmware status: %d\n", ret);
++		return ret;
++	}
++
++	switch (fw_status) {
++	case CSPL_MBOX_STS_RUNNING:
++	case CSPL_MBOX_STS_PAUSED:
++		break;
++	default:
++		dev_err(cs35l41->dev, "Firmware status is invalid: %u\n",
++			fw_status);
++		return -EINVAL;
++	}
++
++	return cs35l41_set_cspl_mbox_cmd(cs35l41->dev, cs35l41->regmap,
++					 CSPL_MBOX_CMD_RESUME);
++}
++
+ static int cs35l41_dsp_audio_ev(struct snd_soc_dapm_widget *w,
+ 				struct snd_kcontrol *kcontrol, int event)
+ {
+ 	struct snd_soc_component *component = snd_soc_dapm_to_component(w->dapm);
+ 	struct cs35l41_private *cs35l41 = snd_soc_component_get_drvdata(component);
+-	unsigned int fw_status;
+-	int ret;
+ 
+ 	switch (event) {
+-	case SND_SOC_DAPM_POST_PMU:
++	case SND_SOC_DAPM_POST_PMU: {
+ 		if (!cs35l41->dsp.cs_dsp.running)
+ 			return wm_adsp_event(w, kcontrol, event);
+ 
+-		ret = regmap_read(cs35l41->regmap, CS35L41_DSP_MBOX_2, &fw_status);
+-		if (ret < 0) {
+-			dev_err(cs35l41->dev,
+-				"Failed to read firmware status: %d\n", ret);
+-			return ret;
++		/*
++		 * A route change on a running DPCM front end powers this widget
++		 * from the kcontrol put, before snd_soc_dpcm_runtime_update()
++		 * has started the back end again, so the ASP is not clocked
++		 * yet and the firmware cannot leave PAUSED. Resume it from the
++		 * DAI prepare instead.
++		 */
++		guard(mutex)(&cs35l41->resume_lock);
++		if (!cs35l41->asp_prepared) {
++			cs35l41->dsp_resume_pending = true;
++			return 0;
+ 		}
+ 
+-		switch (fw_status) {
+-		case CSPL_MBOX_STS_RUNNING:
+-		case CSPL_MBOX_STS_PAUSED:
+-			break;
+-		default:
+-			dev_err(cs35l41->dev, "Firmware status is invalid: %u\n",
+-				fw_status);
+-			return -EINVAL;
++		return cs35l41_dsp_resume(cs35l41);
++	}
++	case SND_SOC_DAPM_PRE_PMD: {
++		guard(mutex)(&cs35l41->resume_lock);
++		if (cs35l41->dsp_resume_pending) {
++			/* Never resumed, so the firmware is still paused */
++			cs35l41->dsp_resume_pending = false;
++			return 0;
+ 		}
+ 
+ 		return cs35l41_set_cspl_mbox_cmd(cs35l41->dev, cs35l41->regmap,
+-						 CSPL_MBOX_CMD_RESUME);
+-	case SND_SOC_DAPM_PRE_PMD:
+-		return cs35l41_set_cspl_mbox_cmd(cs35l41->dev, cs35l41->regmap,
+ 						 CSPL_MBOX_CMD_PAUSE);
++	}
+ 	default:
+ 		return 0;
+ 	}
+@@ -819,6 +847,36 @@
+ 	return -EINVAL;
+ }
+ 
++static int cs35l41_pcm_prepare(struct snd_pcm_substream *substream,
++			       struct snd_soc_dai *dai)
++{
++	struct cs35l41_private *cs35l41 = snd_soc_component_get_drvdata(dai->component);
++
++	if (substream->stream != SNDRV_PCM_STREAM_PLAYBACK)
++		return 0;
++
++	/* The CPU DAI is prepared first, so the ASP is clocked by now */
++	guard(mutex)(&cs35l41->resume_lock);
++	cs35l41->asp_prepared = true;
++	if (!cs35l41->dsp_resume_pending)
++		return 0;
++
++	cs35l41->dsp_resume_pending = false;
++	return cs35l41_dsp_resume(cs35l41);
++}
++
++static void cs35l41_pcm_shutdown(struct snd_pcm_substream *substream,
++				 struct snd_soc_dai *dai)
++{
++	struct cs35l41_private *cs35l41 = snd_soc_component_get_drvdata(dai->component);
++
++	if (substream->stream != SNDRV_PCM_STREAM_PLAYBACK)
++		return;
++
++	guard(mutex)(&cs35l41->resume_lock);
++	cs35l41->asp_prepared = false;
++}
++
+ static int cs35l41_component_set_sysclk(struct snd_soc_component *component,
+ 					int clk_id, int source,
+ 					unsigned int freq, int dir)
+@@ -967,6 +1025,8 @@
+ static const struct snd_soc_dai_ops cs35l41_ops = {
+ 	.set_fmt = cs35l41_set_dai_fmt,
+ 	.hw_params = cs35l41_pcm_hw_params,
++	.prepare = cs35l41_pcm_prepare,
++	.shutdown = cs35l41_pcm_shutdown,
+ 	.set_sysclk = cs35l41_dai_set_sysclk,
+ 	.set_channel_map = cs35l41_set_channel_map,
+ 	.set_tdm_slot = cs35l41_set_tdm_slot,
+@@ -1225,6 +1285,10 @@
+ 			return ret;
+ 	}
+ 
++	ret = devm_mutex_init(cs35l41->dev, &cs35l41->resume_lock);
++	if (ret)
++		return ret;
++
+ 	for (i = 0; i < CS35L41_NUM_SUPPLIES; i++)
+ 		cs35l41->supplies[i].supply = cs35l41_supplies[i];
+ 
+--- a/sound/soc/codecs/cs35l41.h
++++ b/sound/soc/codecs/cs35l41.h
+@@ -11,6 +11,7 @@
+ #define __CS35L41_H__
+ 
+ #include <linux/gpio/consumer.h>
++#include <linux/mutex.h>
+ #include <linux/regulator/consumer.h>
+ #include <linux/firmware.h>
+ #include <sound/core.h>
+@@ -34,6 +35,12 @@
+ 	/* GPIO for /RST */
+ 	struct gpio_desc *reset_gpio;
+ 	int slot_width;
++	/* Protects asp_prepared and dsp_resume_pending */
++	struct mutex resume_lock;
++	/* Playback is prepared, so the ASP is clocked */
++	bool asp_prepared;
++	/* DSP1 is powered but CSPL waits for the ASP to resume */
++	bool dsp_resume_pending;
+ };
+ 
+ int cs35l41_probe(struct cs35l41_private *cs35l41, const struct cs35l41_hw_cfg *hw_cfg);
