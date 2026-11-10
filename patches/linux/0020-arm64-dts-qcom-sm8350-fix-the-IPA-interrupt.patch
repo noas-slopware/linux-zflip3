@@ -1,0 +1,32 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] arm64: dts: qcom: sm8350: fix the IPA interrupt
+
+The IPA interrupt on SM8350 is GIC SPI 654, not 655. The downstream
+lahaina device tree uses 654 for its "ipa-irq", and so does every
+other SoC here that has the GSI interrupt on SPI 432 (sc7280, sm8550,
+sm8650, milos).
+
+Data still flows on 655, because RX completions arrive on the GSI
+interrupt, so the wrong line goes unnoticed. What is lost is
+everything the IPA interrupt carries: the microcontroller never gets
+its INIT_COMPLETED response through, so the IPA keeps the proxy power
+reference ipa_uc_power() took and never runtime-suspends, and
+TX_SUSPEND never reaches the AP, so modem data cannot wake the system
+from suspend. On a phone that means incoming calls and SMS wait until
+something else wakes it.
+
+Fixes: f11d3e7da32e ("arm64: dts: qcom: sm8350: add IPA information")
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+--- a/arch/arm64/boot/dts/qcom/sm8350.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm8350.dtsi
+@@ -1845,7 +1845,7 @@
+ 				    "ipa-shared",
+ 				    "gsi";
+ 
+-			interrupts-extended = <&intc GIC_SPI 655 IRQ_TYPE_EDGE_RISING>,
++			interrupts-extended = <&intc GIC_SPI 654 IRQ_TYPE_EDGE_RISING>,
+ 					      <&intc GIC_SPI 432 IRQ_TYPE_LEVEL_HIGH>,
+ 					      <&ipa_smp2p_in 0 IRQ_TYPE_EDGE_RISING>,
+ 					      <&ipa_smp2p_in 1 IRQ_TYPE_EDGE_RISING>;
