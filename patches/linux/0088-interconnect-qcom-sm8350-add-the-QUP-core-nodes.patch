@@ -1,0 +1,170 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] interconnect: qcom: sm8350: add the QUP core nodes
+
+The GENI serial engines vote three paths, qup-core, qup-config and
+qup-memory, and geni_icc_get() fails a probe without the first two once
+any are named. SM8350 has no QUP core nodes, so its serial engines vote
+nothing at all. That went unnoticed while the boot-time votes stayed at
+maximum. Once the interconnect providers reach sync_state, a serial
+engine's DMA to DDR has no vote: on the Galaxy Z Flip3 QUP0's path
+(qhm_qup0, qns_a2noc_snoc) read 0 and the touchscreen's GPI DMA
+transfers faulted and timed out.
+
+Add a qup-virt provider with the core nodes of the three QUPs and their
+QUP0, QUP1 and QUP2 BCMs, as downstream's lahaina clk_virt has them (the
+SoC's command DB has all three), in the shape of sm8250's qup-virt.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../bindings/interconnect/qcom,rpmh.yaml           |    2 
+ drivers/interconnect/qcom/sm8350.c                 |   91 ++++++++++++++++++++
+ include/dt-bindings/interconnect/qcom,sm8350.h     |    7 ++
+ 3 files changed, 100 insertions(+)
+
+
+diff --git a/Documentation/devicetree/bindings/interconnect/qcom,rpmh.yaml b/Documentation/devicetree/bindings/interconnect/qcom,rpmh.yaml
+index da16d8e..da94105 100644
+--- a/Documentation/devicetree/bindings/interconnect/qcom,rpmh.yaml
++++ b/Documentation/devicetree/bindings/interconnect/qcom,rpmh.yaml
+@@ -99,6 +99,7 @@ properties:
+       - qcom,sm8350-mc-virt
+       - qcom,sm8350-mmss-noc
+       - qcom,sm8350-compute-noc
++      - qcom,sm8350-qup-virt
+       - qcom,sm8350-system-noc
+ 
+   '#interconnect-cells': true
+@@ -118,6 +119,7 @@ allOf:
+               - qcom,sc8180x-qup-virt
+               - qcom,sdx65-mc-virt
+               - qcom,sm8250-qup-virt
++              - qcom,sm8350-qup-virt
+     then:
+       required:
+         - reg
+diff --git a/drivers/interconnect/qcom/sm8350.c b/drivers/interconnect/qcom/sm8350.c
+index d92c26b..d5f48f9 100644
+--- a/drivers/interconnect/qcom/sm8350.c
++++ b/drivers/interconnect/qcom/sm8350.c
+@@ -1775,6 +1775,96 @@ static const struct qcom_icc_desc sm8350_system_noc = {
+ 	.num_bcms = ARRAY_SIZE(system_noc_bcms),
+ };
+ 
++/*
++ * The QUP core clocks, voted through the QUP0/QUP1/QUP2 BCMs (downstream's
++ * clk_virt provider for lahaina). The GENI serial engines need this path
++ * besides their config and memory paths.
++ */
++static struct qcom_icc_node qup0_core_slave = {
++	.name = "qup0_core_slave",
++	.channels = 1,
++	.buswidth = 4,
++};
++
++static struct qcom_icc_node qup1_core_slave = {
++	.name = "qup1_core_slave",
++	.channels = 1,
++	.buswidth = 4,
++};
++
++static struct qcom_icc_node qup2_core_slave = {
++	.name = "qup2_core_slave",
++	.channels = 1,
++	.buswidth = 4,
++};
++
++static struct qcom_icc_node qup0_core_master = {
++	.name = "qup0_core_master",
++	.channels = 1,
++	.buswidth = 4,
++	.num_links = 1,
++	.link_nodes = { &qup0_core_slave },
++};
++
++static struct qcom_icc_node qup1_core_master = {
++	.name = "qup1_core_master",
++	.channels = 1,
++	.buswidth = 4,
++	.num_links = 1,
++	.link_nodes = { &qup1_core_slave },
++};
++
++static struct qcom_icc_node qup2_core_master = {
++	.name = "qup2_core_master",
++	.channels = 1,
++	.buswidth = 4,
++	.num_links = 1,
++	.link_nodes = { &qup2_core_slave },
++};
++
++static struct qcom_icc_bcm bcm_qup0 = {
++	.name = "QUP0",
++	.vote_scale = 1,
++	.num_nodes = 1,
++	.nodes = { &qup0_core_slave },
++};
++
++static struct qcom_icc_bcm bcm_qup1 = {
++	.name = "QUP1",
++	.vote_scale = 1,
++	.num_nodes = 1,
++	.nodes = { &qup1_core_slave },
++};
++
++static struct qcom_icc_bcm bcm_qup2 = {
++	.name = "QUP2",
++	.vote_scale = 1,
++	.num_nodes = 1,
++	.nodes = { &qup2_core_slave },
++};
++
++static struct qcom_icc_bcm * const qup_virt_bcms[] = {
++	&bcm_qup0,
++	&bcm_qup1,
++	&bcm_qup2,
++};
++
++static struct qcom_icc_node * const qup_virt_nodes[] = {
++	[MASTER_QUP_CORE_0] = &qup0_core_master,
++	[MASTER_QUP_CORE_1] = &qup1_core_master,
++	[MASTER_QUP_CORE_2] = &qup2_core_master,
++	[SLAVE_QUP_CORE_0] = &qup0_core_slave,
++	[SLAVE_QUP_CORE_1] = &qup1_core_slave,
++	[SLAVE_QUP_CORE_2] = &qup2_core_slave,
++};
++
++static const struct qcom_icc_desc sm8350_qup_virt = {
++	.nodes = qup_virt_nodes,
++	.num_nodes = ARRAY_SIZE(qup_virt_nodes),
++	.bcms = qup_virt_bcms,
++	.num_bcms = ARRAY_SIZE(qup_virt_bcms),
++};
++
+ static const struct of_device_id qnoc_of_match[] = {
+ 	{ .compatible = "qcom,sm8350-aggre1-noc", .data = &sm8350_aggre1_noc},
+ 	{ .compatible = "qcom,sm8350-aggre2-noc", .data = &sm8350_aggre2_noc},
+@@ -1785,6 +1875,7 @@ static const struct of_device_id qnoc_of_match[] = {
+ 	{ .compatible = "qcom,sm8350-mc-virt", .data = &sm8350_mc_virt},
+ 	{ .compatible = "qcom,sm8350-mmss-noc", .data = &sm8350_mmss_noc},
+ 	{ .compatible = "qcom,sm8350-compute-noc", .data = &sm8350_compute_noc},
++	{ .compatible = "qcom,sm8350-qup-virt", .data = &sm8350_qup_virt},
+ 	{ .compatible = "qcom,sm8350-system-noc", .data = &sm8350_system_noc},
+ 	{ }
+ };
+diff --git a/include/dt-bindings/interconnect/qcom,sm8350.h b/include/dt-bindings/interconnect/qcom,sm8350.h
+index 2282f93..2d719c6 100644
+--- a/include/dt-bindings/interconnect/qcom,sm8350.h
++++ b/include/dt-bindings/interconnect/qcom,sm8350.h
+@@ -159,4 +159,11 @@
+ #define SLAVE_SNOC_GEM_NOC_SF		6
+ #define SLAVE_SERVICE_SNOC		7
+ 
++#define MASTER_QUP_CORE_0		0
++#define MASTER_QUP_CORE_1		1
++#define MASTER_QUP_CORE_2		2
++#define SLAVE_QUP_CORE_0		3
++#define SLAVE_QUP_CORE_1		4
++#define SLAVE_QUP_CORE_2		5
++
+ #endif
