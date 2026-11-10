@@ -13,23 +13,24 @@ coarse scan's last measurement.
 
 Keep the largest variance and where it was measured, stop once the
 variance is 10 % below that maximum or the lens is at the end of the
-range, and clamp every step to the range. A coarse scan whose variance
-moved less than 15 % saw no peak: the lens goes back to its default
-position until the scene changes. The fine scan starts with the next
-measurement.
+range, and clamp every step to the range. A coarse scan whose maximum
+is less than 15 % above its mean saw no peak: the lens goes back to its
+default position until the scene changes. The fine scan starts with the
+next measurement. A single outlying high sample can still read as a
+peak.
 
 Signed-off-by: Noa Himesaka <himesaka@noa.codes>
 Assisted-by: Claude:claude-opus-5-5
 ---
- src/ipa/libipa/af.cpp | 104 ++++++++++++++++++++++++++----------------
- src/ipa/libipa/af.h   |   4 ++
- 2 files changed, 69 insertions(+), 39 deletions(-)
+ src/ipa/libipa/af.cpp | 109 +++++++++++++++++++++++++++---------------
+ src/ipa/libipa/af.h   |   5 ++
+ 2 files changed, 75 insertions(+), 39 deletions(-)
 
 diff --git a/src/ipa/libipa/af.cpp b/src/ipa/libipa/af.cpp
-index aec8130c..60327bd8 100644
+index aec8130c..18395770 100644
 --- a/src/ipa/libipa/af.cpp
 +++ b/src/ipa/libipa/af.cpp
-@@ -64,6 +64,15 @@ static constexpr uint32_t kIgnoreFrame = 10;
+@@ -64,6 +64,16 @@ static constexpr uint32_t kIgnoreFrame = 10;
  /* Fine scan range 0 < kFineRange < 1 */
  static constexpr double kFineRange = 0.05;
  
@@ -37,27 +38,29 @@ index aec8130c..60327bd8 100644
 +static constexpr double kPeakDrop = 0.1;
 +
 +/*
-+ * A coarse scan whose variance moved less than this, relative to its
-+ * maximum, saw no focus peak (a flat or dark scene, sensor noise only).
++ * A coarse scan whose maximum is less than this above its mean saw no
++ * focus peak (a flat or dark scene, sensor noise only). The mean, not the
++ * minimum, so that one bad sample does not make a peak.
 + */
 +static constexpr double kMinPeakContrast = 0.15;
 +
  AfAlgorithm::AfAlgorithm()
  	: focus_(0), bestFocus_(0), currentVariance_(0.0), previousVariance_(0.0),
  	  coarseCompleted_(false), fineCompleted_(false)
-@@ -92,7 +101,26 @@ void AfAlgorithm::afCoarseScan(af::ActiveState &state)
+@@ -92,7 +102,28 @@ void AfAlgorithm::afCoarseScan(af::ActiveState &state)
  
  	if (afScan(state, coarseStep_)) {
  		coarseCompleted_ = true;
 +
-+		if (state.maxVariance - scanMinVariance_ <
-+		    state.maxVariance * kMinPeakContrast) {
++		const double mean = scanSamples_ ? scanVarianceSum_ / scanSamples_ : 0.0;
++
++		if (state.maxVariance - mean < state.maxVariance * kMinPeakContrast) {
 +			/*
 +			 * Nothing to focus on: put the lens back where it
 +			 * rests and stay there until the scene changes.
 +			 */
-+			LOG(Af, Debug) << "No focus peak (variance "
-+				       << scanMinVariance_ << " to "
++			LOG(Af, Debug) << "No focus peak (mean variance "
++				       << mean << ", maximum "
 +				       << state.maxVariance << ")";
 +			focus_ = restFocus_;
 +			bestFocus_ = restFocus_;
@@ -68,11 +71,12 @@ index aec8130c..60327bd8 100644
 +		}
 +
  		state.maxVariance = 0;
-+		scanMinVariance_ = -1.0;
++		scanVarianceSum_ = 0.0;
++		scanSamples_ = 0;
  		focus_ = state.focus -
  			 (state.focus * kFineRange);
  		state.focus = focus_;
-@@ -134,9 +162,10 @@ void AfAlgorithm::afReset(af::ActiveState &state)
+@@ -134,9 +165,11 @@ void AfAlgorithm::afReset(af::ActiveState &state)
  		return;
  
  	state.maxVariance = 0;
@@ -81,11 +85,12 @@ index aec8130c..60327bd8 100644
 +	state.focus = restFocus_;
 +	focus_ = restFocus_;
  	state.stable = false;
-+	scanMinVariance_ = -1.0;
++	scanVarianceSum_ = 0.0;
++	scanSamples_ = 0;
  	ignoreCounter_ = kIgnoreFrame;
  	previousVariance_ = 0.0;
  	coarseCompleted_ = false;
-@@ -149,50 +178,33 @@ void AfAlgorithm::afReset(af::ActiveState &state)
+@@ -149,50 +182,33 @@ void AfAlgorithm::afReset(af::ActiveState &state)
   * \param[in] state The autofocus state
   * \param[in] min_step The VCM movement step
   *
@@ -108,8 +113,8 @@ index aec8130c..60327bd8 100644
 +		state.maxVariance = currentVariance_;
 +		bestFocus_ = focus_;
 +	}
-+	if (scanMinVariance_ < 0.0 || currentVariance_ < scanMinVariance_)
-+		scanMinVariance_ = currentVariance_;
++	scanVarianceSum_ += currentVariance_;
++	scanSamples_++;
 +
 +	if (currentVariance_ < state.maxVariance * (1.0 - kPeakDrop) ||
 +	    focus_ >= maxStep_) {
@@ -154,7 +159,7 @@ index aec8130c..60327bd8 100644
  		       << bestFocus_
  		       << " Current step is "
  		       << focus_;
-@@ -280,6 +292,13 @@ void AfAlgorithm::configure(af::ActiveState &state, const ControlInfoMap &lensCo
+@@ -280,6 +296,14 @@ void AfAlgorithm::configure(af::ActiveState &state, const ControlInfoMap &lensCo
  	}
  
  	maxStep_ = initMaxStep_;
@@ -162,13 +167,14 @@ index aec8130c..60327bd8 100644
 +	state.focus = restFocus_;
 +	focus_ = restFocus_;
 +	bestFocus_ = restFocus_;
-+	scanMinVariance_ = -1.0;
++	scanVarianceSum_ = 0.0;
++	scanSamples_ = 0;
 +	coarseCompleted_ = false;
 +	fineCompleted_ = false;
  	coarseStep_ = std::max(1U, kCoarseSearchStep * initMaxStep_ / kMaxFocusSteps);
  	fineStep_ = std::max(1U, kFineSearchStep * initMaxStep_ / kMaxFocusSteps);
  
-@@ -307,9 +326,16 @@ void AfAlgorithm::process(af::ActiveState &state, double variance)
+@@ -307,9 +331,16 @@ void AfAlgorithm::process(af::ActiveState &state, double variance)
  {
  	currentVariance_ = variance;
  
@@ -188,17 +194,18 @@ index aec8130c..60327bd8 100644
  		if (afIsOutOfFocus(state))
  			afReset(state);
 diff --git a/src/ipa/libipa/af.h b/src/ipa/libipa/af.h
-index 8396882d..25313303 100644
+index 8396882d..10d552df 100644
 --- a/src/ipa/libipa/af.h
 +++ b/src/ipa/libipa/af.h
-@@ -68,6 +68,10 @@ private:
+@@ -68,6 +68,11 @@ private:
  	uint32_t maxStep_;
  	/* Initial value of maxStep_ */
  	uint32_t initMaxStep_;
 +	/* Where the lens rests: the control's default */
 +	uint32_t restFocus_ = 0;
-+	/* Smallest variance of the current scan, -1 before the first */
-+	double scanMinVariance_ = -1.0;
++	/* Sum and number of the variances of the current scan */
++	double scanVarianceSum_ = 0.0;
++	unsigned int scanSamples_ = 0;
  	/* Coarse and fine scan steps, scaled to the lens range */
  	uint32_t coarseStep_ = 30;
  	uint32_t fineStep_ = 1;

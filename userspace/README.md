@@ -22,7 +22,7 @@ Packages built natively on the phone (`makepkg` as `<user>`) and given to
 | `iio-sensor-proxy/` | 3.9-2 | SSC sensors |
 | `imsd/` | 0.1.0-20 | IMS: `b2q-imsd`, `b2q-ims-bearer`, `b2q-ims-audio`, `b2q-vss-manager` |
 | `kscreenlocker/` | 6.8.2-2 | keeps the fingerprint reader armed at the lock screen |
-| `libcamera/` | 0.7.2-6 | IMX374/IMX563 helpers, soft ISP autofocus for the wide camera |
+| `libcamera/` | 0.7.2-8 | IMX374/IMX563 helpers, soft ISP autofocus for the wide camera |
 | `libfprint/` | 1.94.100-5 | `samsung_securefp` driver |
 | `neard/` | 0.20-1 | NFC |
 | `plasma-camera/` | 26.08.3-2 | cameras named by location |
