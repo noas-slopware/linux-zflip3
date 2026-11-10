@@ -17,6 +17,10 @@ evidence/device/*
 *.cpio.gz
 *.zst
 *.dtb
+__pycache__/
+# Native syntax-check builds from userspace/b2q-cover/build.sh.
+userspace/b2q-cover/b2q-coverd
+userspace/b2q-cover/lease-modeset
 
 # Local work that is not part of the project: scratch tests (they carry device
 # identities), other people's AUR packaging trees, tool state.
