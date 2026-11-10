@@ -56,6 +56,8 @@ CONFIG_TOUCHSCREEN_FTS9CU80F=m
 # a second of MDSS resetting the bootloader's pipeline instead of waiting for
 # modules from the rootfs.
 CONFIG_DRM_PANEL_SAMSUNG_S6E3HAD=y
+# Cover display: S6E36W3 AMB190ZB01 on DSI1 (patches/linux/0036).
+CONFIG_DRM_PANEL_SAMSUNG_S6E36W3=y
 CONFIG_I2C_ALGOBIT=y
 CONFIG_I2C_GPIO=y
 CONFIG_MFD_SEC_CORE=y

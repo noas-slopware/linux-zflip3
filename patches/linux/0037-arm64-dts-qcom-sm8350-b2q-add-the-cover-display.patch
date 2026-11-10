@@ -1,0 +1,109 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] arm64: dts: qcom: sm8350-b2q: add the cover display
+
+The 260x512 S6E36W3 AMB190ZB01 cover panel sits on DSI1 with one lane,
+command mode and 60 Hz. Stock's ss_dsi_panel_S6E36W3_AMB190ZB01_260X488
+gives the width (260) and height (512), the timings, the reset GPIO (17),
+the TE GPIO (83) and the two rails: PM8350C L8C (panel_vdd3_sub) and
+S2MPB02 LDO11 (panel_vci_sub, 3.3 V). The panel is marked non-desktop in
+the driver so KWin and KScreen do not use it as a desktop output; KWin
+only offers non-desktop connectors for DRM lease.
+
+Describe LDO11 under the S2MPB02 as stock does (boot-on, not always-on)
+at the 3.3 V stock's panel requests, so the panel switches its own VCI
+with prepare and unprepare.
+
+The TE signal is the secondary mdp_vsync input, so the DSI1 endpoint
+needs qcom,te-source = "mdp_vsync_s"; without it the command-mode encoder
+never kicks off frames.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts | 60 +++++++++++++++++++++++++
+ 1 file changed, 60 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+--- a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+@@ -495,6 +495,18 @@ led {
+ 			};
+ 
+ 			regulators {
++				/*
++				 * The cover panel's VCI. Stock's LDO range is 2.8 to
++				 * 3.3 V and its panel requests 3.3 V on it
++				 * (qcom,supply-min/max-voltage 0x325aa0).
++				 */
++				panel_vci_sub: ldo11 {
++					regulator-name = "panel_vci_sub";
++					regulator-min-microvolt = <3300000>;
++					regulator-max-microvolt = <3300000>;
++					regulator-boot-on;
++				};
++
+ 				s2mpb02_l17: ldo17 {
+ 					regulator-name = "s2mpb02-l17";
+ 					regulator-min-microvolt = <3300000>;
+@@ -1186,6 +1198,14 @@ main_disp_te_default: main-disp-te-default-state {
+ 		bias-pull-down;
+ 	};
+ 
++	/* Cover panel TE on GPIO 83 (stock ss_dsi_panel_S6E36W3) */
++	sub_disp_te_default: sub-disp-te-default-state {
++		pins = "gpio83";
++		function = "mdp_vsync";
++		drive-strength = <2>;
++		bias-pull-down;
++	};
++
+ 	main_bat_det_default: main-bat-det-default-state {
+ 		pins = "gpio131";
+ 		function = "gpio";
+@@ -1523,6 +1543,46 @@ &mdss_dsi0_out {
+ 	data-lanes = <0 1 2 3>;
+ };
+ 
++/*
++ * Cover display: 260x512 S6E36W3 AMB190ZB01 on DSI1, one lane, command mode,
++ * 60 Hz, from stock's ss_dsi_panel_S6E36W3_AMB190ZB01_260X488.
++ */
++&mdss_dsi1 {
++	vdda-supply = <&vreg_l6b_1p2>;
++	status = "okay";
++
++	panel@0 {
++		compatible = "samsung,s6e36w3-amb190zb01";
++		reg = <0>;
++
++		reset-gpios = <&tlmm 17 GPIO_ACTIVE_LOW>;
++
++		vdd3-supply = <&vreg_l8c_1p8>;
++		vci-supply = <&panel_vci_sub>;
++
++		pinctrl-0 = <&sub_disp_te_default>;
++		pinctrl-names = "default";
++
++		port {
++			cover_panel_in: endpoint {
++				remote-endpoint = <&mdss_dsi1_out>;
++			};
++		};
++	};
++};
++
++&mdss_dsi1_out {
++	remote-endpoint = <&cover_panel_in>;
++	data-lanes = <0>;
++	/* Cover panel TE is the secondary mdp_vsync input (GPIO 83). */
++	qcom,te-source = "mdp_vsync_s";
++};
++
++&mdss_dsi1_phy {
++	vdds-supply = <&vreg_l5b_0p88>;
++	status = "okay";
++};
++
+ &mdss_dsi0_phy {
+ 	vdds-supply = <&vreg_l5b_0p88>;
+ 	status = "okay";
