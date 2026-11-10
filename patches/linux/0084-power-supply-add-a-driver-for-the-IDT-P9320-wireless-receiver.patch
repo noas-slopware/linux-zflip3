@@ -1,0 +1,666 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] power: supply: add a driver for the IDT P9320 wireless receiver
+
+The P9320 is the Qi receiver in the Galaxy Z Flip3 (board revisions 05
+and later; the earlier US boards carry an LSI S2MIW04 with another
+register map). Its firmware runs the Qi protocol by itself. When a pad
+is found, the driver does what Samsung's mfc_charger.c does: 5.5 V out,
+the mode interrupt on, the 17 V clamp, a 1.6 A limit, CMA modulation,
+the foreign object detection gains from the DT and the RPP scale. It
+services the chip's interrupt line (clear INT_A, then CLEAR_INT, while
+the line stays asserted) and reports the receiver as a wireless power
+supply with its output voltage, current, die temperature and the input
+current the charger may draw, stock's 800 mA for a basic pad.
+
+The chip runs from the pad, so it is only set up once the pad detect
+line rises; that line also wakes the phone. Samsung's fast wireless
+(10 V) handshake is not part of this.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../bindings/power/supply/idt,p9320.yaml           |   86 +++
+ drivers/power/supply/Kconfig                       |   10 
+ drivers/power/supply/Makefile                      |    1 
+ drivers/power/supply/p9320_charger.c               |  507 ++++++++++++++++++++
+ 4 files changed, 604 insertions(+)
+
+
+diff --git a/Documentation/devicetree/bindings/power/supply/idt,p9320.yaml b/Documentation/devicetree/bindings/power/supply/idt,p9320.yaml
+new file mode 100644
+index 0000000..249bc14
+--- /dev/null
++++ b/Documentation/devicetree/bindings/power/supply/idt,p9320.yaml
+@@ -0,0 +1,86 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/power/supply/idt,p9320.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: IDT P9320 Qi wireless power receiver
++
++maintainers:
++  - Noa Himesaka <himesaka@noa.codes>
++
++description:
++  The P9320 receives power from a Qi or PMA pad and runs the wireless power
++  protocol in its own firmware. Its VOUT feeds the wireless input of a
++  battery charger. The chip is powered from the pad and only answers on I2C
++  while the phone lies on one.
++
++allOf:
++  - $ref: power-supply.yaml#
++
++properties:
++  compatible:
++    const: idt,p9320
++
++  reg:
++    maxItems: 1
++
++  detect-gpios:
++    maxItems: 1
++    description: Pad detect (rectifier voltage good); asserted with a pad.
++
++  int-gpios:
++    maxItems: 1
++    description:
++      The chip's interrupt line, asserted until the host clears the
++      interrupt.
++
++  enable-gpios:
++    maxItems: 1
++    description: Receiver enable.
++
++  idt,fod:
++    $ref: /schemas/types.yaml#/definitions/uint8-array
++    minItems: 12
++    maxItems: 12
++    description:
++      Foreign object detection gain and offset pairs for the six power
++      levels, written to the chip when a pad is found.
++
++  idt,rpp-scale:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    default: 0x40
++    description: Received power packet scale coefficient.
++
++  idt,bpp-input-current-microamp:
++    default: 800000
++    description:
++      Input current the charger may draw from the receiver on a basic
++      power profile pad.
++
++required:
++  - compatible
++  - reg
++  - detect-gpios
++  - int-gpios
++
++unevaluatedProperties: false
++
++examples:
++  - |
++    #include <dt-bindings/gpio/gpio.h>
++
++    i2c {
++        #address-cells = <1>;
++        #size-cells = <0>;
++
++        wireless-charger@3b {
++            compatible = "idt,p9320";
++            reg = <0x3b>;
++            detect-gpios = <&pmic_gpios 1 GPIO_ACTIVE_HIGH>;
++            int-gpios = <&tlmm 119 GPIO_ACTIVE_LOW>;
++            enable-gpios = <&tlmm 153 GPIO_ACTIVE_LOW>;
++            idt,fod = /bits/ 8 <0x96 0x3e 0x8e 0x37 0x96 0x2e
++                                0x96 0x31 0xaa 0x03 0x9c 0x42>;
++        };
++    };
+diff --git a/drivers/power/supply/Kconfig b/drivers/power/supply/Kconfig
+index bdbc4de..6425145 100644
+--- a/drivers/power/supply/Kconfig
++++ b/drivers/power/supply/Kconfig
+@@ -642,6 +642,16 @@ config CHARGER_MAX77705
+ 	help
+ 	  Say Y to enable support for the Maxim MAX77705 battery charger.
+ 
++config CHARGER_P9320
++	tristate "IDT P9320 wireless power receiver"
++	depends on I2C && GPIOLIB
++	select REGMAP_I2C
++	help
++	  Say Y to enable support for the IDT (Renesas) P9320 Qi wireless
++	  power receiver, as found in the Samsung Galaxy Z Flip3. It sets up
++	  the receiver when the phone is put on a pad and reports it as a
++	  wireless power supply.
++
+ config CHARGER_MAX77759
+ 	tristate "Maxim MAX77759 battery charger driver"
+ 	depends on MFD_MAX77759 && REGULATOR
+diff --git a/drivers/power/supply/Makefile b/drivers/power/supply/Makefile
+index 04ee35e..b56238e 100644
+--- a/drivers/power/supply/Makefile
++++ b/drivers/power/supply/Makefile
+@@ -87,6 +87,7 @@ obj-$(CONFIG_CHARGER_DETECTOR_MAX14656)	+= max14656_charger_detector.o
+ obj-$(CONFIG_CHARGER_MAX77650)	+= max77650-charger.o
+ obj-$(CONFIG_CHARGER_MAX77693)	+= max77693_charger.o
+ obj-$(CONFIG_CHARGER_MAX77705)	+= max77705_charger.o
++obj-$(CONFIG_CHARGER_P9320)	+= p9320_charger.o
+ obj-$(CONFIG_CHARGER_MAX77976)	+= max77976_charger.o
+ obj-$(CONFIG_CHARGER_MAX8971)	+= max8971_charger.o
+ obj-$(CONFIG_CHARGER_MAX8997)	+= max8997_charger.o
+diff --git a/drivers/power/supply/p9320_charger.c b/drivers/power/supply/p9320_charger.c
+new file mode 100644
+index 0000000..fecd47d
+--- /dev/null
++++ b/drivers/power/supply/p9320_charger.c
+@@ -0,0 +1,507 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * IDT (Renesas) P9320 Qi wireless power receiver
++ *
++ * The chip's firmware runs the Qi protocol on its own. When a pad is found,
++ * the host sets the output voltage, the current limit, the modulation and the
++ * foreign object detection gains, services the chip's interrupt line, and
++ * reports the receiver as a wireless power supply; the charger behind VOUT
++ * (WCIN on a MAX77705) takes its input limit from here. The sequence follows
++ * Samsung's mfc_charger.c for the Galaxy Z Flip3.
++ *
++ * Register addresses are 16 bit, data 8 bit. The chip runs from the
++ * rectified pad power and does not answer on I2C without a pad.
++ */
++
++#include <linux/bits.h>
++#include <linux/delay.h>
++#include <linux/devm-helpers.h>
++#include <linux/gpio/consumer.h>
++#include <linux/i2c.h>
++#include <linux/interrupt.h>
++#include <linux/module.h>
++#include <linux/mod_devicetable.h>
++#include <linux/mutex.h>
++#include <linux/pm_wakeirq.h>
++#include <linux/power_supply.h>
++#include <linux/property.h>
++#include <linux/regmap.h>
++#include <linux/workqueue.h>
++
++#define P9320_CHIP_ID			0x00
++#define P9320_CHIP_REV			0x02
++#define P9320_FW_MAJOR			0x04	/* 16 bit, little endian */
++#define P9320_FW_MINOR			0x06	/* 16 bit, little endian */
++#define P9320_STATUS_L			0x20
++#define P9320_STATUS_H			0x21
++#define P9320_INT_L			0x22
++#define P9320_INT_H			0x23
++#define P9320_INT_ENABLE_L		0x24
++#define P9320_INT_CLEAR_L		0x26
++#define P9320_INT_CLEAR_H		0x27
++#define P9320_SYS_OP_MODE		0x2b
++#define P9320_RX_COMM_AFC_FET		0x37
++#define P9320_ADC_VOUT			0x3c	/* mV */
++#define P9320_VOUT_SET			0x3e
++#define P9320_ADC_VRECT			0x40	/* mV */
++#define P9320_ADC_IOUT			0x44	/* mA */
++#define P9320_ADC_DIE_TEMP		0x46	/* degrees C, 12 bit */
++#define P9320_OP_FREQ			0x48	/* kHz */
++#define P9320_ILIM_SET			0x4c
++#define P9320_CMD_L			0x4e
++#define P9320_RX_OV_CLAMP		0x6a
++#define P9320_RX_COMM_MOD_FET		0x6b
++#define P9320_FOD_BASE			0x70
++#define P9320_RPP_SCALE			0xf0
++
++#define P9320_CHIP_ID_P9320		0x20
++#define P9320_CHIP_ID_S2MIW04		0x04	/* LSI part, other register map */
++
++#define P9320_STAT_OVER_TEMP		BIT(2)
++#define P9320_STAT_OVER_CURR		BIT(3)
++#define P9320_STAT_OVER_VOL		BIT(4)
++#define P9320_STAT_OP_MODE		BIT(5)
++
++#define P9320_CMD_CLEAR_INT		BIT(5)
++
++#define P9320_MODE_SHIFT		5
++#define P9320_MODE_PMA_SR1		3
++#define P9320_MODE_PMA_SR1E		4
++
++/* VOUT_SET: 3.5 V + 0.1 V per step; stock's non-HV output is 5.5 V */
++#define P9320_VOUT_MIN_MV		3500
++#define P9320_VOUT_STEP_MV		100
++#define P9320_VOUT_BPP_MV		5500
++/* ILIM_SET: 0.1 A + 0.1 A per step; stock 0x0f, 1.6 A (Renesas, 15 W) */
++#define P9320_ILIM_1600MA		0x0f
++/* RX_OV_CLAMP 0: 17 V */
++#define P9320_OV_CLAMP_17V		0x00
++/* comm modulation: CMA only */
++#define P9320_COMM_CMA			0x30
++
++#define P9320_FOD_LEN			12
++#define P9320_INT_LOOPS			10
++#define P9320_ATTACH_RETRIES		5
++#define P9320_ATTACH_RETRY_MS		100
++
++struct p9320 {
++	struct device *dev;
++	struct regmap *regmap;
++	struct power_supply *psy;
++	struct gpio_desc *det_gpio;
++	struct gpio_desc *int_gpio;
++	struct gpio_desc *enable_gpio;
++	struct delayed_work attach_work;
++	struct mutex lock;		/* chip access and the state below */
++	bool online;
++	bool configured;
++	unsigned int attach_tries;
++	unsigned int input_ua;
++	u32 bpp_input_ua;
++	u32 rpp_scale;
++	u8 fod[P9320_FOD_LEN];
++	bool have_fod;
++};
++
++static const struct regmap_config p9320_regmap_config = {
++	.reg_bits = 16,
++	.val_bits = 8,
++	.max_register = 0xffff,
++};
++
++static int p9320_read16(struct p9320 *chip, unsigned int reg, unsigned int *val)
++{
++	unsigned int lo, hi;
++	int ret;
++
++	ret = regmap_read(chip->regmap, reg, &lo);
++	if (ret)
++		return ret;
++	ret = regmap_read(chip->regmap, reg + 1, &hi);
++	if (ret)
++		return ret;
++
++	*val = lo | hi << 8;
++	return 0;
++}
++
++/* stock mfc_set_vout(): the step takes effect within 100 ms */
++static int p9320_set_vout(struct p9320 *chip, unsigned int mv)
++{
++	int ret;
++
++	ret = regmap_write(chip->regmap, P9320_VOUT_SET,
++			   (mv - P9320_VOUT_MIN_MV) / P9320_VOUT_STEP_MV);
++	if (!ret)
++		msleep(100);
++
++	return ret;
++}
++
++/*
++ * What stock's mfc_wpc_det_work() does when a pad shows up: 5.5 V out, the
++ * mode interrupt on, the 17 V clamp, a 1.6 A limit, CMA modulation, the CC
++ * gains of foreign object detection, and the RPP scale.
++ */
++static int p9320_configure(struct p9320 *chip)
++{
++	unsigned int id, rev, major, minor, mode;
++	int ret, i;
++
++	ret = regmap_read(chip->regmap, P9320_CHIP_ID, &id);
++	if (ret)
++		return ret;
++
++	if (id != P9320_CHIP_ID_P9320) {
++		dev_err(chip->dev, "chip id 0x%02x is not a P9320%s\n", id,
++			id == P9320_CHIP_ID_S2MIW04 ?
++			" (LSI S2MIW04, a different register map)" : "");
++		return -ENODEV;
++	}
++
++	if (!regmap_read(chip->regmap, P9320_CHIP_REV, &rev) &&
++	    !p9320_read16(chip, P9320_FW_MAJOR, &major) &&
++	    !p9320_read16(chip, P9320_FW_MINOR, &minor))
++		dev_info(chip->dev, "P9320 rev %u, firmware %u.0x%x\n",
++			 rev >> 4, major, minor);
++
++	ret = p9320_set_vout(chip, P9320_VOUT_BPP_MV);
++	if (ret)
++		return ret;
++
++	ret = regmap_set_bits(chip->regmap, P9320_INT_ENABLE_L,
++			      P9320_STAT_OP_MODE);
++	if (ret)
++		return ret;
++
++	ret = regmap_write(chip->regmap, P9320_RX_OV_CLAMP, P9320_OV_CLAMP_17V);
++	if (ret)
++		return ret;
++
++	ret = regmap_write(chip->regmap, P9320_ILIM_SET, P9320_ILIM_1600MA);
++	if (ret)
++		return ret;
++
++	ret = regmap_write(chip->regmap, P9320_RX_COMM_AFC_FET, P9320_COMM_CMA);
++	if (ret)
++		return ret;
++	ret = regmap_write(chip->regmap, P9320_RX_COMM_MOD_FET, P9320_COMM_CMA);
++	if (ret)
++		return ret;
++
++	ret = regmap_read(chip->regmap, P9320_SYS_OP_MODE, &mode);
++	if (ret)
++		return ret;
++	mode >>= P9320_MODE_SHIFT;
++	dev_info(chip->dev, "%s pad\n",
++		 mode == P9320_MODE_PMA_SR1 || mode == P9320_MODE_PMA_SR1E ?
++		 "PMA" : "Qi");
++
++	if (chip->have_fod) {
++		for (i = 0; i < P9320_FOD_LEN; i++) {
++			ret = regmap_write(chip->regmap, P9320_FOD_BASE + i,
++					   chip->fod[i]);
++			if (ret)
++				return ret;
++		}
++	}
++
++	/* stock lets the chip settle 5 ms before the RPP scale */
++	usleep_range(5000, 6000);
++	return regmap_write(chip->regmap, P9320_RPP_SCALE, chip->rpp_scale);
++}
++
++static void p9320_update(struct p9320 *chip)
++{
++	bool present = gpiod_get_value_cansleep(chip->det_gpio) > 0;
++	bool changed = false;
++	int ret;
++
++	mutex_lock(&chip->lock);
++
++	if (!present) {
++		cancel_delayed_work(&chip->attach_work);
++		if (chip->online) {
++			chip->online = false;
++			chip->configured = false;
++			chip->input_ua = 0;
++			changed = true;
++			dev_info(chip->dev, "pad removed\n");
++		}
++		goto out;
++	}
++
++	if (!chip->online) {
++		chip->online = true;
++		chip->attach_tries = 0;
++		/* the chip delivers 5 V by itself; this is stock's BPP limit */
++		chip->input_ua = chip->bpp_input_ua;
++		changed = true;
++	}
++
++	if (chip->configured)
++		goto out;
++
++	ret = p9320_configure(chip);
++	if (!ret) {
++		chip->configured = true;
++		changed = true;
++	} else if (ret != -ENODEV &&
++		   ++chip->attach_tries < P9320_ATTACH_RETRIES) {
++		/* VRECT may only just be up: the chip is not talking yet */
++		schedule_delayed_work(&chip->attach_work,
++				      msecs_to_jiffies(P9320_ATTACH_RETRY_MS));
++	} else if (ret != -ENODEV) {
++		dev_err(chip->dev, "cannot configure the receiver: %d\n", ret);
++	}
++
++out:
++	mutex_unlock(&chip->lock);
++	if (changed)
++		power_supply_changed(chip->psy);
++}
++
++static void p9320_attach_work(struct work_struct *work)
++{
++	struct p9320 *chip = container_of(work, struct p9320, attach_work.work);
++
++	p9320_update(chip);
++}
++
++static irqreturn_t p9320_det_irq(int irq, void *data)
++{
++	p9320_update(data);
++
++	return IRQ_HANDLED;
++}
++
++/*
++ * The INT line stays asserted until the host clears INT_A and sends
++ * CLEAR_INT (stock mfc_wpc_irq_thread()). Only a powered chip can assert it,
++ * so nothing is done without a pad.
++ */
++static irqreturn_t p9320_int_irq(int irq, void *data)
++{
++	struct p9320 *chip = data;
++	unsigned int src, status;
++	int loops;
++
++	mutex_lock(&chip->lock);
++
++	for (loops = 0; loops < P9320_INT_LOOPS; loops++) {
++		if (!chip->online || gpiod_get_value_cansleep(chip->int_gpio) <= 0)
++			break;
++
++		if (p9320_read16(chip, P9320_INT_L, &src) ||
++		    p9320_read16(chip, P9320_STATUS_L, &status))
++			break;
++
++		if (src & P9320_STAT_OP_MODE)
++			dev_dbg(chip->dev, "op mode 0x%02x\n", status);
++		if (src & (P9320_STAT_OVER_TEMP | P9320_STAT_OVER_CURR |
++			   P9320_STAT_OVER_VOL))
++			dev_warn(chip->dev, "receiver protection: status 0x%04x\n",
++				 status);
++
++		if (regmap_write(chip->regmap, P9320_INT_CLEAR_L, src & 0xff) ||
++		    regmap_write(chip->regmap, P9320_INT_CLEAR_H, src >> 8) ||
++		    regmap_set_bits(chip->regmap, P9320_CMD_L,
++				    P9320_CMD_CLEAR_INT))
++			break;
++	}
++
++	mutex_unlock(&chip->lock);
++
++	return IRQ_HANDLED;
++}
++
++static const enum power_supply_property p9320_props[] = {
++	POWER_SUPPLY_PROP_ONLINE,
++	POWER_SUPPLY_PROP_VOLTAGE_NOW,
++	POWER_SUPPLY_PROP_CURRENT_NOW,
++	POWER_SUPPLY_PROP_TEMP,
++	POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT,
++	POWER_SUPPLY_PROP_MODEL_NAME,
++	POWER_SUPPLY_PROP_MANUFACTURER,
++};
++
++static int p9320_get_property(struct power_supply *psy,
++			      enum power_supply_property psp,
++			      union power_supply_propval *val)
++{
++	struct p9320 *chip = power_supply_get_drvdata(psy);
++	unsigned int raw;
++	int ret = 0;
++
++	switch (psp) {
++	case POWER_SUPPLY_PROP_MODEL_NAME:
++		val->strval = "P9320";
++		return 0;
++	case POWER_SUPPLY_PROP_MANUFACTURER:
++		val->strval = "IDT";
++		return 0;
++	default:
++		break;
++	}
++
++	mutex_lock(&chip->lock);
++
++	switch (psp) {
++	case POWER_SUPPLY_PROP_ONLINE:
++		val->intval = chip->online;
++		break;
++	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
++		val->intval = chip->input_ua;
++		break;
++	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
++	case POWER_SUPPLY_PROP_CURRENT_NOW:
++	case POWER_SUPPLY_PROP_TEMP:
++		if (!chip->configured) {
++			ret = -ENODATA;
++			break;
++		}
++		if (psp == POWER_SUPPLY_PROP_VOLTAGE_NOW) {
++			ret = p9320_read16(chip, P9320_ADC_VOUT, &raw);
++			val->intval = raw * 1000;
++		} else if (psp == POWER_SUPPLY_PROP_CURRENT_NOW) {
++			ret = p9320_read16(chip, P9320_ADC_IOUT, &raw);
++			val->intval = raw * 1000;
++		} else {
++			ret = p9320_read16(chip, P9320_ADC_DIE_TEMP, &raw);
++			val->intval = (raw & 0xfff) * 10;
++		}
++		break;
++	default:
++		ret = -EINVAL;
++		break;
++	}
++
++	mutex_unlock(&chip->lock);
++
++	return ret;
++}
++
++static const struct power_supply_desc p9320_psy_desc = {
++	.name = "p9320-wireless",
++	.type = POWER_SUPPLY_TYPE_WIRELESS,
++	.properties = p9320_props,
++	.num_properties = ARRAY_SIZE(p9320_props),
++	.get_property = p9320_get_property,
++};
++
++static int p9320_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	struct power_supply_config cfg = {};
++	struct p9320 *chip;
++	int irq, ret;
++
++	chip = devm_kzalloc(dev, sizeof(*chip), GFP_KERNEL);
++	if (!chip)
++		return -ENOMEM;
++
++	chip->dev = dev;
++	ret = devm_mutex_init(dev, &chip->lock);
++	if (ret)
++		return ret;
++
++	chip->regmap = devm_regmap_init_i2c(client, &p9320_regmap_config);
++	if (IS_ERR(chip->regmap))
++		return PTR_ERR(chip->regmap);
++
++	/* low on the pin enables the receiver; leave it enabled */
++	chip->enable_gpio = devm_gpiod_get_optional(dev, "enable", GPIOD_OUT_HIGH);
++	if (IS_ERR(chip->enable_gpio))
++		return dev_err_probe(dev, PTR_ERR(chip->enable_gpio),
++				     "cannot get the enable GPIO\n");
++
++	chip->det_gpio = devm_gpiod_get(dev, "detect", GPIOD_IN);
++	if (IS_ERR(chip->det_gpio))
++		return dev_err_probe(dev, PTR_ERR(chip->det_gpio),
++				     "cannot get the pad detect GPIO\n");
++
++	chip->int_gpio = devm_gpiod_get(dev, "int", GPIOD_IN);
++	if (IS_ERR(chip->int_gpio))
++		return dev_err_probe(dev, PTR_ERR(chip->int_gpio),
++				     "cannot get the interrupt GPIO\n");
++
++	if (device_property_read_u32(dev, "idt,bpp-input-current-microamp",
++				     &chip->bpp_input_ua))
++		chip->bpp_input_ua = 800000;
++	if (device_property_read_u32(dev, "idt,rpp-scale", &chip->rpp_scale))
++		chip->rpp_scale = 0x40;
++	ret = device_property_count_u8(dev, "idt,fod");
++	if (ret == P9320_FOD_LEN)
++		chip->have_fod = !device_property_read_u8_array(dev, "idt,fod",
++								chip->fod,
++								P9320_FOD_LEN);
++	else if (ret != -EINVAL)
++		dev_warn(dev, "idt,fod needs %d bytes, ignored\n", P9320_FOD_LEN);
++
++	cfg.drv_data = chip;
++	cfg.fwnode = dev_fwnode(dev);
++	chip->psy = devm_power_supply_register(dev, &p9320_psy_desc, &cfg);
++	if (IS_ERR(chip->psy))
++		return dev_err_probe(dev, PTR_ERR(chip->psy),
++				     "cannot register the power supply\n");
++
++	/* cancelled before the power supply goes away */
++	ret = devm_delayed_work_autocancel(dev, &chip->attach_work,
++					   p9320_attach_work);
++	if (ret)
++		return ret;
++
++	irq = gpiod_to_irq(chip->int_gpio);
++	if (irq < 0)
++		return dev_err_probe(dev, irq, "no interrupt for the INT GPIO\n");
++	ret = devm_request_threaded_irq(dev, irq, NULL, p9320_int_irq,
++					IRQF_TRIGGER_FALLING | IRQF_ONESHOT,
++					"p9320-int", chip);
++	if (ret)
++		return dev_err_probe(dev, ret, "cannot request the INT interrupt\n");
++
++	irq = gpiod_to_irq(chip->det_gpio);
++	if (irq < 0)
++		return dev_err_probe(dev, irq, "no interrupt for the detect GPIO\n");
++	ret = devm_request_threaded_irq(dev, irq, NULL, p9320_det_irq,
++					IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING |
++					IRQF_ONESHOT, "p9320-detect", chip);
++	if (ret)
++		return dev_err_probe(dev, ret, "cannot request the detect interrupt\n");
++
++	/* putting the phone on a pad wakes it */
++	device_init_wakeup(dev, true);
++	ret = devm_pm_set_wake_irq(dev, irq);
++	if (ret)
++		dev_warn(dev, "pad detect is not a wake source: %d\n", ret);
++
++	/* the phone may have booted on a pad */
++	p9320_update(chip);
++
++	return 0;
++}
++
++static const struct of_device_id p9320_of_match[] = {
++	{ .compatible = "idt,p9320" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, p9320_of_match);
++
++static const struct i2c_device_id p9320_id[] = {
++	{ "p9320" },
++	{ }
++};
++MODULE_DEVICE_TABLE(i2c, p9320_id);
++
++static struct i2c_driver p9320_driver = {
++	.driver = {
++		.name = "p9320-charger",
++		.of_match_table = p9320_of_match,
++	},
++	.probe = p9320_probe,
++	.id_table = p9320_id,
++};
++module_i2c_driver(p9320_driver);
++
++MODULE_DESCRIPTION("IDT P9320 wireless power receiver");
++MODULE_LICENSE("GPL");

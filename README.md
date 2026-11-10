@@ -82,9 +82,9 @@ not that the hardware is broken on this unit.
 | 5G NR | the modem reports the capability; data and voice have only been verified on LTE |
 | Cameras: autofocus, OIS, calibration | the wide camera's lens actuator (CCI1 0x18) and OIS MCU (QUP SE2) have no driver, so it is fixed-focus; no lens-shading/AWB calibration from the module EEPROMs and no libcamera tuning files; the hardware ISP (IFE pixel path) is not pursued |
 | Hardware video encode | not registered on SM8350: any encode resets the SoC on the first input frame, so `/dev/video1` stays skipped (0043 held) |
-| Wireless charging and reverse wireless charging | not ported; the WPC GPIOs are named but unused |
+| Wireless charging and reverse wireless charging | the IDT P9320 receiver (0084, 0085) and the MAX77705 wireless input (0083) are on the phone for the next boot, not yet seen on a pad; 5 W (Qi BPP) only, no Samsung fast wireless (10 V) yet; reverse wireless not ported |
 | Hinge angle | only open/closed via `SW_LID`, no angle sensor |
-| Idle power, thermal limits, charge curves | not tuned; wireless charging is not ported; QC 2.0 is in (0082) but not yet seen on a QC charger (wired tops out at 15 W like stock: USB PD 9 V fixed PDO or AFC; stock never asks for a PPS APDO, it has no direct charger) |
+| Idle power, thermal limits, charge curves | not tuned; QC 2.0 is in (0082) but not yet seen on a QC charger (wired tops out at 15 W like stock: USB PD 9 V fixed PDO or AFC; stock never asks for a PPS APDO, it has no direct charger) |
 
 ## Boot chain
 
@@ -128,8 +128,8 @@ Priority order for a daily driver:
 - Hardware video encode: any encode resets the SoC on the first input frame (0043 held).
 - Cameras: the wide camera's autofocus actuator (CCI1 0x18) and OIS (QUP SE2), calibration
   from the module EEPROMs, libcamera tuning files, and flash tied into capture.
-- Wireless charging (S2MIW04 `mfc-charger` at i2c@50 0x3b, plus reverse wireless) and a
-  thermal policy.
+- Wireless charging: see it work on a pad, then Samsung fast wireless (10 V) and reverse
+  wireless; a thermal policy.
 - Idle power, round two: system suspend once the temporary sleep inhibitor goes, modem and
   Wi-Fi power save, RPMh rails nothing votes for.
 - The rest of the list in `STATE.md`.

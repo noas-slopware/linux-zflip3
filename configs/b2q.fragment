@@ -82,6 +82,8 @@ CONFIG_BATTERY_MAX17042=m
 # MAX77705 charger and the S2ASL01 dual-cell current limiters
 CONFIG_CHARGER_MAX77705=m
 CONFIG_CHARGER_S2ASL01=m
+# IDT P9320 wireless charging receiver (stock mfc-charger@3b on board revisions 05 and up)
+CONFIG_CHARGER_P9320=m
 # Samsung dual cell charging over the two limiters
 CONFIG_BATTERY_SAMSUNG_DUAL=m
 # Cellular data: the rmnet MAP driver provides the netlink link API ModemManager

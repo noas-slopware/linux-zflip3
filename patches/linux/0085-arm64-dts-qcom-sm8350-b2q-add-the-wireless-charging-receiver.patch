@@ -1,0 +1,131 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] arm64: dts: qcom: sm8350-b2q: add the wireless charging receiver
+
+The P9320 at 0x3b on a bit-banged bus (TLMM 169/170, stock i2c@50), its
+pad detect (PM8350C gpio1), interrupt (TLMM 119) and enable (TLMM 153,
+low enables) lines with stock's pin states, and the CC table of stock's
+foreign object detection gains. The MAX77705 charger refers to it for
+the WCIN limit and charges at stock's 2300 mA from a pad.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts |   83 +++++++++++++++++++++++
+ 1 file changed, 83 insertions(+)
+
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+index 627194f..85b253a 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+@@ -376,6 +376,41 @@
+ 		};
+ 	};
+ 
++	/*
++	 * The wireless charging receiver, IDT P9320 (stock mfc-charger@3b,
++	 * "idt,mfc-charger" on board revisions 05 and up), on a bit-banged
++	 * bus: stock i2c@50, 100 kHz.
++	 */
++	mfc_i2c: i2c-50 {
++		compatible = "i2c-gpio";
++		sda-gpios = <&tlmm 169 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++		scl-gpios = <&tlmm 170 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++		i2c-gpio,delay-us = <2>;
++		pinctrl-0 = <&mfc_sda_state &mfc_scl_state>;
++		pinctrl-names = "default";
++		#address-cells = <1>;
++		#size-cells = <0>;
++
++		wireless_rx: wireless-charger@3b {
++			compatible = "idt,p9320";
++			reg = <0x3b>;
++
++			/* WPC_DET high: a pad; MFC_AP_INT low: an interrupt */
++			detect-gpios = <&pm8350c_gpios 1 GPIO_ACTIVE_HIGH>;
++			int-gpios = <&tlmm 119 GPIO_ACTIVE_LOW>;
++			/* WPC_EN low enables the receiver */
++			enable-gpios = <&tlmm 153 GPIO_ACTIVE_LOW>;
++			pinctrl-0 = <&wpc_det_state &mfc_int_state &wpc_en_state>;
++			pinctrl-names = "default";
++
++			/* stock fod_list pad_0x00 cc */
++			idt,fod = /bits/ 8 <0x96 0x3e 0x8e 0x37 0x96 0x2e
++					    0x96 0x31 0xaa 0x03 0x9c 0x42>;
++			/* cable-info WIRELESS (Qi BPP, PMA, stands): 800 mA in */
++			idt,bpp-input-current-microamp = <800000>;
++		};
++	};
++
+ 	s2dos05_i2c: i2c-52 {
+ 		compatible = "i2c-gpio";
+ 	 	sda-gpios = <&tlmm 104 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+@@ -1007,6 +1042,14 @@
+ 		"NC",
+ 		"MAIN_FG_ERR";
+ 
++	/* WPC_DET, stock wpc_det_default */
++	wpc_det_state: wpc-det-state {
++		pins = "gpio1";
++		function = "normal";
++		input-enable;
++		bias-disable;
++	};
++
+ 	/* MAX77705 INTB; stock if_pmic_irq samples it on VIN1 */
+ 	pmic_int_default: pmic-int-default-state {
+ 		pins = "gpio5";
+@@ -1526,6 +1569,37 @@
+ 		bias-disable;
+ 	};
+ 
++	/* stock gpio_i2c_0_sda/scl_default, mfc_int_default, wpc_en_default */
++	mfc_sda_state: mfc-sda-state {
++		pins = "gpio169";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-disable;
++	};
++
++	mfc_scl_state: mfc-scl-state {
++		pins = "gpio170";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-disable;
++	};
++
++	mfc_int_state: mfc-int-state {
++		pins = "gpio119";
++		function = "gpio";
++		drive-strength = <2>;
++		input-enable;
++		bias-disable;
++	};
++
++	wpc_en_state: wpc-en-state {
++		pins = "gpio153";
++		function = "gpio";
++		drive-strength = <2>;
++		output-low;
++		bias-disable;
++	};
++
+ 	i2c52_sda_state: i2c52-sda-state {
+ 		pins = "gpio104";
+ 		function = "gpio";
+@@ -2024,6 +2098,15 @@
+ 		maxim,hv-input-current-microamp = <1650000>;
+ 		maxim,hv-charge-current-microamp = <2850000>;
+ 
++		/*
++		 * Wireless input: the receiver sets the limit per pad;
++		 * without it stock's initial 500 mA. cable-info WIRELESS
++		 * charges at 2300 mA.
++		 */
++		maxim,wireless-charger = <&wireless_rx>;
++		maxim,wireless-input-current-microamp = <500000>;
++		maxim,wireless-charge-current-microamp = <2300000>;
++
+ 		/*
+ 		 * USB PD: battery,pd_charging_charge_power 15 W,
+ 		 * max_input_voltage 9 V, max_input_current 3 A,
