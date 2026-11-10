@@ -7,12 +7,15 @@ Samsung.
 **Status: daily-usable bring-up.** Arch Linux Ports with Plasma Mobile runs from UFS with
 display, touch, Wi-Fi, Bluetooth, GPU, charging, speakers, earpiece, microphone, cellular data,
 SMS, MMS and VoLTE calls (including waking from suspend on incoming messages and calls),
-USB host/OTG, hardware video decode (VP9 and H.264 without B-frames; see
+USB host/OTG, hardware video decode (H.264, HEVC and VP9; see
 [`VIDEO-DECODE.md`](VIDEO-DECODE.md)), the cover display and its touchscreen, camera
 flash/torch LED, the SSC's accelerometer, gyroscope, magnetometer, compass and ambient light
-sensors, the SX9360 grip sensor that also provides proximity, and GNSS through ModemManager's
-QMI LOC. Not yet: the cameras, hardware video encode, NFC, wireless charging, the hinge angle
-beyond open/closed, and the fingerprint sensor (blocked by TrustZone, see `STATE.md`).
+sensors, the SX9360 grip sensor that also provides proximity, GNSS through ModemManager's
+QMI LOC, the fingerprint sensor (Samsung's own TrustZone app, enroll in Settings, unlock at
+the lock screen; [`FINGERPRINT.md`](FINGERPRINT.md)), NFC, and all three cameras (raw
+capture through CAMSS, pictures through libcamera's software ISP;
+[`CAMERA.md`](CAMERA.md)). Not yet: hardware video encode, autofocus and OIS, wireless
+charging, QC 2.0, the hinge angle beyond open/closed, and a tuned thermal policy.
 [`STATE.md`](STATE.md) has the details. The roadmap and the reasoning behind each step live on
 the `docs` branch
 ([`docs/plan.md`](https://github.com/noas-slopware/linux-zflip3/blob/docs/docs/plan.md)).
@@ -37,7 +40,8 @@ unlockable.
 
 ## What works
 
-"Verified" means seen working on the unit. Kernel 7.3.1 build #81, 2026-11-10.
+"Verified" means seen working on the unit. Kernel 7.3.1 build #7 from the patch series
+0001-0081 (0043 held), 2026-11-10.
 
 | Subsystem | Status |
 |---|---|
@@ -54,15 +58,18 @@ unlockable.
 | SMS send and receive, received while ModemManager or the phone was down | verified |
 | MMS send and receive (Spacebar) | verified |
 | VoLTE calls in and out, to and from other networks, AMR-WB / AMR-NB | verified |
-| DTMF in calls | in the repo, not on the phone: the ModemManager side is `patches/modemmanager/0004-*`; 1.24.2-10 had none |
+| DTMF in calls | verified (ModemManager 1.24.2-11 with `patches/modemmanager/0004-*`) |
 | Incoming call or SMS waking the phone from suspend | verified |
 | USB host/OTG (Type-C peripherals: YubiKey, USB-C audio/DAC, flash drives) | verified |
-| Hardware video decode (qcom-iris via qcom-va-driver) | partial: VP9 and H.264 without B-frames verified in Firefox 159 on 2026-11-10; H.264 B-frames broken and HEVC untested pending the kernel patches in [`VIDEO-DECODE.md`](VIDEO-DECODE.md) |
-| Camera flash and torch LED (S2MPB02) | verified on #81; the S2MPB02 MFD/regulator rework and the blink-free torch refresh (`patches/linux/0026-*` to `0031-*`, 2026-11-10) are not on the phone yet |
+| Hardware video decode (qcom-iris via qcom-va-driver) | verified: VP9 and H.264 in Firefox 159; H.264 with B-frames and HEVC decode bit-exact against software ([`VIDEO-DECODE.md`](VIDEO-DECODE.md)) |
+| Camera flash and torch LED (S2MPB02) | verified, with the S2MPB02 MFD/regulator rework and the blink-free torch refresh (`patches/linux/0026-*` to `0031-*`) |
 | SSC sensors: accelerometer, gyroscope, magnetometer, compass, ambient light | verified (data via `ssccli`; `iio-sensor-proxy` reports them) |
 | Grip sensor (Semtech SX9360, IIO proximity) | verified (raw channels; its main electrode is the phone's proximity sensor) |
 | GNSS | verified through ModemManager's QMI LOC (`gps-raw`, `gps-nmea`; no fix indoors, no `/dev/gnss`) |
 | Cover display | working: 512x260 strip; `b2q-coverd` leases the non-desktop connector, sleeps by default and wakes on notification/call/SMS/power key; the main panel is DPMS Off while folded and only the cover is active; the call banner clears on hangup |
+| Fingerprint sensor (power button) | verified: Samsung's securefp TrustZone app through `/dev/qsee-app`, libfprint `samsung_securefp`, fprintd; `b2q-spud` serves the secure processor's storage and sets up the key that seals templates; enroll in Settings, unlock at the lock screen ([`FINGERPRINT.md`](FINGERPRINT.md)) |
+| NFC (NXP SN100U) | verified: `nxp-nci` at i2c15 0x2b, neard reads tags (a YubiKey's NDEF URI) |
+| Cameras: rear wide (IMX563), ultrawide (IMX258), front (IMX374) | verified: raw capture at full resolution and 30 fps on all three (the wide one over C-PHY), colour bars exact; pictures through libcamera 0.7.2's software ISP with auto exposure ([`CAMERA.md`](CAMERA.md)) |
 | Cover touchscreen (Zinitix ZTW522) | verified: vendor protocol driver/DT in `patches/linux/0038-*`, `0039-*`; `b2q-coverd` grabs the evdev and dismisses tapped cards while the cover is lit; a tap never wakes it, a swipe does; udev keeps libinput off it |
 
 ## Not working yet
@@ -73,14 +80,11 @@ not that the hardware is broken on this unit.
 | Subsystem | State |
 |---|---|
 | 5G NR | the modem reports the capability; data and voice have only been verified on LTE |
-| Cameras (rear 12 MP wide + 12 MP ultrawide, front 10 MP) | not started: no sensor, CCI or CAMSS nodes |
-| Hardware video decode: H.264 B-frames, HEVC | H.264 with B-frames fails (`surface sync timeout`), HEVC only logs pending-picture warnings; both need the Gen1 iris patches (see `VIDEO-DECODE.md`) |
-| Hardware video encode | not registered on SM8350: opening the encoder crashed the VPU firmware before 0021's input-packet fix, so `/dev/video1` is skipped there until it is retested (upstream registers it on SM8250) |
-| Fingerprint sensor in the power button | blocked: the SPI controller, its pins and the Goodix TA are TrustZone-owned; the next path is a QSEECom client for the Goodix TA, not a Linux SPI driver |
-| NFC | blocked: the SN100U node, pinctrl and the NCI 2.0 fixes are in `patches/linux/0033-*` to `0035-*`, but the controller never ACKs I2C, likely the PMIC reference clock |
+| Cameras: autofocus, OIS, calibration | the wide camera's lens actuator (CCI1 0x18) and OIS MCU (QUP SE2) have no driver, so it is fixed-focus; no lens-shading/AWB calibration from the module EEPROMs and no libcamera tuning files; the hardware ISP (IFE pixel path) is not pursued |
+| Hardware video encode | not registered on SM8350: any encode resets the SoC on the first input frame, so `/dev/video1` stays skipped (0043 held) |
 | Wireless charging and reverse wireless charging | not ported; the WPC GPIOs are named but unused |
 | Hinge angle | only open/closed via `SW_LID`, no angle sensor |
-| Idle power, thermal limits, charge curves | not tuned; QC 2.0, PPS and wireless charging are not ported |
+| Idle power, thermal limits, charge curves | not tuned; QC 2.0 and wireless charging are not ported (wired tops out at 15 W like stock: USB PD 9 V fixed PDO or AFC; stock never asks for a PPS APDO, it has no direct charger) |
 
 ## Boot chain
 
@@ -120,17 +124,14 @@ Priority order for a daily driver:
 
 - ~~Motion and environment sensors~~: done (SSC on the SLPI, plus the SX9360 grip sensor).
   Auto-rotate through Plasma is confirmed.
-- Fingerprint first: it needs Samsung's TZ images uploaded and a TEE interface to the
-  Goodix TA. `STATE.md` section 13 has the TrustZone findings; this is the current first
-  priority.
-- HFI Gen1 iris: port the decode-order output and larger capture-pool patches from the
-  gen2 series, then retest the encoder on SM8350 with 0021's input-packet fix and drop
-  the SM8350 skip if it holds. This fixes H.264 B-frames and adds hardware encode.
-- NFC: the SN100U does not ACK I2C and likely needs its PMIC reference clock; the node
-  and the NCI 2.0 fixes stay in `patches/linux/0033-*` to `0035-*`.
-- Cameras: CAMSS/CCI and the three sensors (rear wide, ultrawide, front); the largest
-  remaining subsystem.
-- Wireless charging, QC 2.0, PPS, thermal limits and idle drain.
+- ~~Fingerprint, NFC, H.264 B-frames and HEVC decode, the three cameras~~: done.
+- Hardware video encode: any encode resets the SoC on the first input frame (0043 held).
+- Cameras: the wide camera's autofocus actuator (CCI1 0x18) and OIS (QUP SE2), calibration
+  from the module EEPROMs, libcamera tuning files, and flash tied into capture.
+- Wireless charging (S2MIW04 `mfc-charger` at i2c@50 0x3b, plus reverse wireless), QC 2.0
+  and a thermal policy.
+- Idle power, round two: system suspend once the temporary sleep inhibitor goes, modem and
+  Wi-Fi power save, RPMh rails nothing votes for.
 - The rest of the list in `STATE.md`.
 
 ### For the rootfs rebuild
