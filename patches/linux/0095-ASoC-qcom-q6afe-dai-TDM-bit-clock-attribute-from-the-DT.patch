@@ -1,0 +1,76 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] ASoC: qcom: q6afe-dai: TDM bit clock attribute from the DT
+
+The TDM bit clocks are always set up inverted
+(Q6AFE_LPASS_CLK_ATTRIBUTE_INVERT_COUPLE_NO). Not every board wants
+that: the Galaxy Z Flip3's CS35L41 amps sample on the inverted edge
+themselves (DSP_A, IB_NF, as downstream sets them), and downstream's
+qcom,msm-cpudai-tdm-clk-attribute keeps the AFE clock as it is (1). With
+both inverting, the amps sampled on the edge the AFE launches data on
+and the speakers played loud noise.
+
+Add an optional qcom,tdm-clk-attribute to the TDM ports; without it the
+clock stays inverted, as before.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../bindings/sound/qcom,q6dsp-lpass-ports.yaml     |   11 +++++++++++
+ sound/soc/qcom/qdsp6/q6afe-dai.c                   |    6 ++++++
+ 2 files changed, 17 insertions(+)
+
+
+diff --git a/Documentation/devicetree/bindings/sound/qcom,q6dsp-lpass-ports.yaml b/Documentation/devicetree/bindings/sound/qcom,q6dsp-lpass-ports.yaml
+index 3b03e2a..a17799c 100644
+--- a/Documentation/devicetree/bindings/sound/qcom,q6dsp-lpass-ports.yaml
++++ b/Documentation/devicetree/bindings/sound/qcom,q6dsp-lpass-ports.yaml
+@@ -100,6 +100,17 @@ patternProperties:
+             0 = MSB
+             1 = LSB
+ 
++      qcom,tdm-clk-attribute:
++        $ref: /schemas/types.yaml#/definitions/uint32
++        enum: [1, 2, 3, 4]
++        description:
++          Attribute of the TDM bit clock the DSP generates. When absent the
++          clock is inverted (4).
++            1 = not coupled
++            2 = coupled, dividend
++            3 = coupled, divisor
++            4 = inverted, not coupled
++
+     required:
+       - reg
+ 
+diff --git a/sound/soc/qcom/qdsp6/q6afe-dai.c b/sound/soc/qcom/qdsp6/q6afe-dai.c
+index bafa174..cb8af9a 100644
+--- a/sound/soc/qcom/qdsp6/q6afe-dai.c
++++ b/sound/soc/qcom/qdsp6/q6afe-dai.c
+@@ -25,6 +25,7 @@ struct q6afe_dai_priv_data {
+ 	uint32_t invert_sync;
+ 	uint32_t data_delay;
+ 	uint32_t data_align;
++	uint32_t clk_attribute;	/* TDM bit clock, Q6AFE_LPASS_CLK_ATTRIBUTE_* */
+ };
+ 
+ struct q6afe_dai_data {
+@@ -513,7 +514,9 @@ static int q6afe_mi2s_set_sysclk(struct snd_soc_dai *dai,
+ 					     Q6AFE_LPASS_CLK_ROOT_DEFAULT,
+ 					     freq, dir);
+ 	case Q6AFE_LPASS_CLK_ID_PRI_TDM_IBIT ... Q6AFE_LPASS_CLK_ID_QUIN_TDM_EBIT:
++		/* inverted unless the port says otherwise (qcom,tdm-clk-attribute) */
+ 		return q6afe_port_set_sysclk(port, clk_id,
++					     dai_data->priv[dai->id].clk_attribute ?:
+ 					     Q6AFE_LPASS_CLK_ATTRIBUTE_INVERT_COUPLE_NO,
+ 					     Q6AFE_LPASS_CLK_ROOT_DEFAULT,
+ 					     freq, dir);
+@@ -1150,6 +1153,9 @@ static void of_q6afe_parse_dai_data(struct device *dev,
+ 				dev_err(dev, "No Data align from DT\n");
+ 				break;
+ 			}
++			/* optional: the bit clock attribute, inverted by default */
++			of_property_read_u32(node, "qcom,tdm-clk-attribute",
++					     &priv->clk_attribute);
+ 			break;
+ 		default:
+ 			break;

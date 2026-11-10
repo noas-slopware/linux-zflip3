@@ -1,0 +1,33 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] arm64: dts: qcom: sm8350-b2q: TDM bit clock not inverted
+
+Stock's primary TDM has qcom,msm-cpudai-tdm-clk-attribute = [00 01], a
+bit clock that the AFE does not invert; the amps invert it themselves.
+Set qcom,tdm-clk-attribute = <1> on PRIMARY_TDM_RX_0.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts |    8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+index bb4b55b..7727cab 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+@@ -2557,6 +2557,14 @@
+ 		qcom,tdm-invert-sync = <0>;
+ 		qcom,tdm-data-delay = <1>;
+ 		qcom,tdm-data-align = <0>;
++		/*
++		 * Stock qcom,msm-cpudai-tdm-clk-attribute = [00 01]: the bit
++		 * clock is not inverted at the AFE. The amps sample on the
++		 * inverted edge (IB_NF on the codec side, as stock); with the
++		 * AFE inverting too they sampled on the launch edge and the
++		 * speakers hissed.
++		 */
++		qcom,tdm-clk-attribute = <1>;
+ 	};
+ }; 
+ 
