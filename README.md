@@ -15,7 +15,7 @@ QMI LOC, the fingerprint sensor (Samsung's own TrustZone app, enroll in Settings
 the lock screen; [`FINGERPRINT.md`](FINGERPRINT.md)), NFC, and all three cameras (raw
 capture through CAMSS, pictures through libcamera's software ISP;
 [`CAMERA.md`](CAMERA.md)). Not yet: hardware video encode, autofocus and OIS, wireless
-charging, QC 2.0, the hinge angle beyond open/closed, and a tuned thermal policy.
+charging, the hinge angle beyond open/closed, and a tuned thermal policy.
 [`STATE.md`](STATE.md) has the details. The roadmap and the reasoning behind each step live on
 the `docs` branch
 ([`docs/plan.md`](https://github.com/noas-slopware/linux-zflip3/blob/docs/docs/plan.md)).
@@ -84,7 +84,7 @@ not that the hardware is broken on this unit.
 | Hardware video encode | not registered on SM8350: any encode resets the SoC on the first input frame, so `/dev/video1` stays skipped (0043 held) |
 | Wireless charging and reverse wireless charging | not ported; the WPC GPIOs are named but unused |
 | Hinge angle | only open/closed via `SW_LID`, no angle sensor |
-| Idle power, thermal limits, charge curves | not tuned; QC 2.0 and wireless charging are not ported (wired tops out at 15 W like stock: USB PD 9 V fixed PDO or AFC; stock never asks for a PPS APDO, it has no direct charger) |
+| Idle power, thermal limits, charge curves | not tuned; wireless charging is not ported; QC 2.0 is in (0082) but not yet seen on a QC charger (wired tops out at 15 W like stock: USB PD 9 V fixed PDO or AFC; stock never asks for a PPS APDO, it has no direct charger) |
 
 ## Boot chain
 
@@ -128,8 +128,8 @@ Priority order for a daily driver:
 - Hardware video encode: any encode resets the SoC on the first input frame (0043 held).
 - Cameras: the wide camera's autofocus actuator (CCI1 0x18) and OIS (QUP SE2), calibration
   from the module EEPROMs, libcamera tuning files, and flash tied into capture.
-- Wireless charging (S2MIW04 `mfc-charger` at i2c@50 0x3b, plus reverse wireless), QC 2.0
-  and a thermal policy.
+- Wireless charging (S2MIW04 `mfc-charger` at i2c@50 0x3b, plus reverse wireless) and a
+  thermal policy.
 - Idle power, round two: system suspend once the temporary sleep inhibitor goes, modem and
   Wi-Fi power save, RPMh rails nothing votes for.
 - The rest of the list in `STATE.md`.

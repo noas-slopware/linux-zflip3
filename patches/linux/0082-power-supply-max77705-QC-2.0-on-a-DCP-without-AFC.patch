@@ -1,0 +1,123 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] power: supply: max77705: QC 2.0 on a DCP without AFC
+
+A DCP that does not answer the AFC ping (MPing NACK, result 4) stayed at
+5 V. Stock's muic tries QC 2.0 there: the USB-C block's QC_2_0_SET
+opcode (0x22) drives D+/D- for 9 V (0x09) and reports the result and
+VBADC, with three retries while VBUS does not follow. Do the same. Stock
+maps a 9 V QC charger to SEC_BATTERY_CABLE_9V_TA, so it gets the AFC 9 V
+input and charge currents; a charger that stays at 5 V or that gives up
+with VBUS raised goes back to 5 V like AFC does.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/power/supply/max77705_charger.c |   58 +++++++++++++++++++++++++++++--
+ include/linux/power/max77705_charger.h  |    1 +
+ 2 files changed, 56 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/power/supply/max77705_charger.c b/drivers/power/supply/max77705_charger.c
+index b1ff54d..9079a0c 100644
+--- a/drivers/power/supply/max77705_charger.c
++++ b/drivers/power/supply/max77705_charger.c
+@@ -1099,17 +1099,66 @@ static void max77705_charger_set_fast(struct max77705_charger_data *chg,
+ 	power_supply_changed(chg->psy_chg);
+ }
+ 
++/*
++ * QC 2.0 on a DCP that does not answer the AFC ping (stock
++ * max77705_muic_handle_detect_dev_mpnack and handle_detect_dev_qc): drive
++ * D+/D- for 9 V (0x09) and check VBUS, three retries while VBUS does not
++ * move. Stock treats a 9 V QC charger as SEC_BATTERY_CABLE_9V_TA, so it gets
++ * the same currents as AFC 9 V.
++ */
++static bool max77705_qc_work(struct max77705_charger_data *chg,
++			     unsigned int *vbadc)
++{
++	u8 dpdn = 0x09, resp[3];
++	int retry;
++
++	for (retry = 0; retry <= 3; retry++) {
++		if (chg->pd_contract || chg->port != MAX77705_PORT_DCP)
++			return false;
++
++		if (max77705_usbc_cmd(chg, MAX77705_OP_QC_2_0_SET, &dpdn, 1,
++				      resp, 2))
++			return false;
++
++		*vbadc = resp[2];
++		dev_dbg(chg->dev, "QC 2.0 result 0x%02x vbadc 0x%02x\n",
++			resp[1], *vbadc);
++
++		switch (resp[1]) {
++		case 0:
++			/* VBADC 0x5..0x7: 7.5 to 10.5 V; at 5 V a plain TA */
++			if (*vbadc < 0x5 || *vbadc > 0x7)
++				return false;
++			dev_info(chg->dev, "QC 2.0 9 V\n");
++			max77705_charger_set_fast(chg, chg->hv_input_current,
++						  chg->hv_charge_current);
++			return true;
++		case 1:
++		case 2:
++		case 3:
++			/* no CHGIN, not a high-voltage DCP, not a DCP */
++			return false;
++		default:
++			/* 6, 7: VBUS did not follow D+/D- */
++			continue;
++		}
++	}
++
++	return false;
++}
++
+ /*
+  * AFC on a DCP (stock max77705_muic_afc_work/handle_detect_dev_afc): ask for
+  * 9 V with tx byte 0x46, take the charger's own byte if it offers one,
+  * retry three times, and charge at the 9 V TA currents once VBUS is at 9 V.
++ * A charger that does not answer the ping gets QC 2.0.
+  */
+ static void max77705_afc_work(struct work_struct *work)
+ {
+ 	struct max77705_charger_data *chg =
+ 		container_of(work, struct max77705_charger_data, afc_work.work);
+ 	u8 tx = 0x46, resp[11];
+-	unsigned int vbadc;
++	unsigned int vbadc = 0;
+ 	int i, ret;
+ 
+ 	for (chg->afc_retry = 0; chg->afc_retry <= 3; chg->afc_retry++) {
+@@ -1145,8 +1194,10 @@ static void max77705_afc_work(struct work_struct *work)
+ 			}
+ 			continue;
+ 		case 4:
+-			/* no AFC: stock tries QC 2.0 here, not ported */
+-			return;
++			/* MPing NACK: not AFC, try QC 2.0 */
++			if (max77705_qc_work(chg, &vbadc))
++				return;
++			goto give_up;
+ 		case 8:
+ 		case 9:
+ 		case 10:
+@@ -1157,6 +1208,7 @@ static void max77705_afc_work(struct work_struct *work)
+ 		}
+ 	}
+ 
++give_up:
+ 	/* given up with VBUS raised: back to 5 V, DP to GND, DM open */
+ 	if (vbadc >= 0x5) {
+ 		u8 ctrl2 = 0x13;
+diff --git a/include/linux/power/max77705_charger.h b/include/linux/power/max77705_charger.h
+index 4c7d6e6..7014694 100644
+--- a/include/linux/power/max77705_charger.h
++++ b/include/linux/power/max77705_charger.h
+@@ -182,6 +182,7 @@
+ #define MAX77705_USBC_CONTROL1_USB	0x09
+ #define MAX77705_OP_SAMSUNG_FACTORY_TEST	0x54
+ #define MAX77705_OP_AFC_RESULT_READ	0x21
++#define MAX77705_OP_QC_2_0_SET		0x22
+ #define MAX77705_OP_SET_SNKCAP		0x2e
+ #define MAX77705_OP_CURRENT_SRCCAP	0x30
+ #define MAX77705_OP_SRCCAP_REQUEST	0x32
