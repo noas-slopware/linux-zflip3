@@ -1,7 +1,11 @@
 # Plan: keep the IMS PDN alive across a ModemManager reset
 
-Status: open, deferred to the next work session (2026-11-10 or later, after the Claude
-weekly usage reset).
+Status: option 4 done, 2026-11-11, in `patches/modemmanager/0005-*` (modemmanager
+1.24.2-13). A ModemManager restart keeps `qmapmux0.3`, the IMS bearer and imsd's
+registration, and the default PDN comes back. The data format is kept only when the modem
+already runs QMAP (read without the DPM open); on a boot where the IMS link comes up first
+the full setup runs as before. Not yet tested: a call and SMS right after a restart, Wi-Fi
+off, and a restart during a call.
 
 ## Goal
 

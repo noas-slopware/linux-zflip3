@@ -81,8 +81,11 @@ pictures with auto exposure.
 - CAMNOC QoS: stock programs it, CAMSS does not. The first captures at 30 fps showed no
   errors, but it is untested under load.
 - IFE SMMU stream mask: stock 0x440 against sm8250's 0x400; no faults seen.
-- Wide camera autofocus: the lens actuator at CCI1 0x18 has no driver. OIS: the MCU on
-  QUP SE2 has no driver.
+- Wide camera autofocus (2026-11-11, 0099/0100, libcamera 0.7.2-6): the AK7377 at CCI1
+  master 1, 0x0c, through ak7375 (standby before active, as stock); libcamera's soft ISP Af
+  scans it, convergence not yet seen in light (`STATE.md` header). OIS: the MCU on QUP SE2
+  has no driver.
+- `cam` at full resolution fails to allocate: the only CMA heap is the 32 MiB default.
 - Calibration: no lens shading or AWB data from the module EEPROMs, and no libcamera tuning
   files; the ultrawide's crop and orientation are not yet compared against stock.
 - The flash LED works on its own but is not tied into capture.
