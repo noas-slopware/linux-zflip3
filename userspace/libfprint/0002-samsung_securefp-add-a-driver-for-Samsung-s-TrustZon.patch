@@ -1,0 +1,1405 @@
+From edc9c233a60c5c63b5d8e020846ce2c57312a865 Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Tue, 10 Nov 2026 16:19:31 +0900
+Subject: [PATCH 2/2] samsung_securefp: add a driver for Samsung's TrustZone
+ fingerprint TA
+
+On Samsung phones the fingerprint sensor belongs to the secure world:
+Samsung's "securefp" trusted application owns the SPI bus, captures,
+extracts and matches, and returns opaque sealed templates. The normal
+world only loads the TA, powers the sensor, pulses its reset line and
+waits on its interrupt line whenever the TA asks for it, which is what
+Samsung's Android HAL (libbauthserver) does.
+
+The driver does the same through the kernel's /dev/qsee-app interface,
+found through the misc udev subtype. Each TA command is repeated with the
+HAL's "op" word until the TA reports it done; in between, the driver
+serves the TA's requests (wait for the interrupt, sleep, reset). The
+interrupt and reset lines are found by their DT line names, power is the
+"fingerprint-power" regulator-output, and the board (TA path, sensor type)
+comes from a table keyed by the DT compatible. Templates are stored by
+fprintd inside the FpPrint.
+
+Operations run in a worker thread; progress and finger status are posted
+back to the device's main context.
+
+Supported so far: Galaxy Z Flip3 (samsung,b2q, Goodix GW36T1).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01L5scTQJJDo2PTt6GBeDFah
+---
+ libfprint/drivers/samsung_securefp/securefp.c | 1279 +++++++++++++++++
+ libfprint/drivers/samsung_securefp/securefp.h |   49 +
+ libfprint/meson.build                         |    1 +
+ meson.build                                   |    1 +
+ 4 files changed, 1330 insertions(+)
+ create mode 100644 libfprint/drivers/samsung_securefp/securefp.c
+ create mode 100644 libfprint/drivers/samsung_securefp/securefp.h
+
+diff --git a/libfprint/drivers/samsung_securefp/securefp.c b/libfprint/drivers/samsung_securefp/securefp.c
+new file mode 100644
+index 0000000..408ac91
+--- /dev/null
++++ b/libfprint/drivers/samsung_securefp/securefp.c
+@@ -0,0 +1,1279 @@
++/*
++ * Samsung securefp: fingerprint sensors run by Samsung's TrustZone TA
++ *
++ * Copyright (C) 2026 Noa Himesaka <himesaka@noa.codes>
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
++ */
++
++/*
++ * On Samsung phones the sensor is wired to the secure world: the "securefp"
++ * trusted application owns the SPI bus, captures, extracts and matches, and
++ * hands back opaque encrypted templates. The normal world only loads the TA,
++ * powers the sensor, pulses its reset line and waits on its interrupt line
++ * whenever the TA asks for it. That is what Samsung's Android HAL
++ * (libbauthserver) does, and what this driver does through the kernel's
++ * /dev/qsee-app interface.
++ *
++ * Every TA call returns a status and a request word ("op") for the normal
++ * world: wait for the interrupt, sleep, reset the sensor and so on. The HAL
++ * serves the request and calls the same command again until the op says the
++ * command is done.
++ *
++ * Templates are stored by fprintd inside the FpPrint, as the HAL stores them
++ * in /data/vendor/biometrics.
++ *
++ * Board specifics (where the TA lives, the sensor type) come from a table
++ * keyed by the device tree compatible. Power is a regulator-output named
++ * "fingerprint-power", reset and interrupt are the GPIO lines named
++ * BTP_RST_N and BTP_INT_N.
++ */
++
++#define FP_COMPONENT "securefp"
++
++#include <errno.h>
++#include <fcntl.h>
++#include <linux/gpio.h>
++#include <poll.h>
++#include <string.h>
++#include <sys/ioctl.h>
++#include <unistd.h>
++
++#include "drivers_api.h"
++#include "securefp.h"
++
++/* include/uapi/linux/qcom_qsee_app.h */
++struct qsee_app_load
++{
++  char    path[128];
++  guint32 sbuf_size;
++  guint32 app_id;
++  guint32 flags;
++  guint32 reserved;
++};
++
++struct qsee_app_send
++{
++  guint64 req;
++  guint32 req_len;
++  guint32 rsp_len;
++  guint64 rsp;
++};
++
++#define QSEE_APP_IOC_LOAD _IOWR ('Q', 1, struct qsee_app_load)
++#define QSEE_APP_IOC_SEND _IOW ('Q', 2, struct qsee_app_send)
++
++#define SECUREFP_POWER_STATE "/sys/bus/platform/devices/fingerprint-power/state"
++#define SECUREFP_LINE_INT    "BTP_INT_N"
++#define SECUREFP_LINE_RST    "BTP_RST_N"
++
++/* The user string the TA binds templates to; the HAL uses the Android user */
++#define SECUREFP_USER        "User_0"
++
++/* Requests for the normal world, in the op word of a TA response */
++enum {
++  SECUREFP_REQ_NONE           = 0x00,
++  SECUREFP_REQ_REMOVE_FINGER  = 0x03,
++  SECUREFP_REQ_WAIT_INTERRUPT = 0x04,
++  SECUREFP_REQ_CPU_BOOST      = 0x05,
++  SECUREFP_REQ_CAPTURED       = 0x06,
++  SECUREFP_REQ_SLEEP          = 0x07,
++  SECUREFP_REQ_RESET          = 0x08,
++  SECUREFP_REQ_STOP           = 0x09,
++  SECUREFP_REQ_KEEP_OP        = 0x28,
++  SECUREFP_REQ_STOP2          = 0x3e,
++};
++
++/* TA statuses the HAL treats as "touch again" */
++#define SECUREFP_ST_BAD_QUALITY      0x27
++#define SECUREFP_ST_ENROLL_FAIL      0x29
++#define SECUREFP_ST_IDENTIFY_FAIL    0x20
++
++/* Enroll_Do reply: quality flags the TA sets (finger_image_quality_map) */
++#define SECUREFP_Q_PARTIAL           0x08000000
++#define SECUREFP_Q_DIRTY             0x00002000
++#define SECUREFP_Q_INSUFFICIENT      0x80000000
++
++#define SECUREFP_TMPL_MAX            0x96000
++#define SECUREFP_TOUCHES_MAX         40
++#define SECUREFP_ENROLL_STAGES       20  /* the TA adds 5% per good touch */
++
++typedef struct
++{
++  const gchar *compatible;
++  const gchar *id;           /* device id: where fprintd keeps the prints */
++  const gchar *ta_path;
++  guint32      type_arg;
++  guint32      type;
++} SecurefpBoard;
++
++static const SecurefpBoard securefp_boards[] = {
++  /* Galaxy Z Flip3: Goodix GW36T1 */
++  { "samsung,b2q", "samsung-b2q", SECUREFP_TA_PATH, SECUREFP_GW36T1_TYPE_ARG, SECUREFP_GW36T1_TYPE },
++};
++
++struct _FpiDeviceSamsungSecurefp
++{
++  FpDevice             parent;
++
++  const SecurefpBoard *board;
++  int                  qsee_fd;
++  int                  int_fd;
++  int                  rst_fd;
++  guint8              *req;
++  guint8              *rsp;
++  /* every stored print, from fprintd's duplicate check before an enroll */
++  GPtrArray           *known;
++};
++
++G_DEFINE_TYPE (FpiDeviceSamsungSecurefp, fpi_device_samsung_securefp, FP_TYPE_DEVICE)
++
++/* ---- hardware: power, reset, interrupt ---------------------------------- */
++
++static gboolean
++securefp_write_file (const gchar *path, const gchar *val, GError **error)
++{
++  int fd = open (path, O_WRONLY | O_CLOEXEC);
++  gboolean ok;
++
++  if (fd < 0)
++    {
++      g_set_error (error, G_IO_ERROR, g_io_error_from_errno (errno),
++                   "open %s: %s", path, g_strerror (errno));
++      return FALSE;
++    }
++  ok = write (fd, val, strlen (val)) == (ssize_t) strlen (val);
++  if (!ok)
++    g_set_error (error, G_IO_ERROR, g_io_error_from_errno (errno),
++                 "write %s: %s", path, g_strerror (errno));
++  close (fd);
++  return ok;
++}
++
++/* Find a GPIO line by its DT name across all chips */
++static gboolean
++securefp_find_line (const gchar *name, gchar **chip_path, guint32 *offset)
++{
++  g_autoptr(GDir) dir = g_dir_open ("/dev", 0, NULL);
++  const gchar *ent;
++
++  if (!dir)
++    return FALSE;
++
++  while ((ent = g_dir_read_name (dir)))
++    {
++      g_autofree gchar *path = NULL;
++      struct gpiochip_info info = { 0 };
++      int fd;
++
++      if (!g_str_has_prefix (ent, "gpiochip"))
++        continue;
++      path = g_build_filename ("/dev", ent, NULL);
++      fd = open (path, O_RDONLY | O_CLOEXEC);
++      if (fd < 0)
++        continue;
++      if (ioctl (fd, GPIO_GET_CHIPINFO_IOCTL, &info) == 0)
++        {
++          for (guint32 i = 0; i < info.lines; i++)
++            {
++              struct gpio_v2_line_info li = { .offset = i };
++
++              if (ioctl (fd, GPIO_V2_GET_LINEINFO_IOCTL, &li) == 0 &&
++                  g_strcmp0 (li.name, name) == 0)
++                {
++                  close (fd);
++                  *chip_path = g_steal_pointer (&path);
++                  *offset = i;
++                  return TRUE;
++                }
++            }
++        }
++      close (fd);
++    }
++  return FALSE;
++}
++
++static int
++securefp_request_line (const gchar *name, guint64 flags, gboolean value, GError **error)
++{
++  struct gpio_v2_line_request req = { 0 };
++  g_autofree gchar *chip = NULL;
++  guint32 offset;
++  int fd, ret;
++
++  if (!securefp_find_line (name, &chip, &offset))
++    {
++      g_set_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_NOT_SUPPORTED,
++                   "GPIO line %s not found", name);
++      return -1;
++    }
++
++  fd = open (chip, O_RDONLY | O_CLOEXEC);
++  if (fd < 0)
++    {
++      g_set_error (error, G_IO_ERROR, g_io_error_from_errno (errno),
++                   "open %s: %s", chip, g_strerror (errno));
++      return -1;
++    }
++
++  req.offsets[0] = offset;
++  req.num_lines = 1;
++  g_strlcpy (req.consumer, "libfprint-securefp", sizeof (req.consumer));
++  req.config.flags = flags;
++  if (flags & GPIO_V2_LINE_FLAG_OUTPUT)
++    {
++      req.config.num_attrs = 1;
++      req.config.attrs[0].mask = 1;
++      req.config.attrs[0].attr.id = GPIO_V2_LINE_ATTR_ID_OUTPUT_VALUES;
++      req.config.attrs[0].attr.values = value ? 1 : 0;
++    }
++
++  ret = ioctl (fd, GPIO_V2_GET_LINE_IOCTL, &req);
++  close (fd);
++  if (ret < 0)
++    {
++      g_set_error (error, G_IO_ERROR, g_io_error_from_errno (errno),
++                   "request %s (%s:%u): %s", name, chip, offset, g_strerror (errno));
++      return -1;
++    }
++  return req.fd;
++}
++
++static void
++securefp_set_rst (FpiDeviceSamsungSecurefp *self, gboolean high)
++{
++  struct gpio_v2_line_values v = { .bits = high ? 1 : 0, .mask = 1 };
++
++  if (ioctl (self->rst_fd, GPIO_V2_LINE_SET_VALUES_IOCTL, &v) < 0)
++    g_warning ("securefp: setting %s: %s", SECUREFP_LINE_RST, g_strerror (errno));
++}
++
++static gboolean
++securefp_get_int (FpiDeviceSamsungSecurefp *self)
++{
++  struct gpio_v2_line_values v = { .mask = 1 };
++
++  if (ioctl (self->int_fd, GPIO_V2_LINE_GET_VALUES_IOCTL, &v) < 0)
++    return FALSE;
++  return v.bits & 1;
++}
++
++/* What the HAL's reset ioctl does: hold reset low 3 ms, release, settle */
++static void
++securefp_reset (FpiDeviceSamsungSecurefp *self)
++{
++  securefp_set_rst (self, FALSE);
++  g_usleep (3000);
++  securefp_set_rst (self, TRUE);
++  g_usleep (60000);
++}
++
++static gboolean
++securefp_power (FpiDeviceSamsungSecurefp *self, gboolean on, GError **error)
++{
++  if (!on)
++    {
++      securefp_set_rst (self, FALSE);
++      return securefp_write_file (SECUREFP_POWER_STATE, "disabled", error);
++    }
++
++  securefp_set_rst (self, FALSE);
++  if (!securefp_write_file (SECUREFP_POWER_STATE, "enabled", error))
++    return FALSE;
++  g_usleep (5000);
++  securefp_reset (self);
++  return TRUE;
++}
++
++static void
++securefp_drain_int (FpiDeviceSamsungSecurefp *self)
++{
++  struct gpio_v2_line_event ev[16];
++
++  while (read (self->int_fd, ev, sizeof (ev)) > 0)
++    ;
++}
++
++typedef enum {
++  SECUREFP_WAIT_IRQ,
++  SECUREFP_WAIT_TIMEOUT,
++  SECUREFP_WAIT_CANCELLED,
++} SecurefpWait;
++
++/* Wait for a rising edge on the interrupt line. timeout_ms < 0 waits forever. */
++static SecurefpWait
++securefp_wait_int (FpiDeviceSamsungSecurefp *self, gint timeout_ms, GCancellable *cancellable)
++{
++  struct pollfd pfd[2] = {
++    { .fd = self->int_fd, .events = POLLIN },
++    { .fd = g_cancellable_get_fd (cancellable), .events = POLLIN },
++  };
++  gint64 deadline = timeout_ms < 0 ? -1 : g_get_monotonic_time () + (gint64) timeout_ms * 1000;
++  SecurefpWait res = SECUREFP_WAIT_TIMEOUT;
++
++  /* An edge from before the TA asked does not count */
++  securefp_drain_int (self);
++
++  while (TRUE)
++    {
++      gint left = -1;
++      int n;
++
++      if (g_cancellable_is_cancelled (cancellable))
++        {
++          res = SECUREFP_WAIT_CANCELLED;
++          break;
++        }
++      if (securefp_get_int (self))
++        {
++          res = SECUREFP_WAIT_IRQ;
++          break;
++        }
++      if (deadline >= 0)
++        {
++          gint64 now = g_get_monotonic_time ();
++          if (now >= deadline)
++            break;
++          left = (deadline - now + 999) / 1000;
++        }
++
++      n = poll (pfd, pfd[1].fd >= 0 ? 2 : 1, left);
++      if (n < 0 && errno != EINTR)
++        break;
++      if (n > 0 && (pfd[0].revents & POLLIN))
++        {
++          securefp_drain_int (self);
++          res = SECUREFP_WAIT_IRQ;
++          break;
++        }
++    }
++
++  g_cancellable_release_fd (cancellable);
++  return res;
++}
++
++/* ---- TA transport -------------------------------------------------------- */
++
++static guint32
++rd32 (const guint8 *b, gsize off)
++{
++  guint32 v;
++
++  memcpy (&v, b + off, sizeof (v));
++  return GUINT32_FROM_LE (v);
++}
++
++static void
++wr32 (guint8 *b, gsize off, guint32 v)
++{
++  v = GUINT32_TO_LE (v);
++  memcpy (b + off, &v, sizeof (v));
++}
++
++/* Build requests in self->req, read the reply from self->rsp */
++static guint8 *
++securefp_req (FpiDeviceSamsungSecurefp *self, guint32 opcode, gsize len)
++{
++  memset (self->req, 0, len);
++  wr32 (self->req, 0, opcode);
++  return self->req;
++}
++
++static gboolean
++securefp_send (FpiDeviceSamsungSecurefp *self, gsize req_len, gsize rsp_len, GError **error)
++{
++  struct qsee_app_send s = {
++    .req = (guintptr) self->req,
++    .req_len = req_len,
++    .rsp = (guintptr) self->rsp,
++    .rsp_len = rsp_len,
++  };
++
++  if (ioctl (self->qsee_fd, QSEE_APP_IOC_SEND, &s) < 0)
++    {
++      g_set_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO,
++                   "TA command %#x: %s", rd32 (self->req, 0), g_strerror (errno));
++      return FALSE;
++    }
++  return TRUE;
++}
++
++/* One reply: the op word, the status and the "info" word (a timeout in ms) */
++typedef struct
++{
++  guint32 op;
++  guint32 status;
++  guint32 info;
++} SecurefpReply;
++
++typedef enum {
++  SECUREFP_STEP_AGAIN,
++  SECUREFP_STEP_DONE,
++  SECUREFP_STEP_STATUS,     /* the TA returned a non-zero status */
++  SECUREFP_STEP_NO_FINGER,  /* a finger wait timed out */
++  SECUREFP_STEP_CANCELLED,
++  SECUREFP_STEP_ERROR,
++} SecurefpStep;
++
++typedef gboolean (*SecurefpCmd) (FpiDeviceSamsungSecurefp *self, guint32 op, gpointer data,
++                                 SecurefpReply *r, GError **error);
++
++typedef struct
++{
++  FpiDeviceSamsungSecurefp *self;
++  GMainContext      *ctx;
++  GCancellable      *cancellable;
++  FpiDeviceAction    action;
++  FpPrint           *enroll_print;   /* enroll: the template print */
++  GPtrArray         *gallery;        /* identify */
++  FpPrint           *match;          /* identify: result */
++  GBytes            *gallery_blob;
++  GError            *retry;          /* identify: retry instead of a decision */
++  guint32            idx;
++  gint               stages;
++  gboolean           finger_needed;
++} SecurefpOp;
++
++static void securefp_report_finger (SecurefpOp *op, FpFingerStatusFlags status);
++
++/* check_opcode() of the HAL, for what a type 6 sensor asks for */
++static SecurefpStep
++securefp_serve (SecurefpOp *op, const SecurefpReply *r)
++{
++  FpiDeviceSamsungSecurefp *self = op->self;
++  gint timeout = (gint32) r->info;
++
++  switch (r->op)
++    {
++    case SECUREFP_REQ_WAIT_INTERRUPT:
++    case SECUREFP_REQ_REMOVE_FINGER:
++      {
++        SecurefpWait w;
++
++        securefp_report_finger (op, r->op == SECUREFP_REQ_WAIT_INTERRUPT ?
++                                FP_FINGER_STATUS_NEEDED : FP_FINGER_STATUS_PRESENT);
++        w = securefp_wait_int (self, timeout, op->cancellable);
++        if (w == SECUREFP_WAIT_CANCELLED)
++          return SECUREFP_STEP_CANCELLED;
++        if (w == SECUREFP_WAIT_IRQ && r->op == SECUREFP_REQ_WAIT_INTERRUPT)
++          securefp_report_finger (op, FP_FINGER_STATUS_PRESENT);
++        if (w == SECUREFP_WAIT_TIMEOUT && r->op == SECUREFP_REQ_WAIT_INTERRUPT && timeout != 0)
++          return SECUREFP_STEP_NO_FINGER;
++        return SECUREFP_STEP_AGAIN;
++      }
++
++    case SECUREFP_REQ_SLEEP:
++      g_usleep ((r->info ? r->info : 100) * 1000);
++      return SECUREFP_STEP_AGAIN;
++
++    case SECUREFP_REQ_RESET:
++      securefp_reset (self);
++      return SECUREFP_STEP_AGAIN;
++
++    case SECUREFP_REQ_CPU_BOOST:
++    case SECUREFP_REQ_CAPTURED:
++    case 0x29: case 0x2a:       /* DeviceReady(1/0): nothing to do here */
++    case 0x3b: case 0x3c:       /* logged by the HAL */
++    case 0x3f:                  /* progress notification */
++      return SECUREFP_STEP_AGAIN;
++
++    case SECUREFP_REQ_NONE:
++    case SECUREFP_REQ_STOP:
++    case SECUREFP_REQ_STOP2:
++      return SECUREFP_STEP_DONE;
++
++    default:
++      fp_dbg ("unhandled TA request %#x", r->op);
++      return SECUREFP_STEP_ERROR;
++    }
++}
++
++/* Call a TA command until it is done, serving its requests in between */
++static SecurefpStep
++securefp_run (SecurefpOp *op, const gchar *name, SecurefpCmd cmd, gpointer data,
++              SecurefpReply *r, GError **error)
++{
++  guint32 opw = 1;
++
++  for (guint i = 0; i < 1000; i++)
++    {
++      SecurefpStep step;
++
++      if (!cmd (op->self, opw, data, r, error))
++        return SECUREFP_STEP_ERROR;
++      fp_dbg ("%s(op %#x) -> op %#x status %#x info %#x", name, opw, r->op, r->status, r->info);
++      if (r->status != 0)
++        return SECUREFP_STEP_STATUS;
++
++      step = securefp_serve (op, r);
++      if (step != SECUREFP_STEP_AGAIN)
++        {
++          if (step == SECUREFP_STEP_ERROR)
++            g_set_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO,
++                         "%s: unexpected request %#x from the TA", name, r->op);
++          return step;
++        }
++      opw = (r->op == SECUREFP_REQ_WAIT_INTERRUPT || r->op == SECUREFP_REQ_KEEP_OP) ? r->op : 1;
++    }
++
++  g_set_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO, "%s never finished", name);
++  return SECUREFP_STEP_ERROR;
++}
++
++static gboolean
++securefp_reply (FpiDeviceSamsungSecurefp *self, gsize req_len, gsize rsp_len, guint32 info_off,
++                SecurefpReply *r, GError **error)
++{
++  if (!securefp_send (self, req_len, rsp_len, error))
++    return FALSE;
++  r->op = rd32 (self->rsp, 0);
++  r->status = rd32 (self->rsp, 4);
++  r->info = rd32 (self->rsp, info_off);
++  return TRUE;
++}
++
++static gboolean
++cmd_type_check (FpiDeviceSamsungSecurefp *self, guint32 *type, GError **error)
++{
++  guint8 *q = securefp_req (self, SECUREFP_OP_TYPE_CHECK, 0x40);
++
++  wr32 (q, 4, self->board->type_arg);
++  if (!securefp_send (self, 0x40, 0x40, error))
++    return FALSE;
++  *type = rd32 (self->rsp, 4);
++  return TRUE;
++}
++
++static gboolean
++cmd_prepare (FpiDeviceSamsungSecurefp *self, guint32 op, gpointer data, SecurefpReply *r, GError **error)
++{
++  guint8 *q = securefp_req (self, SECUREFP_OP_PREPARE, 0xa040);
++
++  wr32 (q, 8, op);
++  return securefp_reply (self, 0xa040, 0xa040, 8, r, error);
++}
++
++static gboolean
++cmd_enroll_init (FpiDeviceSamsungSecurefp *self, guint32 op, gpointer data, SecurefpReply *r, GError **error)
++{
++  guint8 *q = securefp_req (self, SECUREFP_OP_ENROLL_INIT, 0x180);
++
++  wr32 (q, 8, op);
++  memcpy (q + 0x0c, SECUREFP_USER, strlen (SECUREFP_USER));
++  wr32 (q, 0x10c, GPOINTER_TO_UINT (data));    /* bio index, 1..4 */
++  wr32 (q, 0x110, 7);                           /* what the HAL passes */
++  return securefp_reply (self, 0x180, 0x40, 8, r, error);
++}
++
++static gboolean
++cmd_enroll_do (FpiDeviceSamsungSecurefp *self, guint32 op, gpointer data, SecurefpReply *r, GError **error)
++{
++  guint8 *q = securefp_req (self, SECUREFP_OP_ENROLL_DO, 0x40);
++
++  wr32 (q, 8, op);
++  return securefp_reply (self, 0x40, 0xa0040, 8, r, error);
++}
++
++static gboolean
++cmd_final (FpiDeviceSamsungSecurefp *self, guint32 op, gpointer data, SecurefpReply *r, GError **error)
++{
++  guint8 *q = securefp_req (self, GPOINTER_TO_UINT (data), 0x40);
++
++  wr32 (q, 8, op);
++  return securefp_reply (self, 0x40, 0xa040, 0x10, r, error);
++}
++
++static gboolean
++cmd_identify_init (FpiDeviceSamsungSecurefp *self, guint32 op, gpointer data, SecurefpReply *r, GError **error)
++{
++  GBytes *blob = data;
++  gsize len;
++  const guint8 *tmpl = g_bytes_get_data (blob, &len);
++  guint8 *q = securefp_req (self, SECUREFP_OP_IDENTIFY_INIT, 0x965c0);
++
++  wr32 (q, 4, 0);                               /* chunk index */
++  wr32 (q, 8, op);
++  memcpy (q + 0x0c, SECUREFP_USER, strlen (SECUREFP_USER));
++  memcpy (q + 0x10c, tmpl, len);
++  wr32 (q, 0x9610c, len);
++  wr32 (q, 0x96510, 0);                         /* no sec_auth_id */
++  return securefp_reply (self, 0x965c0, 0x1c0, 8, r, error);
++}
++
++static gboolean
++cmd_identify_do (FpiDeviceSamsungSecurefp *self, guint32 op, gpointer data, SecurefpReply *r, GError **error)
++{
++  guint8 *q = securefp_req (self, SECUREFP_OP_IDENTIFY_DO, 0x40);
++
++  wr32 (q, 8, op);
++  return securefp_reply (self, 0x40, 0xa00c0, 8, r, error);
++}
++
++static gboolean
++cmd_cancel (FpiDeviceSamsungSecurefp *self, GError **error)
++{
++  guint8 *q = securefp_req (self, SECUREFP_OP_CANCEL, 0x40);
++
++  wr32 (q, 4, 0x19);
++  return securefp_send (self, 0x40, 0x40, error);
++}
++
++/* ---- reporting to the main context -------------------------------------- */
++
++typedef struct
++{
++  FpDevice           *dev;
++  FpiDeviceAction     action;
++  gint                stages;
++  FpFingerStatusFlags finger;
++  GError             *retry;
++  gboolean            is_finger;
++} SecurefpReport;
++
++static void
++report_free (gpointer p)
++{
++  SecurefpReport *rep = p;
++
++  g_clear_error (&rep->retry);
++  g_object_unref (rep->dev);
++  g_free (rep);
++}
++
++static gboolean
++report_cb (gpointer p)
++{
++  SecurefpReport *rep = p;
++
++  if (rep->is_finger)
++    {
++      fpi_device_report_finger_status (rep->dev, rep->finger);
++      return G_SOURCE_REMOVE;
++    }
++  fpi_device_enroll_progress (rep->dev, rep->stages, NULL, g_steal_pointer (&rep->retry));
++  return G_SOURCE_REMOVE;
++}
++
++static void
++securefp_post (SecurefpOp *op, SecurefpReport *rep)
++{
++  rep->dev = g_object_ref (FP_DEVICE (op->self));
++  rep->action = op->action;
++  g_main_context_invoke_full (op->ctx, G_PRIORITY_DEFAULT, report_cb, rep, report_free);
++}
++
++static void
++securefp_report_finger (SecurefpOp *op, FpFingerStatusFlags status)
++{
++  SecurefpReport *rep = g_new0 (SecurefpReport, 1);
++
++  rep->is_finger = TRUE;
++  rep->finger = status;
++  securefp_post (op, rep);
++}
++
++static void
++securefp_report_progress (SecurefpOp *op, gint stages, GError *retry)
++{
++  SecurefpReport *rep = g_new0 (SecurefpReport, 1);
++
++  rep->stages = stages;
++  rep->retry = retry;
++  securefp_post (op, rep);
++}
++
++static GError *
++securefp_quality_retry (guint32 flags)
++{
++  if (flags & SECUREFP_Q_PARTIAL)
++    return fpi_device_retry_new (FP_DEVICE_RETRY_CENTER_FINGER);
++  if (flags & SECUREFP_Q_DIRTY)
++    return fpi_device_retry_new_msg (FP_DEVICE_RETRY_REMOVE_FINGER, "Clean the sensor");
++  return fpi_device_retry_new (FP_DEVICE_RETRY_GENERAL);
++}
++
++/* ---- operations (worker thread) ----------------------------------------- */
++
++static void
++securefp_op_free (gpointer p)
++{
++  SecurefpOp *op = p;
++
++  g_clear_object (&op->cancellable);
++  g_clear_pointer (&op->ctx, g_main_context_unref);
++  g_clear_object (&op->enroll_print);
++  g_clear_pointer (&op->gallery, g_ptr_array_unref);
++  g_clear_pointer (&op->gallery_blob, g_bytes_unref);
++  g_clear_error (&op->retry);
++  g_free (op);
++}
++
++static gboolean
++securefp_step_error (SecurefpStep step, const gchar *what, const SecurefpReply *r, GError **error)
++{
++  if (*error)
++    return FALSE;
++  switch (step)
++    {
++    case SECUREFP_STEP_CANCELLED:
++      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_CANCELLED, "Cancelled");
++      break;
++    case SECUREFP_STEP_NO_FINGER:
++      g_set_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_GENERAL, "%s: no finger", what);
++      break;
++    case SECUREFP_STEP_STATUS:
++      g_set_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_GENERAL,
++                   "%s failed with TA status %#x", what, r->status);
++      break;
++    case SECUREFP_STEP_AGAIN:
++    case SECUREFP_STEP_DONE:
++    case SECUREFP_STEP_ERROR:
++    default:
++      g_set_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO, "%s failed", what);
++    }
++  return FALSE;
++}
++
++static void
++securefp_abort (SecurefpOp *op)
++{
++  g_autoptr(GError) err = NULL;
++
++  /* The HAL's cancel path ends in BAuth_Cancel(0x19) */
++  if (!cmd_cancel (op->self, &err))
++    fp_dbg ("cancel: %s", err->message);
++}
++
++static gboolean
++securefp_prepare (SecurefpOp *op, GError **error)
++{
++  SecurefpReply r;
++  SecurefpStep step = securefp_run (op, "prepare", cmd_prepare, NULL, &r, error);
++
++  if (step != SECUREFP_STEP_DONE)
++    return securefp_step_error (step, "prepare", &r, error);
++  return TRUE;
++}
++
++static gboolean
++securefp_do_enroll (SecurefpOp *op, GError **error)
++{
++  FpiDeviceSamsungSecurefp *self = op->self;
++  g_autoptr(GBytes) tmpl = NULL;
++  guint32 progress = 0, last = 0;
++  SecurefpReply r;
++  SecurefpStep step;
++  gint stages = 0;
++
++  if (!securefp_prepare (op, error))
++    return FALSE;
++
++  for (guint touch = 0; touch < SECUREFP_TOUCHES_MAX && progress < 100; touch++)
++    {
++      guint32 flags, len;
++
++      step = securefp_run (op, "enroll_init", cmd_enroll_init, GUINT_TO_POINTER (op->idx), &r, error);
++      if (step != SECUREFP_STEP_DONE)
++        return securefp_step_error (step, "enroll_init", &r, error);
++
++      step = securefp_run (op, "enroll_do", cmd_enroll_do, NULL, &r, error);
++      if (step == SECUREFP_STEP_CANCELLED)
++        {
++          securefp_abort (op);
++          return securefp_step_error (step, "enroll", &r, error);
++        }
++      if (step == SECUREFP_STEP_ERROR || step == SECUREFP_STEP_NO_FINGER)
++        return securefp_step_error (step, "enroll_do", &r, error);
++
++      flags = rd32 (self->rsp, 0x0c);
++      progress = rd32 (self->rsp, 0x10);
++      len = rd32 (self->rsp, 0x9601c);
++      fp_dbg ("touch %u: status %#x flags %#x progress %u template %u bytes",
++              touch + 1, r.status, flags, progress, len);
++      if (r.status == 0 && len > 0 && len <= SECUREFP_TMPL_MAX)
++        {
++          g_clear_pointer (&tmpl, g_bytes_unref);
++          tmpl = g_bytes_new (self->rsp + 0x1c, len);
++        }
++
++      if (step == SECUREFP_STEP_STATUS &&
++          r.status != SECUREFP_ST_BAD_QUALITY && r.status != SECUREFP_ST_ENROLL_FAIL)
++        return securefp_step_error (step, "enroll_do", &r, error);
++
++      step = securefp_run (op, "enroll_final", cmd_final, GUINT_TO_POINTER (SECUREFP_OP_ENROLL_FINAL), &r, error);
++      if (step == SECUREFP_STEP_ERROR || step == SECUREFP_STEP_CANCELLED)
++        return securefp_step_error (step, "enroll_final", &r, error);
++
++      if (progress > 100)
++        progress = 100;
++      if (progress > last)
++        {
++          gint s = MAX (stages + 1, (gint) (progress * SECUREFP_ENROLL_STAGES / 100));
++
++          if (progress < 100)
++            s = MIN (s, SECUREFP_ENROLL_STAGES - 1);
++          stages = s;
++          last = progress;
++          if (progress < 100)
++            securefp_report_progress (op, stages, NULL);
++        }
++      else
++        {
++          securefp_report_progress (op, stages, securefp_quality_retry (flags));
++        }
++    }
++
++  if (progress < 100 || !tmpl)
++    {
++      g_set_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_GENERAL,
++                   "Enrollment did not complete (progress %u)", progress);
++      return FALSE;
++    }
++
++  op->stages = SECUREFP_ENROLL_STAGES;
++  fpi_print_set_type (op->enroll_print, FPI_PRINT_RAW);
++  g_object_set (op->enroll_print, "fpi-data",
++                g_variant_new ("(u@ay)", op->idx,
++                               g_variant_new_from_bytes (G_VARIANT_TYPE_BYTESTRING, tmpl, TRUE)),
++                NULL);
++  return TRUE;
++}
++
++static GBytes *
++securefp_print_template (FpPrint *print, guint32 *idx)
++{
++  g_autoptr(GVariant) data = NULL;
++  g_autoptr(GVariant) blob = NULL;
++
++  g_object_get (print, "fpi-data", &data, NULL);
++  if (!data || !g_variant_check_format_string (data, "(u@ay)", FALSE))
++    return NULL;
++  g_variant_get (data, "(u@ay)", idx, &blob);
++  return g_variant_get_data_as_bytes (blob);
++}
++
++static gboolean
++securefp_do_identify (SecurefpOp *op, GError **error)
++{
++  FpiDeviceSamsungSecurefp *self = op->self;
++  SecurefpReply r;
++  SecurefpStep step;
++
++  if (!securefp_prepare (op, error))
++    return FALSE;
++
++  step = securefp_run (op, "identify_init", cmd_identify_init, op->gallery_blob, &r, error);
++  if (step != SECUREFP_STEP_DONE)
++    return securefp_step_error (step, "identify_init", &r, error);
++
++  do
++    {
++      guint32 o1_0, o1_1, v2;
++
++      step = securefp_run (op, "identify_do", cmd_identify_do, NULL, &r, error);
++      if (step == SECUREFP_STEP_CANCELLED)
++        {
++          securefp_abort (op);
++          return securefp_step_error (step, "identify", &r, error);
++        }
++      if (step == SECUREFP_STEP_ERROR || step == SECUREFP_STEP_NO_FINGER)
++        return securefp_step_error (step, "identify_do", &r, error);
++
++      v2 = rd32 (self->rsp, 0x0c);
++      o1_0 = rd32 (self->rsp, 0x10);
++      o1_1 = rd32 (self->rsp, 0x14);
++      fp_dbg ("identify_do: status %#x op %#x v2 %#x o1 %#x %#x hat %u",
++              r.status, r.op, v2, o1_0, o1_1, rd32 (self->rsp, 0xa0085));
++
++      if (step == SECUREFP_STEP_STATUS && r.status == SECUREFP_ST_BAD_QUALITY)
++        {
++          /* The image was not usable. libfprint wants one report per identify: hand the retry back */
++          op->retry = fpi_device_retry_new (FP_DEVICE_RETRY_GENERAL);
++        }
++      else if (step == SECUREFP_STEP_STATUS)
++        {
++          /*
++           * 0x20 is the TA's "Identify Fail": the finger was read and matches
++           * none of the templates (stock logs it apart from BAD_QUALITY 0x27).
++           * It is a no-match, not a retry: fprintd's duplicate check before
++           * enrolling another finger restarts on every retry, so a new finger
++           * would never get past it. Any other decision ends the same way.
++           */
++          fp_dbg ("no match (status %#x)", r.status);
++        }
++      else
++        {
++          /* o1[1] is the matched bio index (the HAL's match_state+4) */
++          for (guint i = 0; i < op->gallery->len; i++)
++            {
++              FpPrint *p = g_ptr_array_index (op->gallery, i);
++              g_autoptr(GBytes) t = NULL;
++              guint32 idx = 0;
++
++              t = securefp_print_template (p, &idx);
++              if (t && idx == o1_1)
++                {
++                  op->match = p;
++                  break;
++                }
++            }
++        }
++    }
++  while (FALSE);
++
++  step = securefp_run (op, "identify_final", cmd_final, GUINT_TO_POINTER (SECUREFP_OP_IDENTIFY_FINAL), &r, error);
++  if (step == SECUREFP_STEP_ERROR)
++    return securefp_step_error (step, "identify_final", &r, error);
++  g_clear_error (error);
++  return TRUE;
++}
++
++static void
++securefp_op_thread (GTask *task, gpointer source, gpointer task_data, GCancellable *c)
++{
++  SecurefpOp *op = task_data;
++  GError *error = NULL;
++  gboolean ok;
++
++  if (op->action == FPI_DEVICE_ACTION_ENROLL)
++    ok = securefp_do_enroll (op, &error);
++  else
++    ok = securefp_do_identify (op, &error);
++
++  if (ok)
++    g_task_return_boolean (task, TRUE);
++  else
++    g_task_return_error (task, error);
++}
++
++static void
++securefp_op_done (GObject *source, GAsyncResult *res, gpointer user_data)
++{
++  FpDevice *dev = FP_DEVICE (source);
++  SecurefpOp *op = g_task_get_task_data (G_TASK (res));
++  GError *error = NULL;
++
++  fpi_device_report_finger_status (dev, FP_FINGER_STATUS_NONE);
++
++  if (!g_task_propagate_boolean (G_TASK (res), &error))
++    {
++      if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
++        {
++          g_clear_error (&error);
++          error = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_CANCELLED, "Operation was cancelled");
++        }
++      if (op->action == FPI_DEVICE_ACTION_ENROLL)
++        fpi_device_enroll_complete (dev, NULL, error);
++      else
++        fpi_device_identify_complete (dev, error);
++      return;
++    }
++
++  if (op->action == FPI_DEVICE_ACTION_ENROLL)
++    {
++      fpi_device_enroll_progress (dev, op->stages, NULL, NULL);
++      fpi_device_enroll_complete (dev, g_object_ref (op->enroll_print), NULL);
++    }
++  else
++    {
++      if (op->retry)
++        fpi_device_identify_report (dev, NULL, NULL, g_steal_pointer (&op->retry));
++      else
++        fpi_device_identify_report (dev, op->match, NULL, NULL);
++      fpi_device_identify_complete (dev, NULL);
++    }
++}
++
++static void
++securefp_start (FpDevice *dev, SecurefpOp *op)
++{
++  g_autoptr(GTask) task = NULL;
++
++  op->self = FPI_DEVICE_SAMSUNG_SECUREFP (dev);
++  op->ctx = g_main_context_ref_thread_default ();
++  op->cancellable = g_object_ref (fpi_device_get_cancellable (dev));
++  task = g_task_new (dev, NULL, securefp_op_done, NULL);
++  g_task_set_task_data (task, op, securefp_op_free);
++  g_task_run_in_thread (task, securefp_op_thread);
++}
++
++/* ---- FpDevice ------------------------------------------------------------ */
++
++/*
++ * The TA keys each template by a bio index 1..4 per user; identify reports
++ * the index that matched. Stock's HAL (get_req_bioindex) gives a new finger
++ * a free index from its user table. Here the stored prints are the table:
++ * fprintd hands all of them to identify for its duplicate check right
++ * before every enroll. An index is taken when another finger of the same
++ * user holds it; re-enrolling a finger may reuse its own. Returns 0 when
++ * all four are taken.
++ */
++static guint32
++securefp_free_index (FpiDeviceSamsungSecurefp *self, FpPrint *print)
++{
++  const gchar *user = fp_print_get_username (print);
++  FpFinger finger = fp_print_get_finger (print);
++  gboolean used[5] = { FALSE };
++
++  for (guint i = 0; self->known && i < self->known->len; i++)
++    {
++      FpPrint *p = g_ptr_array_index (self->known, i);
++      g_autoptr(GBytes) t = NULL;
++      guint32 idx = 0;
++
++      if (g_strcmp0 (fp_print_get_username (p), user) != 0 || fp_print_get_finger (p) == finger)
++        continue;
++      t = securefp_print_template (p, &idx);
++      if (t && idx >= 1 && idx <= 4)
++        used[idx] = TRUE;
++    }
++  for (guint32 idx = 1; idx <= 4; idx++)
++    if (!used[idx])
++      return idx;
++  return 0;
++}
++
++static void
++securefp_enroll (FpDevice *dev)
++{
++  FpiDeviceSamsungSecurefp *self = FPI_DEVICE_SAMSUNG_SECUREFP (dev);
++  SecurefpOp *op;
++  FpPrint *print = NULL;
++  guint32 idx;
++
++  fpi_device_get_enroll_data (dev, &print);
++  if (!self->known)
++    fp_warn ("enroll without a duplicate check first: the stored prints are unknown, using index 1..4 as free");
++  idx = securefp_free_index (self, print);
++  g_clear_pointer (&self->known, g_ptr_array_unref);
++  if (idx == 0)
++    {
++      fpi_device_enroll_complete (dev, NULL,
++                                  fpi_device_error_new_msg (FP_DEVICE_ERROR_DATA_FULL,
++                                                            "All four fingerprint slots of this user are in use"));
++      return;
++    }
++  fp_dbg ("enrolling with bio index %u", idx);
++
++  op = g_new0 (SecurefpOp, 1);
++  op->action = FPI_DEVICE_ACTION_ENROLL;
++  op->enroll_print = g_object_ref (print);
++  op->idx = idx;
++  securefp_start (dev, op);
++}
++
++static void
++securefp_identify (FpDevice *dev)
++{
++  FpiDeviceSamsungSecurefp *self = FPI_DEVICE_SAMSUNG_SECUREFP (dev);
++  SecurefpOp *op = g_new0 (SecurefpOp, 1);
++  g_autoptr(GByteArray) blob = g_byte_array_new ();
++  GPtrArray *prints = NULL;
++
++  fpi_device_get_identify_data (dev, &prints);
++
++  /* the gallery of a duplicate check is every stored print: the next enroll picks its index from it */
++  g_clear_pointer (&self->known, g_ptr_array_unref);
++  self->known = g_ptr_array_ref (prints);
++
++  /* fprintd checks for duplicates before every enroll, also with nothing enrolled */
++  if (prints->len == 0)
++    {
++      securefp_op_free (op);
++      fpi_device_identify_report (dev, NULL, NULL, NULL);
++      fpi_device_identify_complete (dev, NULL);
++      return;
++    }
++
++  op->action = FPI_DEVICE_ACTION_IDENTIFY;
++  op->gallery = g_ptr_array_ref (prints);
++
++  /* The HAL hands the TA all templates back to back (retrieveAllTemplates) */
++  for (guint i = 0; i < prints->len; i++)
++    {
++      guint32 idx;
++      g_autoptr(GBytes) t = securefp_print_template (g_ptr_array_index (prints, i), &idx);
++      gsize len;
++      const guint8 *d;
++
++      if (!t)
++        continue;
++      d = g_bytes_get_data (t, &len);
++      if (blob->len + len > SECUREFP_TMPL_MAX)
++        break;
++      g_byte_array_append (blob, d, len);
++    }
++  if (blob->len == 0)
++    {
++      securefp_op_free (op);
++      fpi_device_identify_complete (dev, fpi_device_error_new_msg (FP_DEVICE_ERROR_DATA_INVALID,
++                                                                   "No usable templates"));
++      return;
++    }
++  op->gallery_blob = g_byte_array_free_to_bytes (g_steal_pointer (&blob));
++  securefp_start (dev, op);
++}
++
++static const SecurefpBoard *
++securefp_find_board (void)
++{
++  g_autofree gchar *compat = NULL;
++  gsize len = 0;
++
++  if (!g_file_get_contents ("/proc/device-tree/compatible", &compat, &len, NULL))
++    return NULL;
++  for (const gchar *s = compat; s < compat + len; s += strlen (s) + 1)
++    for (guint i = 0; i < G_N_ELEMENTS (securefp_boards); i++)
++      if (g_strcmp0 (s, securefp_boards[i].compatible) == 0)
++        return &securefp_boards[i];
++  return NULL;
++}
++
++static void
++securefp_probe (FpDevice *dev)
++{
++  FpiDeviceSamsungSecurefp *self = FPI_DEVICE_SAMSUNG_SECUREFP (dev);
++
++  self->board = securefp_find_board ();
++  if (!self->board)
++    {
++      fpi_device_probe_complete (dev, NULL, NULL,
++                                 fpi_device_error_new_msg (FP_DEVICE_ERROR_NOT_SUPPORTED,
++                                                           "No securefp sensor on this board"));
++      return;
++    }
++  fpi_device_probe_complete (dev, self->board->id, NULL, NULL);
++}
++
++static void
++securefp_close_hw (FpiDeviceSamsungSecurefp *self)
++{
++  if (self->rst_fd >= 0)
++    {
++      g_autoptr(GError) err = NULL;
++      if (!securefp_power (self, FALSE, &err))
++        g_warning ("securefp: power off: %s", err->message);
++    }
++  if (self->qsee_fd >= 0)
++    close (self->qsee_fd);     /* unloads the TA */
++  if (self->int_fd >= 0)
++    close (self->int_fd);
++  if (self->rst_fd >= 0)
++    close (self->rst_fd);
++  self->qsee_fd = self->int_fd = self->rst_fd = -1;
++  g_clear_pointer (&self->req, g_free);
++  g_clear_pointer (&self->rsp, g_free);
++  g_clear_pointer (&self->known, g_ptr_array_unref);
++}
++
++static void
++securefp_open (FpDevice *dev)
++{
++  FpiDeviceSamsungSecurefp *self = FPI_DEVICE_SAMSUNG_SECUREFP (dev);
++  const gchar *path = fpi_device_get_udev_data (dev, FPI_DEVICE_UDEV_SUBTYPE_MISC);
++  struct qsee_app_load load = { .sbuf_size = SECUREFP_SBUF_ALLOC };
++  GError *error = NULL;
++  guint32 type = 0;
++
++  self->rst_fd = securefp_request_line (SECUREFP_LINE_RST, GPIO_V2_LINE_FLAG_OUTPUT, FALSE, &error);
++  if (self->rst_fd < 0)
++    goto err;
++  self->int_fd = securefp_request_line (SECUREFP_LINE_INT,
++                                        GPIO_V2_LINE_FLAG_INPUT | GPIO_V2_LINE_FLAG_EDGE_RISING,
++                                        FALSE, &error);
++  if (self->int_fd < 0)
++    goto err;
++  fcntl (self->int_fd, F_SETFL, fcntl (self->int_fd, F_GETFL) | O_NONBLOCK);
++
++  self->qsee_fd = open (path, O_RDWR | O_CLOEXEC);
++  if (self->qsee_fd < 0)
++    {
++      error = g_error_new (G_IO_ERROR, g_io_error_from_errno (errno),
++                           "open %s: %s", path, g_strerror (errno));
++      goto err;
++    }
++
++  if (!securefp_power (self, TRUE, &error))
++    goto err;
++
++  g_strlcpy (load.path, self->board->ta_path, sizeof (load.path));
++  if (ioctl (self->qsee_fd, QSEE_APP_IOC_LOAD, &load) < 0)
++    {
++      error = fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL, "loading TA %s: %s",
++                                        self->board->ta_path, g_strerror (errno));
++      goto err;
++    }
++  fp_dbg ("TA %s: app id %u%s", self->board->ta_path, load.app_id,
++          load.flags & 1 ? ", loaded" : ", already resident");
++
++  self->req = g_malloc0 (SECUREFP_REQ_MAX);
++  self->rsp = g_malloc0 (SECUREFP_RSP_MAX);
++
++  if (!cmd_type_check (self, &type, &error))
++    goto err;
++  if (type != self->board->type)
++    {
++      error = fpi_device_error_new_msg (FP_DEVICE_ERROR_NOT_SUPPORTED,
++                                        "Sensor type %u, expected %u", type, self->board->type);
++      goto err;
++    }
++
++  fpi_device_open_complete (dev, NULL);
++  return;
++
++err:
++  securefp_close_hw (self);
++  fpi_device_open_complete (dev, error);
++}
++
++static void
++securefp_close (FpDevice *dev)
++{
++  securefp_close_hw (FPI_DEVICE_SAMSUNG_SECUREFP (dev));
++  fpi_device_close_complete (dev, NULL);
++}
++
++static void
++fpi_device_samsung_securefp_init (FpiDeviceSamsungSecurefp *self)
++{
++  self->qsee_fd = self->int_fd = self->rst_fd = -1;
++}
++
++static const FpIdEntry id_table[] = {
++  { .udev_types = FPI_DEVICE_UDEV_SUBTYPE_MISC, .misc_name = "qsee-app" },
++  { .udev_types = 0 }
++};
++
++static void
++fpi_device_samsung_securefp_class_init (FpiDeviceSamsungSecurefpClass *klass)
++{
++  FpDeviceClass *dev_class = FP_DEVICE_CLASS (klass);
++
++  dev_class->id = FP_COMPONENT;
++  dev_class->full_name = "Samsung securefp (TrustZone) fingerprint sensor";
++  dev_class->type = FP_DEVICE_TYPE_UDEV;
++  dev_class->id_table = id_table;
++  dev_class->scan_type = FP_SCAN_TYPE_PRESS;
++  dev_class->nr_enroll_stages = SECUREFP_ENROLL_STAGES;
++  dev_class->temp_hot_seconds = -1;
++
++  dev_class->probe = securefp_probe;
++  dev_class->open = securefp_open;
++  dev_class->close = securefp_close;
++  dev_class->enroll = securefp_enroll;
++  dev_class->identify = securefp_identify;
++
++  fpi_device_class_auto_initialize_features (dev_class);
++}
+diff --git a/libfprint/drivers/samsung_securefp/securefp.h b/libfprint/drivers/samsung_securefp/securefp.h
+new file mode 100644
+index 0000000..a3a5bab
+--- /dev/null
++++ b/libfprint/drivers/samsung_securefp/securefp.h
+@@ -0,0 +1,49 @@
++/*
++ * Samsung securefp: fingerprint sensors run by Samsung's TrustZone TA
++ *
++ * Copyright (C) 2026 Noa Himesaka <himesaka@noa.codes>
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
++ */
++
++#pragma once
++
++#include "fpi-device.h"
++
++G_DECLARE_FINAL_TYPE (FpiDeviceSamsungSecurefp, fpi_device_samsung_securefp, FPI, DEVICE_SAMSUNG_SECUREFP, FpDevice)
++
++/* Shared buffer the Android client library (libbauthtzcommon) gives the TA */
++#define SECUREFP_SBUF_SIZE        0x1f4140
++/* libQSEEComAPI rounds it up to a page; Control_OP needs 0x1f4180 */
++#define SECUREFP_SBUF_ALLOC       0x1f5000
++/* Largest request (Identify_Init) and reply (Identify_Do) we send */
++#define SECUREFP_REQ_MAX          0x965c0
++#define SECUREFP_RSP_MAX          0xa00c0
++#define SECUREFP_TA_PATH          "qcom/sm8350/Samsung/b2q/securefp"
++
++/* TA opcodes (first word of every request), from libbauthtzcommon.so */
++#define SECUREFP_OP_PREPARE         0x01
++#define SECUREFP_OP_ENROLL_INIT     0x02
++#define SECUREFP_OP_ENROLL_DO       0x03
++#define SECUREFP_OP_ENROLL_FINAL    0x04
++#define SECUREFP_OP_IDENTIFY_INIT   0x05
++#define SECUREFP_OP_IDENTIFY_DO     0x06
++#define SECUREFP_OP_IDENTIFY_FINAL  0x07
++#define SECUREFP_OP_CANCEL          0x0a
++#define SECUREFP_OP_TYPE_CHECK      0x10
++
++/* What stock's HAL passes for and expects from a Goodix GW36T1 */
++#define SECUREFP_GW36T1_TYPE_ARG    18
++#define SECUREFP_GW36T1_TYPE        6
+diff --git a/libfprint/meson.build b/libfprint/meson.build
+index f11533c..b8b0e84 100644
+--- a/libfprint/meson.build
++++ b/libfprint/meson.build
+@@ -135,6 +135,7 @@ driver_sources = {
+         'drivers/goodixmoc/goodix_proto.c',
+     ),
+     'fpcmoc' : files('drivers/fpcmoc/fpc.c'),
++    'samsung_securefp' : files('drivers/samsung_securefp/securefp.c'),
+     'realtek' : files('drivers/realtek/realtek.c'),
+     'focaltech_moc' : files('drivers/focaltech_moc/focaltech_moc.c'),
+     'mafpmoc' : files('drivers/mafpmoc/mafpmoc.c'),
+diff --git a/meson.build b/meson.build
+index ab09dc1..9d2fac2 100644
+--- a/meson.build
++++ b/meson.build
+@@ -143,6 +143,7 @@ drivers_info = {
+     'goodixmoc': {},
+     'nb1010': {},
+     'fpcmoc': {},
++    'samsung_securefp': { 'helper': ['udev'] },
+     'realtek': {},
+     'focaltech_moc': {},
+     'mafpmoc': {},
+-- 
+2.56.0
+
