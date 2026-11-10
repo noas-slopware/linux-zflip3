@@ -1,0 +1,177 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] media: iris: support decode-order output on HFI Gen1
+
+Clients that decode synchronously, one picture at a time, wait for each
+decoded picture before submitting more input. VA-API drivers work that
+way. In display order the firmware can hold a picture back until later
+input arrives, so with B-frames such a client stalls: on SM8350,
+H.264 with -bf 2 through qcom-va-driver ends in "surface sync timeout".
+
+Expose V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY_ENABLE and
+V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY through the HFI Gen1 decoder
+capability table. Only a zero delay is supported, which maps to
+decode-order output; the feature is off by default. The existing
+control handling rejects changes while OUTPUT is streaming.
+
+Send HFI_PROPERTY_PARAM_VDEC_OUTPUT_ORDER (the same property and values
+the venus driver uses on these firmwares) through the decoder input
+configuration path before OUTPUT starts. Leave the firmware default
+alone until userspace sets the enable control, and send display order
+again if it is cleared, so a later start in the same session goes back
+to display order.
+
+This is the HFI Gen1 counterpart of the gen2 patch carried by
+qcom-va-driver ("media: iris: support decode-order output on HFI gen2").
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/media/platform/qcom/iris/iris_ctrls.c      |    8 ++++++
+ drivers/media/platform/qcom/iris/iris_hfi_gen1.c   |   17 +++++++++++++
+ .../platform/qcom/iris/iris_hfi_gen1_command.c     |   27 ++++++++++++++++++++
+ .../platform/qcom/iris/iris_hfi_gen1_defines.h     |    4 +++
+ .../platform/qcom/iris/iris_platform_common.h      |    2 +
+ 5 files changed, 58 insertions(+)
+
+diff --git a/drivers/media/platform/qcom/iris/iris_ctrls.c b/drivers/media/platform/qcom/iris/iris_ctrls.c
+index 753ffc1..dbc4a6a 100644
+--- a/drivers/media/platform/qcom/iris/iris_ctrls.c
++++ b/drivers/media/platform/qcom/iris/iris_ctrls.c
+@@ -154,6 +154,10 @@ static enum platform_inst_fw_cap_type iris_get_cap_id(u32 id)
+ 		return LAYER4_BITRATE_HEVC;
+ 	case V4L2_CID_MPEG_VIDEO_HEVC_HIER_CODING_L5_BR:
+ 		return LAYER5_BITRATE_HEVC;
++	case V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY_ENABLE:
++		return DISPLAY_DELAY_ENABLE;
++	case V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY:
++		return DISPLAY_DELAY;
+ 	case V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME:
+ 		return REQUEST_SYNC_FRAME;
+ 	default:
+@@ -299,6 +303,10 @@ static u32 iris_get_v4l2_id(enum platform_inst_fw_cap_type cap_id)
+ 		return V4L2_CID_MPEG_VIDEO_HEVC_HIER_CODING_L4_BR;
+ 	case LAYER5_BITRATE_HEVC:
+ 		return V4L2_CID_MPEG_VIDEO_HEVC_HIER_CODING_L5_BR;
++	case DISPLAY_DELAY_ENABLE:
++		return V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY_ENABLE;
++	case DISPLAY_DELAY:
++		return V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY;
+ 	case REQUEST_SYNC_FRAME:
+ 		return V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME;
+ 	default:
+diff --git a/drivers/media/platform/qcom/iris/iris_hfi_gen1.c b/drivers/media/platform/qcom/iris/iris_hfi_gen1.c
+index 0712a39..e4ad88f 100644
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen1.c
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen1.c
+@@ -30,6 +30,22 @@ static struct platform_inst_fw_cap inst_fw_cap_sm8250_dec[] = {
+ 		.hfi_id = HFI_PROPERTY_PARAM_WORK_MODE,
+ 		.set = iris_set_stage,
+ 	},
++	{
++		.cap_id = DISPLAY_DELAY_ENABLE,
++		.min = 0,
++		.max = 1,
++		.step_or_mask = 1,
++		.value = 0,
++		.hfi_id = HFI_PROPERTY_PARAM_VDEC_OUTPUT_ORDER,
++		.flags = CAP_FLAG_INPUT_PORT,
++	},
++	{
++		.cap_id = DISPLAY_DELAY,
++		.min = 0,
++		.max = 0,
++		.step_or_mask = 1,
++		.value = 0,
++	},
+ };
+ 
+ static struct platform_inst_fw_cap inst_fw_cap_sm8250_enc[] = {
+@@ -395,6 +411,7 @@ static struct platform_inst_fw_cap inst_fw_cap_sm8250_enc[] = {
+ };
+ 
+ static const u32 sm8250_vdec_input_config_param_default[] = {
++	HFI_PROPERTY_PARAM_VDEC_OUTPUT_ORDER,
+ 	HFI_PROPERTY_CONFIG_VIDEOCORES_USAGE,
+ 	HFI_PROPERTY_PARAM_UNCOMPRESSED_FORMAT_SELECT,
+ 	HFI_PROPERTY_PARAM_UNCOMPRESSED_PLANE_ACTUAL_CONSTRAINTS_INFO,
+diff --git a/drivers/media/platform/qcom/iris/iris_hfi_gen1_command.c b/drivers/media/platform/qcom/iris/iris_hfi_gen1_command.c
+index aef0543..708dcd1 100644
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen1_command.c
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen1_command.c
+@@ -752,6 +752,16 @@ iris_hfi_gen1_packet_session_set_property(struct hfi_session_set_property_pkt *p
+ 		packet->shdr.hdr.size += sizeof(u32);
+ 		break;
+ 	}
++	case HFI_PROPERTY_PARAM_VDEC_OUTPUT_ORDER: {
++		u32 *in = pdata;
++
++		if (*in != HFI_OUTPUT_ORDER_DECODE && *in != HFI_OUTPUT_ORDER_DISPLAY)
++			return -EINVAL;
++
++		packet->data[1] = *in;
++		packet->shdr.hdr.size += sizeof(u32);
++		break;
++	}
+ 	default:
+ 		return -EINVAL;
+ 	}
+@@ -820,6 +830,21 @@ static int iris_hfi_gen1_set_resolution(struct iris_inst *inst, u32 plane)
+ 	return hfi_gen1_set_property(inst, ptype, &fs, sizeof(fs));
+ }
+ 
++static int iris_hfi_gen1_set_output_order(struct iris_inst *inst, u32 plane)
++{
++	struct platform_inst_fw_cap *cap = &inst->fw_caps[DISPLAY_DELAY_ENABLE];
++	u32 order;
++
++	/* Leave the firmware default unchanged unless userspace sets the control. */
++	if (!(cap->flags & CAP_FLAG_CLIENT_SET))
++		return 0;
++
++	order = cap->value ? HFI_OUTPUT_ORDER_DECODE : HFI_OUTPUT_ORDER_DISPLAY;
++
++	return hfi_gen1_set_property(inst, HFI_PROPERTY_PARAM_VDEC_OUTPUT_ORDER,
++				     &order, sizeof(order));
++}
++
+ static int iris_hfi_gen1_decide_core(struct iris_inst *inst, u32 plane)
+ {
+ 	const u32 ptype = HFI_PROPERTY_CONFIG_VIDEOCORES_USAGE;
+@@ -1065,6 +1090,8 @@ static int iris_hfi_gen1_session_set_config_params(struct iris_inst *inst, u32 p
+ 	int ret;
+ 
+ 	static const struct iris_hfi_prop_type_handle vdec_prop_type_handle_inp_arr[] = {
++		{HFI_PROPERTY_PARAM_VDEC_OUTPUT_ORDER,
++			iris_hfi_gen1_set_output_order},
+ 		{HFI_PROPERTY_PARAM_FRAME_SIZE,
+ 			iris_hfi_gen1_set_resolution},
+ 		{HFI_PROPERTY_CONFIG_VIDEOCORES_USAGE,
+diff --git a/drivers/media/platform/qcom/iris/iris_hfi_gen1_defines.h b/drivers/media/platform/qcom/iris/iris_hfi_gen1_defines.h
+index db45754..b21e78c 100644
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen1_defines.h
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen1_defines.h
+@@ -68,7 +68,11 @@
+ 
+ #define HFI_PROPERTY_CONFIG_BUFFER_REQUIREMENTS		0x202001
+ 
++#define HFI_PROPERTY_PARAM_VDEC_OUTPUT_ORDER		0x1203005
+ #define HFI_PROPERTY_PARAM_VDEC_DPB_COUNTS		0x120300e
++
++#define HFI_OUTPUT_ORDER_DISPLAY			0x1000001
++#define HFI_OUTPUT_ORDER_DECODE				0x1000002
+ #define HFI_PROPERTY_CONFIG_VDEC_ENTROPY		0x1204004
+ 
+ #define HFI_BUFFER_INPUT				0x1
+diff --git a/drivers/media/platform/qcom/iris/iris_platform_common.h b/drivers/media/platform/qcom/iris/iris_platform_common.h
+index 9748095..d4e4ebf 100644
+--- a/drivers/media/platform/qcom/iris/iris_platform_common.h
++++ b/drivers/media/platform/qcom/iris/iris_platform_common.h
+@@ -186,6 +186,8 @@ enum platform_inst_fw_cap_type {
+ 	LAYER5_BITRATE_HEVC,
+ 	REQUEST_SYNC_FRAME,
+ 	TIME_DELTA_BASED_RC,
++	DISPLAY_DELAY_ENABLE,
++	DISPLAY_DELAY,
+ 	INST_FW_CAP_MAX,
+ };
+ 

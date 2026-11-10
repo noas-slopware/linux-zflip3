@@ -1,0 +1,39 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] media: iris: allow larger capture buffer pools on HFI Gen1
+
+Threaded VA-API clients such as VLC can hold more than 32 decoded
+surfaces before they hand them back. The default vb2 limit of 32
+buffers keeps them from allocating the capture pool they ask for.
+
+Raise the HFI Gen1 decoder CAPTURE queue limit to
+DEFAULT_MAX_HOST_BUF_COUNT (64). This only raises the maximum userspace
+may request; the minimum allocation, the OUTPUT queue and the encoder
+are unchanged. The firmware is still told the same BUFFER_COUNT_ACTUAL
+values as before; in split mode the host-facing OUTPUT2 count is the DPB
+count, which is already below the 32 buffers the host may queue today.
+More than 32 queued buffers has not been tested on Gen1 firmware.
+
+This is the HFI Gen1 counterpart of the gen2 patch carried by
+qcom-va-driver ("media: iris: allow larger capture buffer pools on HFI
+gen2").
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/media/platform/qcom/iris/iris_vidc.c |    3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/drivers/media/platform/qcom/iris/iris_vidc.c b/drivers/media/platform/qcom/iris/iris_vidc.c
+index bc95f75..ee44718 100644
+--- a/drivers/media/platform/qcom/iris/iris_vidc.c
++++ b/drivers/media/platform/qcom/iris/iris_vidc.c
+@@ -122,6 +122,9 @@ iris_m2m_queue_init(void *priv, struct vb2_queue *src_vq, struct vb2_queue *dst_
+ 	dst_vq->drv_priv = inst;
+ 	dst_vq->buf_struct_size = sizeof(struct iris_buffer);
+ 	dst_vq->min_reqbufs_allocation = MIN_BUFFERS;
++	if (inst->domain == DECODER &&
++	    inst->core->iris_firmware_data == &iris_hfi_gen1_data)
++		dst_vq->max_num_buffers = DEFAULT_MAX_HOST_BUF_COUNT;
+ 	dst_vq->dev = inst->core->dev;
+ 	dst_vq->lock = &inst->ctx_q_lock;
+ 

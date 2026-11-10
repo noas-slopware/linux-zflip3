@@ -1,0 +1,76 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] media: iris: fix three HFI Gen1 encoder packets
+
+Three HFI Gen1 encoder packets differ from what the firmware expects
+(compared with venus, which drives the same firmwares):
+
+1. The uncompressed EMPTY_BUFFER packet copied buf->flags, which holds
+   V4L2_BUF_FLAG_* bits, into the HFI flags field. V4L2_BUF_FLAG_MAPPED
+   is HFI_BUFFERFLAG_EOS and every queued buffer is mapped, so every
+   input frame reached the firmware marked as end of stream, and
+   V4L2_BUF_FLAG_KEYFRAME landed on HFI_BUFFERFLAG_DATACORRUPT. End of
+   stream is sent as a drain command, so send 0, as upstream did before
+   0021.
+2. HFI_PROPERTY_CONFIG_VENC_REQUEST_SYNC_FRAME has no payload, but the
+   packet carried an extra u32. On SM8350 the firmware fails the session
+   with HFI_ERR_SESSION_CMDSIZE at the first forced key frame.
+3. HFI_PROPERTY_PARAM_VENC_SESSION_QP_RANGE_V2 used 0xFFFFFFFF as the
+   layer id. 0xFF means all layers (venus, and upstream before 0021).
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../platform/qcom/iris/iris_hfi_gen1_command.c     |   25 +++++++++++++-------
+ 1 file changed, 16 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/media/platform/qcom/iris/iris_hfi_gen1_command.c b/drivers/media/platform/qcom/iris/iris_hfi_gen1_command.c
+index 708dcd1..db80992 100644
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen1_command.c
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen1_command.c
+@@ -302,7 +302,13 @@ static int iris_hfi_gen1_queue_input_buffer(struct iris_inst *inst, struct iris_
+ 		uncom_ip_pkt.time_stamp_hi = upper_32_bits(buf->timestamp);
+ 		uncom_ip_pkt.time_stamp_lo = lower_32_bits(buf->timestamp);
+ 		uncom_ip_pkt.view_id = 0;
+-		uncom_ip_pkt.flags = buf->flags;
++		/*
++		 * buf->flags holds V4L2_BUF_FLAG_* bits, which are not HFI buffer
++		 * flags: V4L2_BUF_FLAG_MAPPED is HFI_BUFFERFLAG_EOS, and every
++		 * queued buffer is mapped. End of stream goes to the firmware as
++		 * a drain command, so an input frame carries no flags.
++		 */
++		uncom_ip_pkt.flags = 0;
+ 		uncom_ip_pkt.mark_target = 0;
+ 		uncom_ip_pkt.mark_data = 0;
+ 		uncom_ip_pkt.offset = buf->data_offset;
+@@ -658,8 +664,9 @@ iris_hfi_gen1_packet_session_set_property(struct hfi_session_set_property_pkt *p
+ 		if (min_qp > 0xff || max_qp > 0xff)
+ 			return -ERANGE;
+ 
+-		range->min_qp.layer_id = 0xFFFFFFFF;
+-		range->max_qp.layer_id = 0xFFFFFFFF;
++		/* 0xFF is "all layers", as in venus; 0xFFFFFFFF is not a layer id */
++		range->min_qp.layer_id = 0xFF;
++		range->max_qp.layer_id = 0xFF;
+ 		range->min_qp.qp_packed = (min_qp & 0xFF) | ((min_qp & 0xFF) << 8) |
+ 			((min_qp & 0xFF) << 16);
+ 		range->max_qp.qp_packed = (max_qp & 0xFF) | ((max_qp & 0xFF) << 8) |
+@@ -745,13 +752,13 @@ iris_hfi_gen1_packet_session_set_property(struct hfi_session_set_property_pkt *p
+ 		packet->shdr.hdr.size += sizeof(u32);
+ 		break;
+ 	}
+-	case HFI_PROPERTY_CONFIG_VENC_REQUEST_SYNC_FRAME: {
+-		u32 *in = pdata;
+-
+-		packet->data[1] = *in;
+-		packet->shdr.hdr.size += sizeof(u32);
++	case HFI_PROPERTY_CONFIG_VENC_REQUEST_SYNC_FRAME:
++		/*
++		 * The property has no payload on HFI Gen1, as in venus. Four
++		 * extra bytes make the firmware fail the session with
++		 * HFI_ERR_SESSION_CMDSIZE.
++		 */
+ 		break;
+-	}
+ 	case HFI_PROPERTY_PARAM_VDEC_OUTPUT_ORDER: {
+ 		u32 *in = pdata;
+ 

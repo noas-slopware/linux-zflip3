@@ -1,0 +1,46 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] media: iris: register the encoder on SM8350 again
+
+0021 stopped registering /dev/video1 on qcom,sm8350-iris because using
+the encoder crashed the VPU firmware. No log of that crash was kept.
+A bare open() does not reach the firmware for the encoder: the HFI
+session is opened at REQBUFS (iris_vb2_queue_setup), and the
+uninitialised uncompressed input packet that 0021 now zeroes is only
+sent once input buffers are queued. If the crash happened at session
+init, the memset does not fix it. Register the encoder like on every
+other platform so this can be tested.
+
+Kept separate from the decode-order patches so the encoder can be
+dropped again on its own if the firmware still crashes.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/media/platform/qcom/iris/iris_probe.c |   14 +++-----------
+ 1 file changed, 3 insertions(+), 11 deletions(-)
+
+diff --git a/drivers/media/platform/qcom/iris/iris_probe.c b/drivers/media/platform/qcom/iris/iris_probe.c
+index b417a5f..b628747 100644
+--- a/drivers/media/platform/qcom/iris/iris_probe.c
++++ b/drivers/media/platform/qcom/iris/iris_probe.c
+@@ -278,17 +278,9 @@ static int iris_probe(struct platform_device *pdev)
+ 	if (ret)
+ 		goto err_v4l2_unreg;
+ 
+-	/*
+-	 * The SM8350 VPU firmware (vpu20_4v on the Galaxy Z Flip3) crashes
+-	 * when the encoder node is opened, and the cause is not known yet.
+-	 * Keep the encoder off there only: SM8250 runs the same HFI Gen1
+-	 * encoder path upstream, and the other platforms are unaffected.
+-	 */
+-	if (!of_device_is_compatible(dev->of_node, "qcom,sm8350-iris")) {
+-		ret = iris_register_video_device(core, ENCODER);
+-		if (ret)
+-			goto err_vdev_unreg_dec;
+-	}
++	ret = iris_register_video_device(core, ENCODER);
++	if (ret)
++		goto err_vdev_unreg_dec;
+ 
+ 	platform_set_drvdata(pdev, core);
+ 

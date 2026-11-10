@@ -1,0 +1,104 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] media: iris: fix the deadlock between power-off and the IRQ thread
+
+iris_vpu_power_off() runs with core->lock held (core deinit, the core
+init error path, runtime suspend and resume) and ends with
+disable_irq(), which waits for the threaded IRQ handler to finish. The
+handler starts with mutex_lock(&core->lock), and the response handler
+it calls takes the lock again, so an interrupt that arrives while the
+lock is held (for instance the firmware's reply during unload) leaves
+both waiting for each other. Seen on SM8350: rmmod qcom_iris stuck in
+synchronize_irq with irq/NN-iris blocked in iris_hfi_isr_handler.
+
+Mask the line with disable_irq_nosync() instead, and keep a handler
+that is already running away from the hardware: hw_powered is set at
+the end of iris_vpu_power_on() and cleared at the start of
+iris_vpu_power_off(), both under core->lock, and the handler checks it
+under the same lock before it touches a register.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/media/platform/qcom/iris/iris_core.h       |    3 +++
+ drivers/media/platform/qcom/iris/iris_hfi_common.c |    6 ++++++
+ drivers/media/platform/qcom/iris/iris_vpu_common.c |   14 +++++++++++++-
+ 3 files changed, 22 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/media/platform/qcom/iris/iris_core.h b/drivers/media/platform/qcom/iris/iris_core.h
+index 24da604..5b796bc 100644
+--- a/drivers/media/platform/qcom/iris/iris_core.h
++++ b/drivers/media/platform/qcom/iris/iris_core.h
+@@ -38,6 +38,8 @@ struct qcom_ubwc_cfg_data;
+  * @dev: reference to device structure
+  * @reg_base: IO memory base address
+  * @irq: iris irq
++ * @hw_powered: the VPU is powered and its registers may be touched; written
++ *		with @lock held by iris_vpu_power_on() and iris_vpu_power_off()
+  * @v4l2_dev: a holder for v4l2 device structure
+  * @vdev_dec: iris video device structure for decoder
+  * @vdev_enc: iris video device structure for encoder
+@@ -83,6 +85,7 @@ struct iris_core {
+ 	struct device				*dev;
+ 	void __iomem				*reg_base;
+ 	int					irq;
++	bool					hw_powered;
+ 	struct v4l2_device			v4l2_dev;
+ 	struct video_device			*vdev_dec;
+ 	struct video_device			*vdev_enc;
+diff --git a/drivers/media/platform/qcom/iris/iris_hfi_common.c b/drivers/media/platform/qcom/iris/iris_hfi_common.c
+index 8769ec6..38ddf5f 100644
+--- a/drivers/media/platform/qcom/iris/iris_hfi_common.c
++++ b/drivers/media/platform/qcom/iris/iris_hfi_common.c
+@@ -105,6 +105,12 @@ irqreturn_t iris_hfi_isr_handler(int irq, void *data)
+ 		return IRQ_NONE;
+ 
+ 	mutex_lock(&core->lock);
++	if (!core->hw_powered) {
++		/* powered off while this handler waited for the lock */
++		mutex_unlock(&core->lock);
++		enable_irq(irq);
++		return IRQ_HANDLED;
++	}
+ 	pm_runtime_mark_last_busy(core->dev);
+ 	iris_vpu_clear_interrupt(core);
+ 	mutex_unlock(&core->lock);
+diff --git a/drivers/media/platform/qcom/iris/iris_vpu_common.c b/drivers/media/platform/qcom/iris/iris_vpu_common.c
+index e4847c1..0de1b72 100644
+--- a/drivers/media/platform/qcom/iris/iris_vpu_common.c
++++ b/drivers/media/platform/qcom/iris/iris_vpu_common.c
+@@ -229,15 +229,26 @@ void iris_vpu_power_off_hw(struct iris_core *core)
+ 	iris_disable_unprepare_clock(core, IRIS_HW_CLK);
+ }
+ 
++/*
++ * Called with core->lock held. The threaded IRQ handler takes core->lock too,
++ * so waiting for it here (disable_irq()) deadlocks whenever an interrupt
++ * arrives while the lock is held, e.g. the firmware's reply during unload.
++ * Mask the line without waiting instead; hw_powered, cleared under the same
++ * lock before the hardware goes down, keeps a handler that is already
++ * running away from the registers.
++ */
+ void iris_vpu_power_off(struct iris_core *core)
+ {
++	lockdep_assert_held(&core->lock);
++
++	core->hw_powered = false;
+ 	iris_opp_set_rate(core->dev, 0);
+ 	core->iris_platform_data->vpu_ops->power_off_hw(core);
+ 	core->iris_platform_data->vpu_ops->power_off_controller(core);
+ 	iris_unset_icc_bw(core);
+ 
+ 	if (!iris_vpu_watchdog(core, core->intr_status))
+-		disable_irq(core->irq);
++		disable_irq_nosync(core->irq);
+ }
+ 
+ int iris_vpu_power_on_controller(struct iris_core *core)
+@@ -487,6 +498,7 @@ int iris_vpu_power_on(struct iris_core *core)
+ 
+ 	iris_vpu_interrupt_init(core);
+ 	core->intr_status = 0;
++	core->hw_powered = true;
+ 	enable_irq(core->irq);
+ 
+ 	return 0;

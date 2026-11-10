@@ -1,0 +1,98 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] media: iris: accept peak bitrate and frame QP controls on the HFI Gen1 encoder
+
+The HFI Gen1 encoder has no V4L2_CID_MPEG_VIDEO_BITRATE_PEAK and no
+I/P/B frame QP controls, so clients that always set them (qcom-va-driver
+sets the peak bitrate in VBR and CBR, the frame QPs in CQP) fail with
+-EINVAL before encoding anything.
+
+HFI 4xx/6xx firmware has no property for either: venus, on the same
+firmwares, returns -ENOTSUPP for HFI_PROPERTY_CONFIG_VENC_MAX_BITRATE and
+HFI_PROPERTY_PARAM_VENC_SESSION_QP and sends nothing. Do the same here:
+expose the controls with their usual ranges and send no property, so the
+firmware keeps its own peak bitrate and QPs.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/media/platform/qcom/iris/iris_hfi_gen1.c |   60 ++++++++++++++++++++++
+ 1 file changed, 60 insertions(+)
+
+diff --git a/drivers/media/platform/qcom/iris/iris_hfi_gen1.c b/drivers/media/platform/qcom/iris/iris_hfi_gen1.c
+index 55d86e2..a5d4b88 100644
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen1.c
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen1.c
+@@ -168,6 +168,19 @@ static struct platform_inst_fw_cap inst_fw_cap_sm8250_enc[] = {
+ 			CAP_FLAG_DYNAMIC_ALLOWED,
+ 		.set = iris_set_bitrate_gen1,
+ 	},
++	/*
++	 * HFI 4xx/6xx firmware has no peak bitrate property (venus skips
++	 * HFI_PROPERTY_CONFIG_VENC_MAX_BITRATE there too). The control is
++	 * accepted so clients that always set it can encode; nothing is sent.
++	 */
++	{
++		.cap_id = BITRATE_PEAK,
++		.min = BITRATE_MIN,
++		.max = BITRATE_MAX,
++		.step_or_mask = BITRATE_STEP,
++		.value = BITRATE_DEFAULT,
++		.flags = CAP_FLAG_DYNAMIC_ALLOWED,
++	},
+ 	{
+ 		.cap_id = BITRATE_MODE,
+ 		.min = V4L2_MPEG_VIDEO_BITRATE_MODE_VBR,
+@@ -415,6 +428,53 @@ static struct platform_inst_fw_cap inst_fw_cap_sm8250_enc[] = {
+ 		.flags = CAP_FLAG_INPUT_PORT | CAP_FLAG_DYNAMIC_ALLOWED,
+ 		.set = iris_set_req_sync_frame,
+ 	},
++	/*
++	 * Nor is there a per-frame-type QP property on HFI 4xx/6xx (venus
++	 * skips HFI_PROPERTY_PARAM_VENC_SESSION_QP there). The controls are
++	 * accepted and not sent; the firmware keeps its own QPs.
++	 */
++	{
++		.cap_id = I_FRAME_QP_H264,
++		.min = MIN_QP_8BIT,
++		.max = MAX_QP,
++		.step_or_mask = 1,
++		.value = DEFAULT_QP,
++	},
++	{
++		.cap_id = P_FRAME_QP_H264,
++		.min = MIN_QP_8BIT,
++		.max = MAX_QP,
++		.step_or_mask = 1,
++		.value = DEFAULT_QP,
++	},
++	{
++		.cap_id = B_FRAME_QP_H264,
++		.min = MIN_QP_8BIT,
++		.max = MAX_QP,
++		.step_or_mask = 1,
++		.value = DEFAULT_QP,
++	},
++	{
++		.cap_id = I_FRAME_QP_HEVC,
++		.min = MIN_QP_8BIT,
++		.max = MAX_QP,
++		.step_or_mask = 1,
++		.value = DEFAULT_QP,
++	},
++	{
++		.cap_id = P_FRAME_QP_HEVC,
++		.min = MIN_QP_8BIT,
++		.max = MAX_QP,
++		.step_or_mask = 1,
++		.value = DEFAULT_QP,
++	},
++	{
++		.cap_id = B_FRAME_QP_HEVC,
++		.min = MIN_QP_8BIT,
++		.max = MAX_QP,
++		.step_or_mask = 1,
++		.value = DEFAULT_QP,
++	},
+ };
+ 
+ static const u32 sm8250_vdec_input_config_param_default[] = {
