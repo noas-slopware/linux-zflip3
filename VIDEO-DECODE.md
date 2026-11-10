@@ -3,10 +3,11 @@
 Device: `<phone>`, user `<user>`, Arch Linux aarch64, Plasma Mobile,
 kernel 7.3.1 with a hand-built out-of-tree `qcom_iris` module.
 
-**Status, 2026-11-10: not fully working.** VP9 and H.264 without B-frames decode in
-hardware and were checked in Firefox 159 on YouTube. H.264 with B-frames is broken until
-the kernel carries the two qcom-va-driver patches (below). HEVC decodes but logs
-pending-picture warnings; treat HEVC as untested.
+**Status, 2026-11-10 evening: working for H.264, HEVC and VP9.** VP9 and H.264 without
+B-frames were checked in Firefox 159 on YouTube. With the Gen1 decode-order ports 0041/0042
+in the running `qcom-iris` module, H.264 High with B-frames and HEVC with B-frames decode in
+hardware bit-exact against software (see "B-frames" below). Hardware encode is not
+available: `/dev/video1` stays unregistered on SM8350 (held 0043).
 
 ## Hardware
 
@@ -36,8 +37,9 @@ installs the result.
 ### Local patch
 
 `patches/qcom-va-driver/local-0001-make-decode-order-controls-optional.patch` makes
-`V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY(_ENABLE)` failures non-fatal. Required because the
-kernel module lacks the upstream decode-order patch.
+`V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY(_ENABLE)` failures non-fatal. It was needed while the
+kernel lacked decode-order output. 0041 now provides both controls, so it is no longer
+needed; it is still applied, and it would hide a regression of 0041 as a trace line.
 
 ### Do not use the AUR stateless packages
 
@@ -68,13 +70,24 @@ The exact output lists those profiles as VLD entries; no AV1 profile is advertis
 
 H.264 (no B-frames) output is bit-exact vs software: PSNR inf.
 
-## Known broken
+## B-frames (fixed 2026-11-10)
 
-- **H.264 with B-frames** (`-bf 2`) fails with `surface sync timeout` /
-  `Failed to begin picture decode`. Do not describe the decoder as fully working.
-- **HEVC** decodes but logs pending-picture warnings; treat as untested.
+Retested on kernel #6 with the iris module from the #48 module stage, which carries 0041 and
+0042. `v4l2-ctl -d /dev/video0 --list-ctrls` lists `display_delay` and
+`display_delay_enable`, and the libva trace prints no `DISPLAY_DELAY unsupported`. Two 4 s
+1080p30 clips made on the phone (`testsrc2`, libx264 High `-bf 2`, libx265 `bframes=3`),
+decoded with `ffmpeg -hwaccel vaapi -hwaccel_output_format vaapi` through the Iris V4L2
+stateful backend (strace: `/dev/video0` opened), `hwdownload` and `framemd5`:
 
-### Root cause and next step
+| clip | frames | decode errors | against software |
+|---|---|---|---|
+| H.264 High, 2 B-frames | 120 | 0 | bit-exact |
+| HEVC Main, B-frames | 120 | 0 | bit-exact |
+
+Before the ports, H.264 with B-frames failed with `surface sync timeout` / `Failed to begin
+picture decode`, and HEVC logged pending-picture warnings.
+
+### Root cause (history)
 
 The kernel needs the qcom-va-driver patches `patches/0001` (decode-order output) and
 `patches/0002` (larger capture pools). Those two are written for HFI **gen2**; this phone is
@@ -127,9 +140,8 @@ YouTube playback uses hardware decode. While playing 1080p:
 - remaining CPU load during playback is page JS and compositing (Firefox main ~58%,
   YouTube content process ~48%), not decoding.
 
-Still untested: H.264 streams with B-frames are expected to fail per the kernel patch gap;
-the VP9 path YouTube uses is unaffected. If a site ever stalls mid-video, that is the
-B-frame case: the fix is still the kernel patches, not a pref. The mobile-UI half is for a
+H.264 streams with B-frames have not been played in Firefox yet; the same VA-API path
+decodes them bit-exact in ffmpeg (see "B-frames"). The mobile-UI half is for a
 human to eyeball: it should look like `m.youtube.com` now, since the UA override is live in
 the same profile.
 
