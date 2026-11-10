@@ -113,3 +113,5 @@ CONFIG_RPMSG_CHAR=m
 CONFIG_SM_CAMCC_8350=m
 # Cameras: the rear ultrawide (IMX258, patches/linux/0059-0061).
 CONFIG_VIDEO_IMX258=m
+# Cameras: the front IMX374 (patches/linux/0062-0063).
+CONFIG_VIDEO_IMX374=m

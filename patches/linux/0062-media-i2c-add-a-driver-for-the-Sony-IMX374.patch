@@ -1,0 +1,1953 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] media: i2c: add a driver for the Sony IMX374
+
+The Sony IMX374 is the front camera sensor of the Samsung Galaxy Z Flip3
+(SM-F711N). It sends 10-bit Bayer data over a four-lane MIPI CSI-2 D-PHY
+link and is controlled over I2C at 0x1a, with the chip ID 0x0374 at
+0x0016.
+
+No datasheet was available. The init list and the three mode lists are
+copied from the sensor module that the phone's stock camera stack loads
+(com.samsung.sensormodule.12_sony_imx374), in its order and with its
+values; only comments were added. Both stock front camera modules carry
+the same init list. The modes are:
+
+- 3648x2736, the full 4:3 field, 30 fps, 1818 Mbps per lane
+- 1824x1368, the same field binned 2x2, 30 fps, 1794 Mbps per lane
+- 1988x1120, a 16:9 field binned 2x2, 30 fps, 798 Mbps per lane
+
+Each mode list programs its own OP PLL, so the link frequency (909, 897
+or 399 MHz) follows the mode, and a mode is offered only when its link
+frequency is listed in the firmware node. 909 MHz is the base entry of
+the stock kernel's adaptive MIPI table for this sensor and 897 MHz is
+one of its alternates.
+
+The pixel rate for the timing registers is 840 Mpixel/s: line length
+times frame length times frame rate gives that figure in every stock
+mode, and the VT PLL (24 MHz / 4 * 210) is the same in all of them.
+
+The controls are exposure (2 lines up to frame length - 10), analogue
+gain (codes 0 to 896, gain = 1024 / (1024 - code), up to 8x, as the stock
+gain code computes it), digital gain (Q8, 0x100 to 0xfff), vblank
+(stock's frame length or longer), read-only hblank, pixel rate and link
+frequency, and the SMIA/CCS test pattern at 0x0600 with its four colour
+registers. There are no flip controls: stock never writes the
+orientation register, so the Bayer order under flips is unknown.
+
+The full-field list turns on the sensor's HDR mode (0x0220 = 0x61) and
+sets the second exposure (0x0224) equal to the first. In that mode the
+driver writes exposure and analogue gain to both register sets, so the
+frame stays uniform.
+
+The media bus code is SGRBG10. The stock module gives CFA code 2 for
+every mode. The IMX258 module gives 3, and the IMX258 runs unflipped on
+stock, which mainline's imx258 driver reports as RGGB. In the order
+BGGR, GBRG, GRBG, RGGB that makes 2 GRBG. The colour bar test pattern
+shows whether that holds.
+
+Power-up follows stock: VANA, VIF, VDIG and MCLK 1 ms apart, XCLR
+released 1 ms later, then 10 ms before the first access. The init list
+programs EXCK for 24 MHz, so probe rejects any other clock rate.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../devicetree/bindings/media/i2c/sony,imx374.yaml |  100 +
+ drivers/media/i2c/Kconfig                          |   10 
+ drivers/media/i2c/Makefile                         |    1 
+ drivers/media/i2c/imx374.c                         | 1746 ++++++++++++++++++++
+ 4 files changed, 1857 insertions(+)
+ create mode 100644 Documentation/devicetree/bindings/media/i2c/sony,imx374.yaml
+ create mode 100644 drivers/media/i2c/imx374.c
+
+diff --git a/Documentation/devicetree/bindings/media/i2c/sony,imx374.yaml b/Documentation/devicetree/bindings/media/i2c/sony,imx374.yaml
+new file mode 100644
+index 0000000..9a313ab
+--- /dev/null
++++ b/Documentation/devicetree/bindings/media/i2c/sony,imx374.yaml
+@@ -0,0 +1,100 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/media/i2c/sony,imx374.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: Sony IMX374 CMOS Digital Image Sensor
++
++maintainers:
++  - Noa Himesaka <himesaka@noa.codes>
++
++description:
++  IMX374 is a CMOS active pixel image sensor with a 10-bit RAW Bayer output.
++  It is programmed through I2C and sends image data over a four-lane MIPI
++  CSI-2 D-PHY interface.
++
++$ref: /schemas/media/video-interface-devices.yaml#
++
++properties:
++  compatible:
++    const: sony,imx374
++
++  reg:
++    maxItems: 1
++
++  clocks:
++    description: Input clock (INCK), 24 MHz.
++    maxItems: 1
++
++  reset-gpios:
++    description: Reference to the GPIO connected to the XCLR pin, if any.
++    maxItems: 1
++
++  vana-supply:
++    description: Analogue voltage (VANA) supply, 2.8 V.
++
++  vdig-supply:
++    description: Digital core voltage (VDIG) supply, 1.05 V.
++
++  vif-supply:
++    description: Interface voltage (VIF) supply, 1.8 V.
++
++  port:
++    $ref: /schemas/graph.yaml#/$defs/port-base
++    additionalProperties: false
++
++    properties:
++      endpoint:
++        $ref: /schemas/media/video-interfaces.yaml#
++        unevaluatedProperties: false
++
++        properties:
++          data-lanes:
++            items:
++              - const: 1
++              - const: 2
++              - const: 3
++              - const: 4
++
++          link-frequencies: true
++
++        required:
++          - data-lanes
++          - link-frequencies
++
++required:
++  - compatible
++  - reg
++  - clocks
++  - port
++
++unevaluatedProperties: false
++
++examples:
++  - |
++    #include <dt-bindings/gpio/gpio.h>
++
++    i2c {
++        #address-cells = <1>;
++        #size-cells = <0>;
++
++        camera@1a {
++            compatible = "sony,imx374";
++            reg = <0x1a>;
++            clocks = <&imx374_clk>;
++            reset-gpios = <&gpio 202 GPIO_ACTIVE_LOW>;
++            vana-supply = <&vana>;
++            vdig-supply = <&vdig>;
++            vif-supply = <&vif>;
++            orientation = <0>;
++
++            port {
++                endpoint {
++                    remote-endpoint = <&csiphy3_ep>;
++                    data-lanes = <1 2 3 4>;
++                    link-frequencies = /bits/ 64 <909000000 897000000 399000000>;
++                };
++            };
++        };
++    };
+diff --git a/drivers/media/i2c/Kconfig b/drivers/media/i2c/Kconfig
+index 5c52007..18ac3a6 100644
+--- a/drivers/media/i2c/Kconfig
++++ b/drivers/media/i2c/Kconfig
+@@ -267,6 +267,16 @@ config VIDEO_IMX355
+ 	  To compile this driver as a module, choose M here: the
+ 	  module will be called imx355.
+ 
++config VIDEO_IMX374
++	tristate "Sony IMX374 sensor support"
++	select V4L2_CCI_I2C
++	help
++	  This is a Video4Linux2 sensor driver for the Sony
++	  IMX374 camera.
++
++	  To compile this driver as a module, choose M here: the
++	  module will be called imx374.
++
+ config VIDEO_IMX412
+ 	tristate "Sony IMX412 sensor support"
+ 	depends on OF
+diff --git a/drivers/media/i2c/Makefile b/drivers/media/i2c/Makefile
+index d04bd57..4c19c87 100644
+--- a/drivers/media/i2c/Makefile
++++ b/drivers/media/i2c/Makefile
+@@ -59,6 +59,7 @@ obj-$(CONFIG_VIDEO_IMX319) += imx319.o
+ obj-$(CONFIG_VIDEO_IMX334) += imx334.o
+ obj-$(CONFIG_VIDEO_IMX335) += imx335.o
+ obj-$(CONFIG_VIDEO_IMX355) += imx355.o
++obj-$(CONFIG_VIDEO_IMX374) += imx374.o
+ obj-$(CONFIG_VIDEO_IMX412) += imx412.o
+ obj-$(CONFIG_VIDEO_IMX415) += imx415.o
+ obj-$(CONFIG_VIDEO_IMX678) += imx678.o
+diff --git a/drivers/media/i2c/imx374.c b/drivers/media/i2c/imx374.c
+new file mode 100644
+index 0000000..3db8ddf
+--- /dev/null
++++ b/drivers/media/i2c/imx374.c
+@@ -0,0 +1,1746 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Sony IMX374 image sensor driver
++ *
++ * The register lists come from the IMX374 sensor module that the Samsung
++ * Galaxy Z Flip3 (SM-F711N) ships for its front camera. No datasheet was
++ * used; registers outside the SMIA/CCS standard set are written as the
++ * stock lists write them, without a name.
++ *
++ * Structure follows the imx219 driver.
++ */
++
++#include <linux/bitops.h>
++#include <linux/clk.h>
++#include <linux/delay.h>
++#include <linux/gpio/consumer.h>
++#include <linux/i2c.h>
++#include <linux/limits.h>
++#include <linux/module.h>
++#include <linux/pm_runtime.h>
++#include <linux/regulator/consumer.h>
++
++#include <media/v4l2-cci.h>
++#include <media/v4l2-ctrls.h>
++#include <media/v4l2-device.h>
++#include <media/v4l2-fwnode.h>
++#include <media/v4l2-mediabus.h>
++
++#define IMX374_REG_CHIP_ID		CCI_REG16(0x0016)
++#define IMX374_CHIP_ID			0x0374
++
++#define IMX374_REG_MODE_SELECT		CCI_REG8(0x0100)
++#define IMX374_MODE_STANDBY		0x00
++#define IMX374_MODE_STREAMING		0x01
++
++#define IMX374_REG_FRM_LENGTH_LINES	CCI_REG16(0x0340)
++
++/*
++ * Exposure in lines. The stock module limits it to 2 lines minimum, to
++ * frame length - 10 and to 55000 lines in total.
++ */
++#define IMX374_REG_EXPOSURE		CCI_REG16(0x0202)
++#define IMX374_REG_EXPOSURE_2ND		CCI_REG16(0x0224)
++#define IMX374_EXPOSURE_MIN		2
++#define IMX374_EXPOSURE_STEP		1
++#define IMX374_EXPOSURE_OFFSET		10
++#define IMX374_EXPOSURE_MAX		55000
++#define IMX374_FLL_MAX			(IMX374_EXPOSURE_MAX + IMX374_EXPOSURE_OFFSET)
++
++/* Analogue gain code: gain = 1024 / (1024 - code), up to 8x */
++#define IMX374_REG_ANALOG_GAIN		CCI_REG16(0x0204)
++#define IMX374_REG_ANALOG_GAIN_2ND	CCI_REG16(0x0216)
++#define IMX374_ANA_GAIN_MIN		0
++#define IMX374_ANA_GAIN_MAX		896
++#define IMX374_ANA_GAIN_STEP		1
++#define IMX374_ANA_GAIN_DEFAULT		0
++
++/* Digital gain, Q8 (0x100 = 1.0x) */
++#define IMX374_REG_DIGITAL_GAIN		CCI_REG16(0x020e)
++#define IMX374_DGTL_GAIN_MIN		0x0100
++#define IMX374_DGTL_GAIN_MAX		0x0fff
++#define IMX374_DGTL_GAIN_STEP		1
++#define IMX374_DGTL_GAIN_DEFAULT	0x0100
++
++/* Test pattern (SMIA/CCS layout) */
++#define IMX374_REG_TP_B000		CCI_REG8(0xb000)
++#define IMX374_REG_TP_B001		CCI_REG8(0xb001)
++#define IMX374_REG_TEST_PATTERN		CCI_REG16(0x0600)
++#define IMX374_REG_TESTP_RED		CCI_REG16(0x0602)
++#define IMX374_REG_TESTP_GREENR		CCI_REG16(0x0604)
++#define IMX374_REG_TESTP_BLUE		CCI_REG16(0x0606)
++#define IMX374_REG_TESTP_GREENB		CCI_REG16(0x0608)
++#define IMX374_TESTP_COLOUR_MIN		0
++#define IMX374_TESTP_COLOUR_MAX		0x03ff
++#define IMX374_TESTP_COLOUR_STEP	1
++
++/* The init list programs EXCK for a 24 MHz input clock (0x0136) */
++#define IMX374_XCLK_FREQ		24000000
++
++/*
++ * Pixel rate for the timing registers. The VT PLL is the same in every
++ * mode (24 MHz / 4 * 210 = 1260 MHz), and line length x frame length x
++ * frame rate comes to 840 Mpixel/s in every stock mode.
++ */
++#define IMX374_PIXEL_RATE		840000000
++
++/*
++ * The largest window the stock modes read out: x 0 to 3983, y 0 to 2735.
++ * The stock module does not state the pixel array size.
++ */
++#define IMX374_NATIVE_WIDTH		3984U
++#define IMX374_NATIVE_HEIGHT		2736U
++
++/* Four lanes; per-lane D-PHY rate = 2 x link frequency */
++#define IMX374_DATA_LANES		4
++
++enum {
++	IMX374_LINK_FREQ_909MHZ,
++	IMX374_LINK_FREQ_897MHZ,
++	IMX374_LINK_FREQ_399MHZ,
++};
++
++/*
++ * OP PLL: 24 MHz / 0x030d * 0x030e:0x030f / 0x030b. The stock lists set
++ * 303 (1818 Mbps), 299 (1794 Mbps) and 266 with 0x030b = 2 (798 Mbps).
++ */
++static const s64 imx374_link_freq_menu[] = {
++	[IMX374_LINK_FREQ_909MHZ] = 909000000,
++	[IMX374_LINK_FREQ_897MHZ] = 897000000,
++	[IMX374_LINK_FREQ_399MHZ] = 399000000,
++};
++
++static const char * const imx374_test_pattern_menu[] = {
++	"Disabled",
++	"Solid Colour",
++	"Colour Bars",
++	"Colour Bars With Fade to Grey",
++	"Pseudorandom Sequence (PN9)",
++};
++
++static const char * const imx374_supply_name[] = {
++	"vana",		/* Analogue (2.8 V) */
++	"vif",		/* Interface (1.8 V) */
++	"vdig",		/* Digital core (1.05 V) */
++};
++
++#define IMX374_NUM_SUPPLIES ARRAY_SIZE(imx374_supply_name)
++
++/*
++ * The stock module has no flip settings, so the sensor runs unflipped.
++ * Its CFA code for every mode is that of GRBG.
++ */
++#define IMX374_MBUS_CODE		MEDIA_BUS_FMT_SGRBG10_1X10
++
++struct imx374_mode {
++	unsigned int width;
++	unsigned int height;
++
++	/* Analogue crop rectangle, in native pixel array coordinates */
++	struct v4l2_rect crop;
++
++	/* Line length and frame length as the mode list sets them */
++	unsigned int llp;
++	unsigned int fll;
++
++	/* Coarse integration time as the mode list sets it */
++	unsigned int exposure_def;
++
++	unsigned int link_freq_index;
++
++	/*
++	 * The mode list turns on the sensor's HDR mode (0x0220 = 0x61) and
++	 * seeds the second exposure with the first. Keep the second exposure
++	 * and analogue gain equal to the first so the frame stays uniform.
++	 */
++	bool hdr;
++
++	const struct cci_reg_sequence *regs;
++	unsigned int num_regs;
++};
++
++/*
++ * Register lists, verbatim from the stock module, in stock's order.
++ *
++ * imx374_init_regs is stock's init list. It is the same for both stock
++ * front cameras and is written before any mode list. It opens with a run
++ * of 0xf800-0xf90f writes, which are left alone.
++ *
++ * The three mode lists write the same addresses in the same order, except
++ * that the 1824x1368 list also writes 0x3f8c-0x3f8f, 0x6e40 and 0x6e44.
++ * The values that differ between them are 0x0220, the frame and line
++ * length, binning, the readout window, output size and digital crop, the
++ * OP PLL (0x030b, 0x030f), the initial exposures (0x0202, 0x0224) and
++ * 0x3f56/0x3f57, 0x3fa8/0x3fa9, 0x3ff4/0x3ff5 and 0x6e62. The rest is the
++ * same in all three.
++ */
++
++static const struct cci_reg_sequence imx374_init_regs[] = {
++	{ CCI_REG8(0xf800), 0x8c },
++	{ CCI_REG8(0xf801), 0x8c },
++	{ CCI_REG8(0xf802), 0x19 },
++	{ CCI_REG8(0xf803), 0x3f },
++	{ CCI_REG8(0xf804), 0x55 },
++	{ CCI_REG8(0xf805), 0xe4 },
++	{ CCI_REG8(0xf806), 0x21 },
++	{ CCI_REG8(0xf807), 0x00 },
++	{ CCI_REG8(0xf808), 0xff },
++	{ CCI_REG8(0xf809), 0x52 },
++	{ CCI_REG8(0xf80a), 0xf1 },
++	{ CCI_REG8(0xf80b), 0x7d },
++	{ CCI_REG8(0xf884), 0x40 },
++	{ CCI_REG8(0xf885), 0xba },
++	{ CCI_REG8(0xf886), 0x70 },
++	{ CCI_REG8(0xf887), 0x47 },
++	{ CCI_REG8(0xf888), 0xc0 },
++	{ CCI_REG8(0xf889), 0xba },
++	{ CCI_REG8(0xf88a), 0x70 },
++	{ CCI_REG8(0xf88b), 0x47 },
++	{ CCI_REG8(0xf88c), 0x00 },
++	{ CCI_REG8(0xf88d), 0xf0 },
++	{ CCI_REG8(0xf88e), 0x02 },
++	{ CCI_REG8(0xf88f), 0xf8 },
++	{ CCI_REG8(0xf890), 0x82 },
++	{ CCI_REG8(0xf891), 0xf6 },
++	{ CCI_REG8(0xf892), 0xaa },
++	{ CCI_REG8(0xf893), 0xf8 },
++	{ CCI_REG8(0xf894), 0x70 },
++	{ CCI_REG8(0xf895), 0xb5 },
++	{ CCI_REG8(0xf896), 0x1a },
++	{ CCI_REG8(0xf897), 0x4c },
++	{ CCI_REG8(0xf898), 0x00 },
++	{ CCI_REG8(0xf899), 0x21 },
++	{ CCI_REG8(0xf89a), 0x23 },
++	{ CCI_REG8(0xf89b), 0x46 },
++	{ CCI_REG8(0xf89c), 0x14 },
++	{ CCI_REG8(0xf89d), 0x33 },
++	{ CCI_REG8(0xf89e), 0x1d },
++	{ CCI_REG8(0xf89f), 0x1d },
++	{ CCI_REG8(0xf8a0), 0x2a },
++	{ CCI_REG8(0xf8a1), 0x7d },
++	{ CCI_REG8(0xf8a2), 0x01 },
++	{ CCI_REG8(0xf8a3), 0x2a },
++	{ CCI_REG8(0xf8a4), 0x25 },
++	{ CCI_REG8(0xf8a5), 0xd1 },
++	{ CCI_REG8(0xf8a6), 0x17 },
++	{ CCI_REG8(0xf8a7), 0x4a },
++	{ CCI_REG8(0xf8a8), 0x12 },
++	{ CCI_REG8(0xf8a9), 0x78 },
++	{ CCI_REG8(0xf8aa), 0x56 },
++	{ CCI_REG8(0xf8ab), 0x00 },
++	{ CCI_REG8(0xf8ac), 0x16 },
++	{ CCI_REG8(0xf8ad), 0x4a },
++	{ CCI_REG8(0xf8ae), 0xb2 },
++	{ CCI_REG8(0xf8af), 0x18 },
++	{ CCI_REG8(0xf8b0), 0xff },
++	{ CCI_REG8(0xf8b1), 0x32 },
++	{ CCI_REG8(0xf8b2), 0x41 },
++	{ CCI_REG8(0xf8b3), 0x32 },
++	{ CCI_REG8(0xf8b4), 0x92 },
++	{ CCI_REG8(0xf8b5), 0x8b },
++	{ CCI_REG8(0xf8b6), 0x6e },
++	{ CCI_REG8(0xf8b7), 0x8a },
++	{ CCI_REG8(0xf8b8), 0xb2 },
++	{ CCI_REG8(0xf8b9), 0x42 },
++	{ CCI_REG8(0xf8ba), 0x02 },
++	{ CCI_REG8(0xf8bb), 0xd3 },
++	{ CCI_REG8(0xf8bc), 0x2d },
++	{ CCI_REG8(0xf8bd), 0x8a },
++	{ CCI_REG8(0xf8be), 0xaa },
++	{ CCI_REG8(0xf8bf), 0x42 },
++	{ CCI_REG8(0xf8c0), 0x16 },
++	{ CCI_REG8(0xf8c1), 0xd9 },
++	{ CCI_REG8(0xf8c2), 0x19 },
++	{ CCI_REG8(0xf8c3), 0x88 },
++	{ CCI_REG8(0xf8c4), 0x8a },
++	{ CCI_REG8(0xf8c5), 0x42 },
++	{ CCI_REG8(0xf8c6), 0x02 },
++	{ CCI_REG8(0xf8c7), 0xd3 },
++	{ CCI_REG8(0xf8c8), 0x00 },
++	{ CCI_REG8(0xf8c9), 0x21 },
++	{ CCI_REG8(0xf8ca), 0x61 },
++	{ CCI_REG8(0xf8cb), 0x5e },
++	{ CCI_REG8(0xf8cc), 0x10 },
++	{ CCI_REG8(0xf8cd), 0xe0 },
++	{ CCI_REG8(0xf8ce), 0x59 },
++	{ CCI_REG8(0xf8cf), 0x8a },
++	{ CCI_REG8(0xf8d0), 0x8a },
++	{ CCI_REG8(0xf8d1), 0x42 },
++	{ CCI_REG8(0xf8d2), 0x02 },
++	{ CCI_REG8(0xf8d3), 0xd2 },
++	{ CCI_REG8(0xf8d4), 0x12 },
++	{ CCI_REG8(0xf8d5), 0x21 },
++	{ CCI_REG8(0xf8d6), 0x61 },
++	{ CCI_REG8(0xf8d7), 0x5e },
++	{ CCI_REG8(0xf8d8), 0x0a },
++	{ CCI_REG8(0xf8d9), 0xe0 },
++	{ CCI_REG8(0xf8da), 0x01 },
++	{ CCI_REG8(0xf8db), 0x21 },
++	{ CCI_REG8(0xf8dc), 0x4d },
++	{ CCI_REG8(0xf8dd), 0x00 },
++	{ CCI_REG8(0xf8de), 0x5d },
++	{ CCI_REG8(0xf8df), 0x5b },
++	{ CCI_REG8(0xf8e0), 0xaa },
++	{ CCI_REG8(0xf8e1), 0x42 },
++	{ CCI_REG8(0xf8e2), 0x03 },
++	{ CCI_REG8(0xf8e3), 0xd8 },
++	{ CCI_REG8(0xf8e4), 0x49 },
++	{ CCI_REG8(0xf8e5), 0x1c },
++	{ CCI_REG8(0xf8e6), 0xc9 },
++	{ CCI_REG8(0xf8e7), 0xb2 },
++	{ CCI_REG8(0xf8e8), 0x0a },
++	{ CCI_REG8(0xf8e9), 0x29 },
++	{ CCI_REG8(0xf8ea), 0xf7 },
++	{ CCI_REG8(0xf8eb), 0xd3 },
++	{ CCI_REG8(0xf8ec), 0x49 },
++	{ CCI_REG8(0xf8ed), 0x00 },
++	{ CCI_REG8(0xf8ee), 0x61 },
++	{ CCI_REG8(0xf8ef), 0x5e },
++	{ CCI_REG8(0xf8f0), 0x40 },
++	{ CCI_REG8(0xf8f1), 0x18 },
++	{ CCI_REG8(0xf8f2), 0x06 },
++	{ CCI_REG8(0xf8f3), 0x4a },
++	{ CCI_REG8(0xf8f4), 0x51 },
++	{ CCI_REG8(0xf8f5), 0x0c },
++	{ CCI_REG8(0xf8f6), 0x87 },
++	{ CCI_REG8(0xf8f7), 0xf6 },
++	{ CCI_REG8(0xf8f8), 0x2b },
++	{ CCI_REG8(0xf8f9), 0xf8 },
++	{ CCI_REG8(0xf8fa), 0x00 },
++	{ CCI_REG8(0xf8fb), 0xb2 },
++	{ CCI_REG8(0xf8fc), 0x70 },
++	{ CCI_REG8(0xf8fd), 0xbd },
++	{ CCI_REG8(0xf8fe), 0x00 },
++	{ CCI_REG8(0xf8ff), 0x00 },
++	{ CCI_REG8(0xf900), 0x00 },
++	{ CCI_REG8(0xf901), 0x18 },
++	{ CCI_REG8(0xf902), 0x2e },
++	{ CCI_REG8(0xf903), 0xb4 },
++	{ CCI_REG8(0xf904), 0x00 },
++	{ CCI_REG8(0xf905), 0x18 },
++	{ CCI_REG8(0xf906), 0x0a },
++	{ CCI_REG8(0xf907), 0x34 },
++	{ CCI_REG8(0xf908), 0x00 },
++	{ CCI_REG8(0xf909), 0x18 },
++	{ CCI_REG8(0xf90a), 0x16 },
++	{ CCI_REG8(0xf90b), 0xb8 },
++	{ CCI_REG8(0xf90c), 0xff },
++	{ CCI_REG8(0xf90d), 0xff },
++	{ CCI_REG8(0xf90e), 0x80 },
++	{ CCI_REG8(0xf90f), 0x00 },
++	{ CCI_REG8(0xa950), 0x26 },
++	{ CCI_REG8(0xa951), 0x48 },
++	{ CCI_REG8(0xa952), 0x0d },
++	{ CCI_REG8(0xa953), 0x48 },
++	{ CCI_REG8(0xa954), 0x09 },
++	{ CCI_REG8(0xa955), 0x60 },
++	{ CCI_REG8(0xa956), 0x06 },
++	{ CCI_REG8(0xa957), 0x40 },
++	{ CCI_REG8(0xa958), 0x03 },
++	{ CCI_REG8(0xa959), 0xb6 },
++	{ CCI_REG8(0xa95a), 0x01 },
++	{ CCI_REG8(0xa95b), 0x90 },
++	{ CCI_REG8(0xa95c), 0x00 },
++	{ CCI_REG8(0xa95d), 0x64 },
++	{ CCI_REG8(0xa95e), 0x00 },
++	{ CCI_REG8(0xa95f), 0x00 },
++	{ CCI_REG8(0xa960), 0xff },
++	{ CCI_REG8(0xa961), 0x38 },
++	{ CCI_REG8(0xa962), 0xfe },
++	{ CCI_REG8(0xa963), 0x0c },
++	{ CCI_REG8(0xa964), 0x95 },
++	{ CCI_REG8(0xa965), 0xd8 },
++	{ CCI_REG8(0xa966), 0x94 },
++	{ CCI_REG8(0xa967), 0x70 },
++	{ CCI_REG8(0xa968), 0x90 },
++	{ CCI_REG8(0xa969), 0x88 },
++	{ CCI_REG8(0xa96a), 0x88 },
++	{ CCI_REG8(0xa96b), 0xb8 },
++	{ CCI_REG8(0xa96c), 0x7d },
++	{ CCI_REG8(0xa96d), 0x00 },
++	{ CCI_REG8(0xa96e), 0x6d },
++	{ CCI_REG8(0xa96f), 0x60 },
++	{ CCI_REG8(0xa970), 0x59 },
++	{ CCI_REG8(0xa971), 0xd8 },
++	{ CCI_REG8(0xa972), 0x01 },
++	{ CCI_REG8(0xa973), 0x2c },
++	{ CCI_REG8(0xa974), 0x00 },
++	{ CCI_REG8(0xa975), 0x64 },
++	{ CCI_REG8(0xa976), 0x00 },
++	{ CCI_REG8(0xa977), 0x00 },
++	{ CCI_REG8(0xa978), 0x59 },
++	{ CCI_REG8(0xa979), 0xd8 },
++	{ CCI_REG8(0xa97a), 0x01 },
++	{ CCI_REG8(0xa97b), 0x2c },
++	{ CCI_REG8(0xa97c), 0x01 },
++	{ CCI_REG8(0x9032), 0x3a },
++	{ CCI_REG8(0x9033), 0xc4 },
++	{ CCI_REG8(0x4439), 0x01 },
++	{ CCI_REG8(0x0136), 0x18 },	/* EXCK frequency: 24.00 MHz */
++	{ CCI_REG8(0x0137), 0x00 },
++	{ CCI_REG8(0x3c7e), 0x05 },
++	{ CCI_REG8(0x3c7f), 0x02 },
++	{ CCI_REG8(0x0111), 0x02 },	/* CSI signalling mode: D-PHY */
++	{ CCI_REG8(0xe068), 0x03 },
++	{ CCI_REG8(0xe069), 0x02 },
++	{ CCI_REG8(0xe06a), 0x05 },
++	{ CCI_REG8(0xe06b), 0x04 },
++	{ CCI_REG8(0xe06c), 0x01 },
++	{ CCI_REG8(0xe06d), 0x00 },
++	{ CCI_REG8(0xe06e), 0x07 },
++	{ CCI_REG8(0xe06f), 0x06 },
++	{ CCI_REG8(0xe070), 0x09 },
++	{ CCI_REG8(0xe071), 0x08 },
++	{ CCI_REG8(0x3040), 0x01 },
++	{ CCI_REG8(0x30f2), 0x01 },
++	{ CCI_REG8(0x3f64), 0x00 },
++	{ CCI_REG8(0x3f65), 0x50 },
++	{ CCI_REG8(0x3f71), 0x01 },
++	{ CCI_REG8(0x3f72), 0x00 },
++	{ CCI_REG8(0x3f74), 0x07 },
++	{ CCI_REG8(0x5e14), 0x01 },
++	{ CCI_REG8(0x5e47), 0x00 },
++	{ CCI_REG8(0x5e64), 0x01 },
++	{ CCI_REG8(0x6305), 0x58 },
++	{ CCI_REG8(0x6306), 0x58 },
++	{ CCI_REG8(0x6307), 0x00 },
++	{ CCI_REG8(0x6308), 0x6b },
++	{ CCI_REG8(0x6309), 0x04 },
++	{ CCI_REG8(0x630a), 0xc0 },
++	{ CCI_REG8(0x630b), 0x81 },
++	{ CCI_REG8(0x630c), 0x68 },
++	{ CCI_REG8(0x630d), 0x28 },
++	{ CCI_REG8(0x630e), 0x00 },
++	{ CCI_REG8(0x630f), 0x04 },
++	{ CCI_REG8(0x6310), 0x00 },
++	{ CCI_REG8(0x6314), 0x06 },
++	{ CCI_REG8(0x6315), 0x85 },
++	{ CCI_REG8(0x6316), 0x06 },
++	{ CCI_REG8(0x6317), 0xb0 },
++	{ CCI_REG8(0x6318), 0x4e },
++	{ CCI_REG8(0x6319), 0x2e },
++	{ CCI_REG8(0x631a), 0x36 },
++	{ CCI_REG8(0x631b), 0x02 },
++	{ CCI_REG8(0x631c), 0x69 },
++	{ CCI_REG8(0x631d), 0x21 },
++	{ CCI_REG8(0x631e), 0xb8 },
++	{ CCI_REG8(0x6322), 0x00 },
++	{ CCI_REG8(0x6323), 0x6c },
++	{ CCI_REG8(0x6324), 0x50 },
++	{ CCI_REG8(0x6325), 0x4c },
++	{ CCI_REG8(0x6326), 0x05 },
++	{ CCI_REG8(0x6327), 0x02 },
++	{ CCI_REG8(0x6328), 0xc2 },
++	{ CCI_REG8(0x6329), 0x68 },
++	{ CCI_REG8(0x632a), 0x28 },
++	{ CCI_REG8(0x632b), 0x13 },
++	{ CCI_REG8(0x632c), 0x13 },
++	{ CCI_REG8(0x632d), 0xc0 },
++	{ CCI_REG8(0x6331), 0x07 },
++	{ CCI_REG8(0x6332), 0x27 },
++	{ CCI_REG8(0x6333), 0x42 },
++	{ CCI_REG8(0x6334), 0xa0 },
++	{ CCI_REG8(0x6335), 0x54 },
++	{ CCI_REG8(0x6336), 0x38 },
++	{ CCI_REG8(0x6337), 0x15 },
++	{ CCI_REG8(0x6338), 0x03 },
++	{ CCI_REG8(0x6339), 0x09 },
++	{ CCI_REG8(0x633a), 0x70 },
++	{ CCI_REG8(0x633b), 0xfc },
++	{ CCI_REG8(0x6361), 0x09 },
++	{ CCI_REG8(0x6362), 0x87 },
++	{ CCI_REG8(0x6363), 0x96 },
++	{ CCI_REG8(0x6364), 0x03 },
++	{ CCI_REG8(0x6365), 0x0f },
++	{ CCI_REG8(0x6366), 0x2c },
++	{ CCI_REG8(0x6367), 0x06 },
++	{ CCI_REG8(0x6368), 0x1e },
++	{ CCI_REG8(0x6369), 0x58 },
++	{ CCI_REG8(0x636d), 0x18 },
++	{ CCI_REG8(0x636e), 0x21 },
++	{ CCI_REG8(0x636f), 0x60 },
++	{ CCI_REG8(0x6370), 0x30 },
++	{ CCI_REG8(0x6371), 0x42 },
++	{ CCI_REG8(0x6372), 0xc0 },
++	{ CCI_REG8(0x6373), 0x60 },
++	{ CCI_REG8(0x6374), 0x85 },
++	{ CCI_REG8(0x6379), 0x51 },
++	{ CCI_REG8(0x637a), 0x91 },
++	{ CCI_REG8(0x637b), 0x91 },
++	{ CCI_REG8(0x637c), 0x92 },
++	{ CCI_REG8(0x637f), 0x8c },
++	{ CCI_REG8(0x6380), 0x8c },
++	{ CCI_REG8(0x6381), 0x8c },
++	{ CCI_REG8(0x6382), 0x90 },
++	{ CCI_REG8(0x6385), 0x64 },
++	{ CCI_REG8(0x6386), 0x64 },
++	{ CCI_REG8(0x6387), 0x64 },
++	{ CCI_REG8(0x638a), 0x23 },
++	{ CCI_REG8(0x638b), 0x23 },
++	{ CCI_REG8(0x638c), 0x23 },
++	{ CCI_REG8(0x638d), 0x24 },
++	{ CCI_REG8(0x6e5b), 0x00 },
++	{ CCI_REG8(0x6f28), 0x06 },
++	{ CCI_REG8(0x904a), 0x00 },
++	{ CCI_REG8(0x904c), 0x00 },
++	{ CCI_REG8(0x904d), 0x0a },
++	{ CCI_REG8(0x904e), 0x0a },
++	{ CCI_REG8(0x904f), 0x00 },
++	{ CCI_REG8(0x9330), 0x00 },
++	{ CCI_REG8(0x9331), 0x32 },
++	{ CCI_REG8(0x9332), 0x00 },
++	{ CCI_REG8(0x9333), 0x28 },
++	{ CCI_REG8(0x9338), 0x00 },
++	{ CCI_REG8(0x9339), 0x32 },
++	{ CCI_REG8(0x933a), 0x00 },
++	{ CCI_REG8(0x933b), 0x28 },
++	{ CCI_REG8(0x9340), 0x00 },
++	{ CCI_REG8(0x9341), 0x32 },
++	{ CCI_REG8(0x9342), 0x00 },
++	{ CCI_REG8(0x9343), 0x28 },
++	{ CCI_REG8(0x9348), 0x00 },
++	{ CCI_REG8(0x9349), 0x32 },
++	{ CCI_REG8(0x934a), 0x00 },
++	{ CCI_REG8(0x934b), 0x28 },
++	{ CCI_REG8(0xa800), 0x08 },
++	{ CCI_REG8(0xa80a), 0x02 },
++	{ CCI_REG8(0xa80c), 0x0c },
++	{ CCI_REG8(0xa80d), 0x00 },
++	{ CCI_REG8(0xa816), 0x0a },
++	{ CCI_REG8(0xa818), 0x7f },
++	{ CCI_REG8(0xa819), 0xff },
++	{ CCI_REG8(0xbc41), 0x01 },
++	{ CCI_REG8(0xbcac), 0x00 },
++	{ CCI_REG8(0xbcad), 0x10 },
++	{ CCI_REG8(0xcd1c), 0x03 },
++	{ CCI_REG8(0xcd1d), 0x80 },
++	{ CCI_REG8(0xe013), 0x01 },
++	{ CCI_REG8(0xe022), 0x01 },
++	{ CCI_REG8(0xe023), 0x01 },
++};
++
++static const struct cci_reg_sequence imx374_3648x2736_regs[] = {
++	{ CCI_REG8(0x0112), 0x0a },	/* CSI data format: RAW10 in, RAW10 out */
++	{ CCI_REG8(0x0113), 0x0a },
++	{ CCI_REG8(0x0114), 0x03 },	/* CSI lane mode: 4 lanes */
++	{ CCI_REG8(0x0220), 0x61 },	/* HDR mode */
++	{ CCI_REG8(0x0221), 0x11 },
++	{ CCI_REG8(0x0222), 0x01 },
++	{ CCI_REG8(0x0340), 0x0b },	/* frame length lines */
++	{ CCI_REG8(0x0341), 0x08 },
++	{ CCI_REG8(0x0342), 0x26 },	/* line length pck */
++	{ CCI_REG8(0x0343), 0xb0 },
++	{ CCI_REG8(0x0387), 0x01 },	/* y odd increment */
++	{ CCI_REG8(0x0900), 0x00 },	/* binning mode */
++	{ CCI_REG8(0x0901), 0x11 },	/* binning type */
++	{ CCI_REG8(0x31a0), 0x03 },
++	{ CCI_REG8(0x3232), 0x01 },
++	{ CCI_REG8(0x3246), 0x01 },
++	{ CCI_REG8(0x3440), 0x00 },
++	{ CCI_REG8(0x3f56), 0x01 },
++	{ CCI_REG8(0x3f57), 0x1b },
++	{ CCI_REG8(0x0344), 0x00 },	/* x addr start */
++	{ CCI_REG8(0x0345), 0xa8 },
++	{ CCI_REG8(0x0346), 0x00 },	/* y addr start */
++	{ CCI_REG8(0x0347), 0x00 },
++	{ CCI_REG8(0x0348), 0x0e },	/* x addr end */
++	{ CCI_REG8(0x0349), 0xe7 },
++	{ CCI_REG8(0x034a), 0x0a },	/* y addr end */
++	{ CCI_REG8(0x034b), 0xaf },
++	{ CCI_REG8(0x034c), 0x0e },	/* x output size */
++	{ CCI_REG8(0x034d), 0x40 },
++	{ CCI_REG8(0x034e), 0x0a },	/* y output size */
++	{ CCI_REG8(0x034f), 0xb0 },
++	{ CCI_REG8(0x0408), 0x00 },	/* digital crop x offset */
++	{ CCI_REG8(0x0409), 0x00 },
++	{ CCI_REG8(0x040a), 0x00 },	/* digital crop y offset */
++	{ CCI_REG8(0x040b), 0x00 },
++	{ CCI_REG8(0x040c), 0x0e },	/* digital crop width */
++	{ CCI_REG8(0x040d), 0x40 },
++	{ CCI_REG8(0x040e), 0x0a },	/* digital crop height */
++	{ CCI_REG8(0x040f), 0xb0 },
++	{ CCI_REG8(0x0303), 0x02 },	/* vt sys clk div */
++	{ CCI_REG8(0x0305), 0x04 },	/* pre pll clk div */
++	{ CCI_REG8(0x0306), 0x00 },	/* pll multiplier */
++	{ CCI_REG8(0x0307), 0xd2 },
++	{ CCI_REG8(0x030b), 0x01 },	/* op sys clk div */
++	{ CCI_REG8(0x030d), 0x04 },	/* op pre pll clk div */
++	{ CCI_REG8(0x030e), 0x01 },	/* op pll multiplier */
++	{ CCI_REG8(0x030f), 0x2f },
++	{ CCI_REG8(0x0310), 0x01 },	/* pll mode */
++	{ CCI_REG8(0x31a3), 0x01 },
++	{ CCI_REG8(0x3fa8), 0x01 },
++	{ CCI_REG8(0x3fa9), 0xa4 },
++	{ CCI_REG8(0x3ff4), 0x00 },
++	{ CCI_REG8(0x3ff5), 0x3c },
++	{ CCI_REG8(0x4d06), 0x06 },
++	{ CCI_REG8(0x4d07), 0xba },
++	{ CCI_REG8(0x4d51), 0xe7 },
++	{ CCI_REG8(0x4d79), 0x22 },
++	{ CCI_REG8(0x4d81), 0x7a },
++	{ CCI_REG8(0x4d86), 0x02 },
++	{ CCI_REG8(0x4d87), 0x3a },
++	{ CCI_REG8(0x4d89), 0x37 },
++	{ CCI_REG8(0x4d8d), 0x74 },
++	{ CCI_REG8(0x4de9), 0x37 },
++	{ CCI_REG8(0x4ded), 0xf7 },
++	{ CCI_REG8(0x5699), 0xb8 },
++	{ CCI_REG8(0x570b), 0xf7 },
++	{ CCI_REG8(0x578c), 0x07 },
++	{ CCI_REG8(0x578d), 0xff },
++	{ CCI_REG8(0x578e), 0x00 },
++	{ CCI_REG8(0x578f), 0x00 },
++	{ CCI_REG8(0x5790), 0x01 },
++	{ CCI_REG8(0x5791), 0x69 },
++	{ CCI_REG8(0x5792), 0x01 },
++	{ CCI_REG8(0x5793), 0x82 },
++	{ CCI_REG8(0x5a45), 0x7a },
++	{ CCI_REG8(0x5a47), 0x74 },
++	{ CCI_REG8(0x5b1b), 0x7a },
++	{ CCI_REG8(0x5b1d), 0xf7 },
++	{ CCI_REG8(0x5b1f), 0x74 },
++	{ CCI_REG8(0x5b21), 0x7a },
++	{ CCI_REG8(0x5b23), 0xf7 },
++	{ CCI_REG8(0x5b25), 0x74 },
++	{ CCI_REG8(0x5b27), 0x7a },
++	{ CCI_REG8(0x5b29), 0xf7 },
++	{ CCI_REG8(0x5b2b), 0x74 },
++	{ CCI_REG8(0x5b2d), 0x7a },
++	{ CCI_REG8(0x5b2f), 0xf7 },
++	{ CCI_REG8(0x5b31), 0x74 },
++	{ CCI_REG8(0x636e), 0x21 },
++	{ CCI_REG8(0x6371), 0x42 },
++	{ CCI_REG8(0x6373), 0x60 },
++	{ CCI_REG8(0x6374), 0x85 },
++	{ CCI_REG8(0x63b0), 0xb6 },
++	{ CCI_REG8(0x63b1), 0xee },
++	{ CCI_REG8(0x63b6), 0x7e },
++	{ CCI_REG8(0x63b7), 0xe2 },
++	{ CCI_REG8(0x63bb), 0xb7 },
++	{ CCI_REG8(0x63bc), 0x5b },
++	{ CCI_REG8(0x63bd), 0xad },
++	{ CCI_REG8(0x63be), 0xd6 },
++	{ CCI_REG8(0x63bf), 0xe0 },
++	{ CCI_REG8(0x6e41), 0x04 },
++	{ CCI_REG8(0x6e45), 0x08 },
++	{ CCI_REG8(0x6e46), 0x02 },
++	{ CCI_REG8(0x6e47), 0xff },
++	{ CCI_REG8(0x6e62), 0x02 },
++	{ CCI_REG8(0x934b), 0x28 },
++	{ CCI_REG8(0x934d), 0x00 },
++	{ CCI_REG8(0x0202), 0x0a },	/* coarse integration time */
++	{ CCI_REG8(0x0203), 0xf8 },
++	{ CCI_REG8(0x0224), 0x0a },	/* second coarse integration time */
++	{ CCI_REG8(0x0225), 0xf8 },
++	{ CCI_REG8(0x0204), 0x00 },	/* analogue gain */
++	{ CCI_REG8(0x0205), 0x00 },
++	{ CCI_REG8(0x0216), 0x00 },	/* second analogue gain */
++	{ CCI_REG8(0x0217), 0x00 },
++	{ CCI_REG8(0x020e), 0x01 },	/* digital gain */
++	{ CCI_REG8(0x020f), 0x00 },
++	{ CCI_REG8(0x0218), 0x01 },
++	{ CCI_REG8(0x0219), 0x00 },
++};
++
++static const struct cci_reg_sequence imx374_1824x1368_regs[] = {
++	{ CCI_REG8(0x0112), 0x0a },	/* CSI data format: RAW10 in, RAW10 out */
++	{ CCI_REG8(0x0113), 0x0a },
++	{ CCI_REG8(0x0114), 0x03 },	/* CSI lane mode: 4 lanes */
++	{ CCI_REG8(0x0220), 0x00 },	/* HDR mode */
++	{ CCI_REG8(0x0221), 0x11 },
++	{ CCI_REG8(0x0222), 0x01 },
++	{ CCI_REG8(0x0340), 0x05 },	/* frame length lines */
++	{ CCI_REG8(0x0341), 0x98 },
++	{ CCI_REG8(0x0342), 0x4c },	/* line length pck */
++	{ CCI_REG8(0x0343), 0x30 },
++	{ CCI_REG8(0x0387), 0x01 },	/* y odd increment */
++	{ CCI_REG8(0x0900), 0x01 },	/* binning mode */
++	{ CCI_REG8(0x0901), 0x22 },	/* binning type */
++	{ CCI_REG8(0x31a0), 0x03 },
++	{ CCI_REG8(0x3232), 0x01 },
++	{ CCI_REG8(0x3246), 0x01 },
++	{ CCI_REG8(0x3440), 0x00 },
++	{ CCI_REG8(0x3f56), 0x02 },
++	{ CCI_REG8(0x3f57), 0x2e },
++	{ CCI_REG8(0x0344), 0x00 },	/* x addr start */
++	{ CCI_REG8(0x0345), 0xa8 },
++	{ CCI_REG8(0x0346), 0x00 },	/* y addr start */
++	{ CCI_REG8(0x0347), 0x00 },
++	{ CCI_REG8(0x0348), 0x0e },	/* x addr end */
++	{ CCI_REG8(0x0349), 0xe7 },
++	{ CCI_REG8(0x034a), 0x0a },	/* y addr end */
++	{ CCI_REG8(0x034b), 0xaf },
++	{ CCI_REG8(0x034c), 0x07 },	/* x output size */
++	{ CCI_REG8(0x034d), 0x20 },
++	{ CCI_REG8(0x034e), 0x05 },	/* y output size */
++	{ CCI_REG8(0x034f), 0x58 },
++	{ CCI_REG8(0x0408), 0x00 },	/* digital crop x offset */
++	{ CCI_REG8(0x0409), 0x00 },
++	{ CCI_REG8(0x040a), 0x00 },	/* digital crop y offset */
++	{ CCI_REG8(0x040b), 0x00 },
++	{ CCI_REG8(0x040c), 0x07 },	/* digital crop width */
++	{ CCI_REG8(0x040d), 0x20 },
++	{ CCI_REG8(0x040e), 0x05 },	/* digital crop height */
++	{ CCI_REG8(0x040f), 0x58 },
++	{ CCI_REG8(0x0303), 0x02 },	/* vt sys clk div */
++	{ CCI_REG8(0x0305), 0x04 },	/* pre pll clk div */
++	{ CCI_REG8(0x0306), 0x00 },	/* pll multiplier */
++	{ CCI_REG8(0x0307), 0xd2 },
++	{ CCI_REG8(0x030b), 0x01 },	/* op sys clk div */
++	{ CCI_REG8(0x030d), 0x04 },	/* op pre pll clk div */
++	{ CCI_REG8(0x030e), 0x01 },	/* op pll multiplier */
++	{ CCI_REG8(0x030f), 0x2b },
++	{ CCI_REG8(0x0310), 0x01 },	/* pll mode */
++	{ CCI_REG8(0x31a3), 0x01 },
++	{ CCI_REG8(0x3f8c), 0x00 },
++	{ CCI_REG8(0x3f8d), 0x00 },
++	{ CCI_REG8(0x3f8e), 0x00 },
++	{ CCI_REG8(0x3f8f), 0x00 },
++	{ CCI_REG8(0x3fa8), 0x00 },
++	{ CCI_REG8(0x3fa9), 0x00 },
++	{ CCI_REG8(0x3ff4), 0x03 },
++	{ CCI_REG8(0x3ff5), 0x84 },
++	{ CCI_REG8(0x4d06), 0x06 },
++	{ CCI_REG8(0x4d07), 0xba },
++	{ CCI_REG8(0x4d51), 0xe7 },
++	{ CCI_REG8(0x4d79), 0x22 },
++	{ CCI_REG8(0x4d81), 0x7a },
++	{ CCI_REG8(0x4d86), 0x02 },
++	{ CCI_REG8(0x4d87), 0x3a },
++	{ CCI_REG8(0x4d89), 0x37 },
++	{ CCI_REG8(0x4d8d), 0x74 },
++	{ CCI_REG8(0x4de9), 0x37 },
++	{ CCI_REG8(0x4ded), 0xf7 },
++	{ CCI_REG8(0x5699), 0xb8 },
++	{ CCI_REG8(0x570b), 0xf7 },
++	{ CCI_REG8(0x578c), 0x07 },
++	{ CCI_REG8(0x578d), 0xff },
++	{ CCI_REG8(0x578e), 0x00 },
++	{ CCI_REG8(0x578f), 0x00 },
++	{ CCI_REG8(0x5790), 0x01 },
++	{ CCI_REG8(0x5791), 0x69 },
++	{ CCI_REG8(0x5792), 0x01 },
++	{ CCI_REG8(0x5793), 0x82 },
++	{ CCI_REG8(0x5a45), 0x7a },
++	{ CCI_REG8(0x5a47), 0x74 },
++	{ CCI_REG8(0x5b1b), 0x7a },
++	{ CCI_REG8(0x5b1d), 0xf7 },
++	{ CCI_REG8(0x5b1f), 0x74 },
++	{ CCI_REG8(0x5b21), 0x7a },
++	{ CCI_REG8(0x5b23), 0xf7 },
++	{ CCI_REG8(0x5b25), 0x74 },
++	{ CCI_REG8(0x5b27), 0x7a },
++	{ CCI_REG8(0x5b29), 0xf7 },
++	{ CCI_REG8(0x5b2b), 0x74 },
++	{ CCI_REG8(0x5b2d), 0x7a },
++	{ CCI_REG8(0x5b2f), 0xf7 },
++	{ CCI_REG8(0x5b31), 0x74 },
++	{ CCI_REG8(0x636e), 0x21 },
++	{ CCI_REG8(0x6371), 0x42 },
++	{ CCI_REG8(0x6373), 0x60 },
++	{ CCI_REG8(0x6374), 0x85 },
++	{ CCI_REG8(0x63b0), 0xb6 },
++	{ CCI_REG8(0x63b1), 0xee },
++	{ CCI_REG8(0x63b6), 0x7e },
++	{ CCI_REG8(0x63b7), 0xe2 },
++	{ CCI_REG8(0x63bb), 0xb7 },
++	{ CCI_REG8(0x63bc), 0x5b },
++	{ CCI_REG8(0x63bd), 0xad },
++	{ CCI_REG8(0x63be), 0xd6 },
++	{ CCI_REG8(0x63bf), 0xe0 },
++	{ CCI_REG8(0x6e40), 0x00 },
++	{ CCI_REG8(0x6e41), 0x04 },
++	{ CCI_REG8(0x6e44), 0x00 },
++	{ CCI_REG8(0x6e45), 0x08 },
++	{ CCI_REG8(0x6e46), 0x02 },
++	{ CCI_REG8(0x6e47), 0xff },
++	{ CCI_REG8(0x6e62), 0x00 },
++	{ CCI_REG8(0x934b), 0x28 },
++	{ CCI_REG8(0x934d), 0x00 },
++	{ CCI_REG8(0x0202), 0x05 },	/* coarse integration time */
++	{ CCI_REG8(0x0203), 0x88 },
++	{ CCI_REG8(0x0224), 0x01 },	/* second coarse integration time */
++	{ CCI_REG8(0x0225), 0xf4 },
++	{ CCI_REG8(0x0204), 0x00 },	/* analogue gain */
++	{ CCI_REG8(0x0205), 0x00 },
++	{ CCI_REG8(0x0216), 0x00 },	/* second analogue gain */
++	{ CCI_REG8(0x0217), 0x00 },
++	{ CCI_REG8(0x020e), 0x01 },	/* digital gain */
++	{ CCI_REG8(0x020f), 0x00 },
++	{ CCI_REG8(0x0218), 0x01 },
++	{ CCI_REG8(0x0219), 0x00 },
++};
++
++static const struct cci_reg_sequence imx374_1988x1120_regs[] = {
++	{ CCI_REG8(0x0112), 0x0a },	/* CSI data format: RAW10 in, RAW10 out */
++	{ CCI_REG8(0x0113), 0x0a },
++	{ CCI_REG8(0x0114), 0x03 },	/* CSI lane mode: 4 lanes */
++	{ CCI_REG8(0x0220), 0x00 },	/* HDR mode */
++	{ CCI_REG8(0x0221), 0x11 },
++	{ CCI_REG8(0x0222), 0x01 },
++	{ CCI_REG8(0x0340), 0x0d },	/* frame length lines */
++	{ CCI_REG8(0x0341), 0xb8 },
++	{ CCI_REG8(0x0342), 0x1f },	/* line length pck */
++	{ CCI_REG8(0x0343), 0x20 },
++	{ CCI_REG8(0x0387), 0x01 },	/* y odd increment */
++	{ CCI_REG8(0x0900), 0x01 },	/* binning mode */
++	{ CCI_REG8(0x0901), 0x22 },	/* binning type */
++	{ CCI_REG8(0x31a0), 0x03 },
++	{ CCI_REG8(0x3232), 0x01 },
++	{ CCI_REG8(0x3246), 0x01 },
++	{ CCI_REG8(0x3440), 0x00 },
++	{ CCI_REG8(0x3f56), 0x00 },
++	{ CCI_REG8(0x3f57), 0xe4 },
++	{ CCI_REG8(0x0344), 0x00 },	/* x addr start */
++	{ CCI_REG8(0x0345), 0x00 },
++	{ CCI_REG8(0x0346), 0x00 },	/* y addr start */
++	{ CCI_REG8(0x0347), 0xf8 },
++	{ CCI_REG8(0x0348), 0x0f },	/* x addr end */
++	{ CCI_REG8(0x0349), 0x8f },
++	{ CCI_REG8(0x034a), 0x09 },	/* y addr end */
++	{ CCI_REG8(0x034b), 0xb7 },
++	{ CCI_REG8(0x034c), 0x07 },	/* x output size */
++	{ CCI_REG8(0x034d), 0xc4 },
++	{ CCI_REG8(0x034e), 0x04 },	/* y output size */
++	{ CCI_REG8(0x034f), 0x60 },
++	{ CCI_REG8(0x0408), 0x00 },	/* digital crop x offset */
++	{ CCI_REG8(0x0409), 0x02 },
++	{ CCI_REG8(0x040a), 0x00 },	/* digital crop y offset */
++	{ CCI_REG8(0x040b), 0x00 },
++	{ CCI_REG8(0x040c), 0x07 },	/* digital crop width */
++	{ CCI_REG8(0x040d), 0xc4 },
++	{ CCI_REG8(0x040e), 0x04 },	/* digital crop height */
++	{ CCI_REG8(0x040f), 0x60 },
++	{ CCI_REG8(0x0303), 0x02 },	/* vt sys clk div */
++	{ CCI_REG8(0x0305), 0x04 },	/* pre pll clk div */
++	{ CCI_REG8(0x0306), 0x00 },	/* pll multiplier */
++	{ CCI_REG8(0x0307), 0xd2 },
++	{ CCI_REG8(0x030b), 0x02 },	/* op sys clk div */
++	{ CCI_REG8(0x030d), 0x04 },	/* op pre pll clk div */
++	{ CCI_REG8(0x030e), 0x01 },	/* op pll multiplier */
++	{ CCI_REG8(0x030f), 0x0a },
++	{ CCI_REG8(0x0310), 0x01 },	/* pll mode */
++	{ CCI_REG8(0x31a3), 0x01 },
++	{ CCI_REG8(0x3fa8), 0x00 },
++	{ CCI_REG8(0x3fa9), 0x0a },
++	{ CCI_REG8(0x3ff4), 0x01 },
++	{ CCI_REG8(0x3ff5), 0xec },
++	{ CCI_REG8(0x4d06), 0x06 },
++	{ CCI_REG8(0x4d07), 0xba },
++	{ CCI_REG8(0x4d51), 0xe7 },
++	{ CCI_REG8(0x4d79), 0x22 },
++	{ CCI_REG8(0x4d81), 0x7a },
++	{ CCI_REG8(0x4d86), 0x02 },
++	{ CCI_REG8(0x4d87), 0x3a },
++	{ CCI_REG8(0x4d89), 0x37 },
++	{ CCI_REG8(0x4d8d), 0x74 },
++	{ CCI_REG8(0x4de9), 0x37 },
++	{ CCI_REG8(0x4ded), 0xf7 },
++	{ CCI_REG8(0x5699), 0xb8 },
++	{ CCI_REG8(0x570b), 0xf7 },
++	{ CCI_REG8(0x578c), 0x07 },
++	{ CCI_REG8(0x578d), 0xff },
++	{ CCI_REG8(0x578e), 0x00 },
++	{ CCI_REG8(0x578f), 0x00 },
++	{ CCI_REG8(0x5790), 0x01 },
++	{ CCI_REG8(0x5791), 0x69 },
++	{ CCI_REG8(0x5792), 0x01 },
++	{ CCI_REG8(0x5793), 0x82 },
++	{ CCI_REG8(0x5a45), 0x7a },
++	{ CCI_REG8(0x5a47), 0x74 },
++	{ CCI_REG8(0x5b1b), 0x7a },
++	{ CCI_REG8(0x5b1d), 0xf7 },
++	{ CCI_REG8(0x5b1f), 0x74 },
++	{ CCI_REG8(0x5b21), 0x7a },
++	{ CCI_REG8(0x5b23), 0xf7 },
++	{ CCI_REG8(0x5b25), 0x74 },
++	{ CCI_REG8(0x5b27), 0x7a },
++	{ CCI_REG8(0x5b29), 0xf7 },
++	{ CCI_REG8(0x5b2b), 0x74 },
++	{ CCI_REG8(0x5b2d), 0x7a },
++	{ CCI_REG8(0x5b2f), 0xf7 },
++	{ CCI_REG8(0x5b31), 0x74 },
++	{ CCI_REG8(0x636e), 0x21 },
++	{ CCI_REG8(0x6371), 0x42 },
++	{ CCI_REG8(0x6373), 0x60 },
++	{ CCI_REG8(0x6374), 0x85 },
++	{ CCI_REG8(0x63b0), 0xb6 },
++	{ CCI_REG8(0x63b1), 0xee },
++	{ CCI_REG8(0x63b6), 0x7e },
++	{ CCI_REG8(0x63b7), 0xe2 },
++	{ CCI_REG8(0x63bb), 0xb7 },
++	{ CCI_REG8(0x63bc), 0x5b },
++	{ CCI_REG8(0x63bd), 0xad },
++	{ CCI_REG8(0x63be), 0xd6 },
++	{ CCI_REG8(0x63bf), 0xe0 },
++	{ CCI_REG8(0x6e41), 0x04 },
++	{ CCI_REG8(0x6e45), 0x08 },
++	{ CCI_REG8(0x6e46), 0x02 },
++	{ CCI_REG8(0x6e47), 0xff },
++	{ CCI_REG8(0x6e62), 0x00 },
++	{ CCI_REG8(0x934b), 0x28 },
++	{ CCI_REG8(0x934d), 0x00 },
++	{ CCI_REG8(0x0202), 0x0d },	/* coarse integration time */
++	{ CCI_REG8(0x0203), 0xa8 },
++	{ CCI_REG8(0x0224), 0x01 },	/* second coarse integration time */
++	{ CCI_REG8(0x0225), 0xf4 },
++	{ CCI_REG8(0x0204), 0x00 },	/* analogue gain */
++	{ CCI_REG8(0x0205), 0x00 },
++	{ CCI_REG8(0x0216), 0x00 },	/* second analogue gain */
++	{ CCI_REG8(0x0217), 0x00 },
++	{ CCI_REG8(0x020e), 0x01 },	/* digital gain */
++	{ CCI_REG8(0x020f), 0x00 },
++	{ CCI_REG8(0x0218), 0x01 },
++	{ CCI_REG8(0x0219), 0x00 },
++};
++
++static const struct imx374_mode supported_modes[] = {
++	{
++		/* Stock "05D_HDR3_D1818_3648x2736_30_24": 4:3, 30 fps */
++		.width = 3648,
++		.height = 2736,
++		.crop = {
++			.left = 168,
++			.top = 0,
++			.width = 3648,
++			.height = 2736,
++		},
++		.llp = 9904,
++		.fll = 2824,
++		.exposure_def = 2808,
++		.link_freq_index = IMX374_LINK_FREQ_909MHZ,
++		.hdr = true,
++		.regs = imx374_3648x2736_regs,
++		.num_regs = ARRAY_SIZE(imx374_3648x2736_regs),
++	},
++	{
++		/* Stock's unnamed 1824x1368 mode: 2x2 binned 4:3, 30 fps */
++		.width = 1824,
++		.height = 1368,
++		.crop = {
++			.left = 168,
++			.top = 0,
++			.width = 3648,
++			.height = 2736,
++		},
++		.llp = 19504,
++		.fll = 1432,
++		.exposure_def = 1416,
++		.link_freq_index = IMX374_LINK_FREQ_897MHZ,
++		.regs = imx374_1824x1368_regs,
++		.num_regs = ARRAY_SIZE(imx374_1824x1368_regs),
++	},
++	{
++		/* Stock "13A_NML3_D798_1988x1120_30_24": 2x2 binned 16:9, 30 fps */
++		.width = 1988,
++		.height = 1120,
++		.crop = {
++			.left = 4,
++			.top = 248,
++			.width = 3976,
++			.height = 2240,
++		},
++		.llp = 7968,
++		.fll = 3512,
++		.exposure_def = 3496,
++		.link_freq_index = IMX374_LINK_FREQ_399MHZ,
++		.regs = imx374_1988x1120_regs,
++		.num_regs = ARRAY_SIZE(imx374_1988x1120_regs),
++	},
++};
++
++struct imx374 {
++	struct device *dev;
++	struct v4l2_subdev sd;
++	struct media_pad pad;
++
++	struct regmap *regmap;
++	struct clk *xclk;
++
++	struct gpio_desc *reset_gpio;
++	struct regulator_bulk_data supplies[IMX374_NUM_SUPPLIES];
++
++	/* Link frequencies listed in the firmware node, by menu index */
++	unsigned long link_freq_bitmap;
++
++	struct v4l2_ctrl_handler ctrl_handler;
++	struct v4l2_ctrl *pixel_rate;
++	struct v4l2_ctrl *link_freq;
++	struct v4l2_ctrl *exposure;
++	struct v4l2_ctrl *analogue_gain;
++	struct v4l2_ctrl *vblank;
++	struct v4l2_ctrl *hblank;
++
++	/* Mode of the active state, protected by the state lock */
++	const struct imx374_mode *mode;
++};
++
++static inline struct imx374 *to_imx374(struct v4l2_subdev *sd)
++{
++	return container_of(sd, struct imx374, sd);
++}
++
++static bool imx374_mode_usable(struct imx374 *imx374,
++			       const struct imx374_mode *mode)
++{
++	return imx374->link_freq_bitmap & BIT(mode->link_freq_index);
++}
++
++static const struct imx374_mode *imx374_default_mode(struct imx374 *imx374)
++{
++	unsigned int i;
++
++	for (i = 0; i < ARRAY_SIZE(supported_modes); i++)
++		if (imx374_mode_usable(imx374, &supported_modes[i]))
++			return &supported_modes[i];
++
++	return NULL;
++}
++
++static const struct imx374_mode *imx374_find_mode(struct imx374 *imx374,
++						  u32 width, u32 height)
++{
++	const struct imx374_mode *best = NULL;
++	unsigned int best_err = UINT_MAX;
++	unsigned int i;
++
++	for (i = 0; i < ARRAY_SIZE(supported_modes); i++) {
++		const struct imx374_mode *mode = &supported_modes[i];
++		unsigned int err;
++
++		if (!imx374_mode_usable(imx374, mode))
++			continue;
++
++		err = abs((int)mode->width - (int)width) +
++		      abs((int)mode->height - (int)height);
++		if (err < best_err) {
++			best_err = err;
++			best = mode;
++		}
++	}
++
++	return best;
++}
++
++/* -----------------------------------------------------------------------------
++ * Controls
++ */
++
++static int imx374_set_ctrl(struct v4l2_ctrl *ctrl)
++{
++	struct imx374 *imx374 = container_of(ctrl->handler, struct imx374,
++					     ctrl_handler);
++	const struct imx374_mode *mode = imx374->mode;
++	int ret = 0;
++
++	if (ctrl->id == V4L2_CID_VBLANK) {
++		int exposure_max = mode->height + ctrl->val -
++				   IMX374_EXPOSURE_OFFSET;
++
++		exposure_max = min(exposure_max, IMX374_EXPOSURE_MAX);
++		ret = __v4l2_ctrl_modify_range(imx374->exposure,
++					       imx374->exposure->minimum,
++					       exposure_max,
++					       imx374->exposure->step,
++					       min_t(int, exposure_max,
++						     mode->exposure_def));
++		if (ret)
++			return ret;
++	}
++
++	/* Registers are written only while the sensor is powered */
++	if (pm_runtime_get_if_in_use(imx374->dev) == 0)
++		return 0;
++
++	switch (ctrl->id) {
++	case V4L2_CID_EXPOSURE:
++		cci_write(imx374->regmap, IMX374_REG_EXPOSURE, ctrl->val, &ret);
++		if (mode->hdr)
++			cci_write(imx374->regmap, IMX374_REG_EXPOSURE_2ND,
++				  ctrl->val, &ret);
++		break;
++	case V4L2_CID_ANALOGUE_GAIN:
++		cci_write(imx374->regmap, IMX374_REG_ANALOG_GAIN, ctrl->val,
++			  &ret);
++		if (mode->hdr)
++			cci_write(imx374->regmap, IMX374_REG_ANALOG_GAIN_2ND,
++				  ctrl->val, &ret);
++		break;
++	case V4L2_CID_DIGITAL_GAIN:
++		cci_write(imx374->regmap, IMX374_REG_DIGITAL_GAIN, ctrl->val,
++			  &ret);
++		break;
++	case V4L2_CID_VBLANK:
++		cci_write(imx374->regmap, IMX374_REG_FRM_LENGTH_LINES,
++			  mode->height + ctrl->val, &ret);
++		break;
++	case V4L2_CID_TEST_PATTERN:
++		/* Stock writes 0xb000/0xb001 = 0 with every pattern change */
++		cci_write(imx374->regmap, IMX374_REG_TP_B000, 0, &ret);
++		cci_write(imx374->regmap, IMX374_REG_TP_B001, 0, &ret);
++		cci_write(imx374->regmap, IMX374_REG_TEST_PATTERN, ctrl->val,
++			  &ret);
++		break;
++	case V4L2_CID_TEST_PATTERN_RED:
++		cci_write(imx374->regmap, IMX374_REG_TESTP_RED, ctrl->val,
++			  &ret);
++		break;
++	case V4L2_CID_TEST_PATTERN_GREENR:
++		cci_write(imx374->regmap, IMX374_REG_TESTP_GREENR, ctrl->val,
++			  &ret);
++		break;
++	case V4L2_CID_TEST_PATTERN_BLUE:
++		cci_write(imx374->regmap, IMX374_REG_TESTP_BLUE, ctrl->val,
++			  &ret);
++		break;
++	case V4L2_CID_TEST_PATTERN_GREENB:
++		cci_write(imx374->regmap, IMX374_REG_TESTP_GREENB, ctrl->val,
++			  &ret);
++		break;
++	case V4L2_CID_LINK_FREQ:
++	case V4L2_CID_PIXEL_RATE:
++	case V4L2_CID_HBLANK:
++		/* Read-only, fixed by the mode list */
++		break;
++	default:
++		ret = -EINVAL;
++		break;
++	}
++
++	pm_runtime_put_autosuspend(imx374->dev);
++
++	return ret;
++}
++
++static const struct v4l2_ctrl_ops imx374_ctrl_ops = {
++	.s_ctrl = imx374_set_ctrl,
++};
++
++static int imx374_init_controls(struct imx374 *imx374)
++{
++	const struct imx374_mode *mode = imx374->mode;
++	struct v4l2_ctrl_handler *hdl = &imx374->ctrl_handler;
++	struct v4l2_fwnode_device_properties props;
++	unsigned int i;
++	int ret;
++
++	ret = v4l2_ctrl_handler_init(hdl, 14);
++	if (ret)
++		return ret;
++
++	imx374->pixel_rate = v4l2_ctrl_new_std(hdl, &imx374_ctrl_ops,
++					       V4L2_CID_PIXEL_RATE,
++					       IMX374_PIXEL_RATE,
++					       IMX374_PIXEL_RATE, 1,
++					       IMX374_PIXEL_RATE);
++
++	imx374->link_freq =
++		v4l2_ctrl_new_int_menu(hdl, &imx374_ctrl_ops,
++				       V4L2_CID_LINK_FREQ,
++				       ARRAY_SIZE(imx374_link_freq_menu) - 1,
++				       mode->link_freq_index,
++				       imx374_link_freq_menu);
++	if (imx374->link_freq)
++		imx374->link_freq->flags |= V4L2_CTRL_FLAG_READ_ONLY;
++
++	imx374->hblank = v4l2_ctrl_new_std(hdl, &imx374_ctrl_ops,
++					   V4L2_CID_HBLANK,
++					   mode->llp - mode->width,
++					   mode->llp - mode->width, 1,
++					   mode->llp - mode->width);
++	if (imx374->hblank)
++		imx374->hblank->flags |= V4L2_CTRL_FLAG_READ_ONLY;
++
++	/* Frames can be made longer than stock's, not shorter */
++	imx374->vblank = v4l2_ctrl_new_std(hdl, &imx374_ctrl_ops,
++					   V4L2_CID_VBLANK,
++					   mode->fll - mode->height,
++					   IMX374_FLL_MAX - mode->height, 1,
++					   mode->fll - mode->height);
++
++	imx374->exposure = v4l2_ctrl_new_std(hdl, &imx374_ctrl_ops,
++					     V4L2_CID_EXPOSURE,
++					     IMX374_EXPOSURE_MIN,
++					     mode->fll - IMX374_EXPOSURE_OFFSET,
++					     IMX374_EXPOSURE_STEP,
++					     mode->exposure_def);
++
++	imx374->analogue_gain = v4l2_ctrl_new_std(hdl, &imx374_ctrl_ops,
++						  V4L2_CID_ANALOGUE_GAIN,
++						  IMX374_ANA_GAIN_MIN,
++						  IMX374_ANA_GAIN_MAX,
++						  IMX374_ANA_GAIN_STEP,
++						  IMX374_ANA_GAIN_DEFAULT);
++
++	v4l2_ctrl_new_std(hdl, &imx374_ctrl_ops, V4L2_CID_DIGITAL_GAIN,
++			  IMX374_DGTL_GAIN_MIN, IMX374_DGTL_GAIN_MAX,
++			  IMX374_DGTL_GAIN_STEP, IMX374_DGTL_GAIN_DEFAULT);
++
++	v4l2_ctrl_new_std_menu_items(hdl, &imx374_ctrl_ops,
++				     V4L2_CID_TEST_PATTERN,
++				     ARRAY_SIZE(imx374_test_pattern_menu) - 1,
++				     0, 0, imx374_test_pattern_menu);
++	for (i = 0; i < 4; i++) {
++		/*
++		 * V4L2_CID_TEST_PATTERN_GREENR, _BLUE and _GREENB follow
++		 * V4L2_CID_TEST_PATTERN_RED in that order. The solid colour
++		 * pattern is white by default.
++		 */
++		v4l2_ctrl_new_std(hdl, &imx374_ctrl_ops,
++				  V4L2_CID_TEST_PATTERN_RED + i,
++				  IMX374_TESTP_COLOUR_MIN,
++				  IMX374_TESTP_COLOUR_MAX,
++				  IMX374_TESTP_COLOUR_STEP,
++				  IMX374_TESTP_COLOUR_MAX);
++	}
++
++	if (hdl->error) {
++		ret = hdl->error;
++		dev_err_probe(imx374->dev, ret, "control init failed\n");
++		goto error;
++	}
++
++	ret = v4l2_fwnode_device_parse(imx374->dev, &props);
++	if (ret)
++		goto error;
++
++	ret = v4l2_ctrl_new_fwnode_properties(hdl, &imx374_ctrl_ops, &props);
++	if (ret)
++		goto error;
++
++	imx374->sd.ctrl_handler = hdl;
++
++	return 0;
++
++error:
++	v4l2_ctrl_handler_free(hdl);
++
++	return ret;
++}
++
++/* -----------------------------------------------------------------------------
++ * Subdev operations
++ */
++
++static int imx374_enable_streams(struct v4l2_subdev *sd,
++				 struct v4l2_subdev_state *state, u32 pad,
++				 u64 streams_mask)
++{
++	struct imx374 *imx374 = to_imx374(sd);
++	const struct imx374_mode *mode = imx374->mode;
++	int ret;
++
++	ret = pm_runtime_resume_and_get(imx374->dev);
++	if (ret < 0)
++		return ret;
++
++	ret = cci_multi_reg_write(imx374->regmap, imx374_init_regs,
++				  ARRAY_SIZE(imx374_init_regs), NULL);
++	if (ret) {
++		dev_err(imx374->dev, "failed to write init registers: %d\n",
++			ret);
++		goto err_rpm_put;
++	}
++
++	ret = cci_multi_reg_write(imx374->regmap, mode->regs, mode->num_regs,
++				  NULL);
++	if (ret) {
++		dev_err(imx374->dev, "failed to write mode registers: %d\n",
++			ret);
++		goto err_rpm_put;
++	}
++
++	/* After the mode list, which ends with exposure and gain defaults */
++	ret = __v4l2_ctrl_handler_setup(imx374->sd.ctrl_handler);
++	if (ret)
++		goto err_rpm_put;
++
++	ret = cci_write(imx374->regmap, IMX374_REG_MODE_SELECT,
++			IMX374_MODE_STREAMING, NULL);
++	if (ret)
++		goto err_rpm_put;
++
++	return 0;
++
++err_rpm_put:
++	pm_runtime_put_autosuspend(imx374->dev);
++	return ret;
++}
++
++static int imx374_disable_streams(struct v4l2_subdev *sd,
++				  struct v4l2_subdev_state *state, u32 pad,
++				  u64 streams_mask)
++{
++	struct imx374 *imx374 = to_imx374(sd);
++	int ret;
++
++	ret = cci_write(imx374->regmap, IMX374_REG_MODE_SELECT,
++			IMX374_MODE_STANDBY, NULL);
++	if (ret)
++		dev_err(imx374->dev, "failed to stop streaming: %d\n", ret);
++
++	pm_runtime_put_autosuspend(imx374->dev);
++
++	return ret;
++}
++
++static int imx374_enum_mbus_code(struct v4l2_subdev *sd,
++				 struct v4l2_subdev_state *state,
++				 struct v4l2_subdev_mbus_code_enum *code)
++{
++	if (code->index > 0)
++		return -EINVAL;
++
++	code->code = IMX374_MBUS_CODE;
++
++	return 0;
++}
++
++static int imx374_enum_frame_size(struct v4l2_subdev *sd,
++				  struct v4l2_subdev_state *state,
++				  struct v4l2_subdev_frame_size_enum *fse)
++{
++	struct imx374 *imx374 = to_imx374(sd);
++	unsigned int i, n = 0;
++
++	if (fse->code != IMX374_MBUS_CODE)
++		return -EINVAL;
++
++	for (i = 0; i < ARRAY_SIZE(supported_modes); i++) {
++		const struct imx374_mode *mode = &supported_modes[i];
++
++		if (!imx374_mode_usable(imx374, mode))
++			continue;
++
++		if (n++ == fse->index) {
++			fse->min_width = mode->width;
++			fse->max_width = mode->width;
++			fse->min_height = mode->height;
++			fse->max_height = mode->height;
++			return 0;
++		}
++	}
++
++	return -EINVAL;
++}
++
++static int imx374_update_controls(struct imx374 *imx374,
++				  const struct imx374_mode *mode)
++{
++	int hblank = mode->llp - mode->width;
++	int vblank = mode->fll - mode->height;
++	int ret;
++
++	ret = __v4l2_ctrl_s_ctrl(imx374->link_freq, mode->link_freq_index);
++	if (ret)
++		return ret;
++
++	ret = __v4l2_ctrl_modify_range(imx374->hblank, hblank, hblank, 1,
++				       hblank);
++	if (ret)
++		return ret;
++
++	ret = __v4l2_ctrl_modify_range(imx374->vblank, vblank,
++				       IMX374_FLL_MAX - mode->height, 1,
++				       vblank);
++	if (ret)
++		return ret;
++
++	ret = __v4l2_ctrl_s_ctrl(imx374->vblank, vblank);
++	if (ret)
++		return ret;
++
++	return __v4l2_ctrl_modify_range(imx374->exposure,
++					IMX374_EXPOSURE_MIN,
++					mode->fll - IMX374_EXPOSURE_OFFSET,
++					IMX374_EXPOSURE_STEP,
++					mode->exposure_def);
++}
++
++static int imx374_set_pad_format(struct v4l2_subdev *sd,
++				 struct v4l2_subdev_state *state,
++				 struct v4l2_subdev_format *fmt)
++{
++	struct imx374 *imx374 = to_imx374(sd);
++	const struct imx374_mode *mode;
++	struct v4l2_mbus_framefmt *format;
++	struct v4l2_rect *crop;
++	int ret;
++
++	if (fmt->which == V4L2_SUBDEV_FORMAT_ACTIVE &&
++	    v4l2_subdev_is_streaming(sd))
++		return -EBUSY;
++
++	mode = imx374_find_mode(imx374, fmt->format.width,
++				fmt->format.height);
++	if (!mode)
++		return -EINVAL;
++
++	fmt->format.code = IMX374_MBUS_CODE;
++	fmt->format.width = mode->width;
++	fmt->format.height = mode->height;
++	fmt->format.field = V4L2_FIELD_NONE;
++	fmt->format.colorspace = V4L2_COLORSPACE_RAW;
++	fmt->format.ycbcr_enc = V4L2_YCBCR_ENC_601;
++	fmt->format.quantization = V4L2_QUANTIZATION_FULL_RANGE;
++	fmt->format.xfer_func = V4L2_XFER_FUNC_NONE;
++
++	format = v4l2_subdev_state_get_format(state, 0);
++	*format = fmt->format;
++
++	crop = v4l2_subdev_state_get_crop(state, 0);
++	*crop = mode->crop;
++
++	if (fmt->which == V4L2_SUBDEV_FORMAT_ACTIVE) {
++		imx374->mode = mode;
++		ret = imx374_update_controls(imx374, mode);
++		if (ret)
++			return ret;
++	}
++
++	return 0;
++}
++
++static int imx374_get_selection(struct v4l2_subdev *sd,
++				struct v4l2_subdev_state *state,
++				struct v4l2_subdev_selection *sel)
++{
++	switch (sel->target) {
++	case V4L2_SEL_TGT_CROP:
++		sel->r = *v4l2_subdev_state_get_crop(state, 0);
++		return 0;
++
++	case V4L2_SEL_TGT_NATIVE_SIZE:
++	case V4L2_SEL_TGT_CROP_DEFAULT:
++	case V4L2_SEL_TGT_CROP_BOUNDS:
++		sel->r.left = 0;
++		sel->r.top = 0;
++		sel->r.width = IMX374_NATIVE_WIDTH;
++		sel->r.height = IMX374_NATIVE_HEIGHT;
++		return 0;
++	}
++
++	return -EINVAL;
++}
++
++static int imx374_init_state(struct v4l2_subdev *sd,
++			     struct v4l2_subdev_state *state)
++{
++	struct imx374 *imx374 = to_imx374(sd);
++	const struct imx374_mode *mode = imx374_default_mode(imx374);
++	struct v4l2_subdev_format fmt = {
++		.which = V4L2_SUBDEV_FORMAT_TRY,
++		.pad = 0,
++		.format = {
++			.code = IMX374_MBUS_CODE,
++			.width = mode->width,
++			.height = mode->height,
++		},
++	};
++
++	return imx374_set_pad_format(sd, state, &fmt);
++}
++
++static const struct v4l2_subdev_video_ops imx374_video_ops = {
++	.s_stream = v4l2_subdev_s_stream_helper,
++};
++
++static const struct v4l2_subdev_pad_ops imx374_pad_ops = {
++	.enum_mbus_code = imx374_enum_mbus_code,
++	.get_fmt = v4l2_subdev_get_fmt,
++	.set_fmt = imx374_set_pad_format,
++	.get_selection = imx374_get_selection,
++	.enum_frame_size = imx374_enum_frame_size,
++	.enable_streams = imx374_enable_streams,
++	.disable_streams = imx374_disable_streams,
++};
++
++static const struct v4l2_subdev_ops imx374_subdev_ops = {
++	.video = &imx374_video_ops,
++	.pad = &imx374_pad_ops,
++};
++
++static const struct v4l2_subdev_internal_ops imx374_internal_ops = {
++	.init_state = imx374_init_state,
++};
++
++/* -----------------------------------------------------------------------------
++ * Power management
++ */
++
++/*
++ * Stock's power sequence: VANA, VIO, VDIG and MCLK 1 ms apart, then XCLR
++ * released 1 ms later, then 10 ms before the first access. Power-down is
++ * the reverse with 1 ms steps.
++ */
++static int imx374_power_on(struct device *dev)
++{
++	struct v4l2_subdev *sd = dev_get_drvdata(dev);
++	struct imx374 *imx374 = to_imx374(sd);
++	unsigned int i;
++	int ret;
++
++	for (i = 0; i < IMX374_NUM_SUPPLIES; i++) {
++		ret = regulator_enable(imx374->supplies[i].consumer);
++		if (ret) {
++			dev_err(dev, "failed to enable %s: %d\n",
++				imx374->supplies[i].supply, ret);
++			goto err_supplies;
++		}
++		usleep_range(1000, 1100);
++	}
++
++	ret = clk_prepare_enable(imx374->xclk);
++	if (ret) {
++		dev_err(dev, "failed to enable clock: %d\n", ret);
++		goto err_supplies;
++	}
++	usleep_range(1000, 1100);
++
++	gpiod_set_value_cansleep(imx374->reset_gpio, 0);
++	usleep_range(10000, 11000);
++
++	return 0;
++
++err_supplies:
++	while (i--)
++		regulator_disable(imx374->supplies[i].consumer);
++
++	return ret;
++}
++
++static int imx374_power_off(struct device *dev)
++{
++	struct v4l2_subdev *sd = dev_get_drvdata(dev);
++	struct imx374 *imx374 = to_imx374(sd);
++	unsigned int i;
++
++	gpiod_set_value_cansleep(imx374->reset_gpio, 1);
++	usleep_range(1000, 1100);
++
++	clk_disable_unprepare(imx374->xclk);
++	usleep_range(1000, 1100);
++
++	for (i = IMX374_NUM_SUPPLIES; i--;) {
++		regulator_disable(imx374->supplies[i].consumer);
++		usleep_range(1000, 1100);
++	}
++
++	return 0;
++}
++
++/* -----------------------------------------------------------------------------
++ * Probe & remove
++ */
++
++static int imx374_identify_module(struct imx374 *imx374)
++{
++	u64 val;
++	int ret;
++
++	ret = cci_read(imx374->regmap, IMX374_REG_CHIP_ID, &val, NULL);
++	if (ret)
++		return dev_err_probe(imx374->dev, ret,
++				     "failed to read chip id\n");
++
++	if (val != IMX374_CHIP_ID)
++		return dev_err_probe(imx374->dev, -ENODEV,
++				     "chip id mismatch: expected 0x%04x, read 0x%04llx\n",
++				     IMX374_CHIP_ID, val);
++
++	return 0;
++}
++
++static int imx374_check_hwcfg(struct imx374 *imx374)
++{
++	struct device *dev = imx374->dev;
++	struct v4l2_fwnode_endpoint ep_cfg = {
++		.bus_type = V4L2_MBUS_CSI2_DPHY
++	};
++	struct fwnode_handle *endpoint;
++	int ret;
++
++	endpoint = fwnode_graph_get_next_endpoint(dev_fwnode(dev), NULL);
++	if (!endpoint)
++		return dev_err_probe(dev, -EINVAL, "endpoint node not found\n");
++
++	ret = v4l2_fwnode_endpoint_alloc_parse(endpoint, &ep_cfg);
++	fwnode_handle_put(endpoint);
++	if (ret)
++		return dev_err_probe(dev, ret, "could not parse endpoint\n");
++
++	if (ep_cfg.bus.mipi_csi2.num_data_lanes != IMX374_DATA_LANES) {
++		ret = dev_err_probe(dev, -EINVAL,
++				    "only %u data lanes are supported\n",
++				    IMX374_DATA_LANES);
++		goto out;
++	}
++
++	ret = v4l2_link_freq_to_bitmap(dev, ep_cfg.link_frequencies,
++				       ep_cfg.nr_of_link_frequencies,
++				       imx374_link_freq_menu,
++				       ARRAY_SIZE(imx374_link_freq_menu),
++				       &imx374->link_freq_bitmap);
++
++out:
++	v4l2_fwnode_endpoint_free(&ep_cfg);
++
++	return ret;
++}
++
++static int imx374_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	struct imx374 *imx374;
++	unsigned long freq;
++	unsigned int i;
++	int ret;
++
++	imx374 = devm_kzalloc(dev, sizeof(*imx374), GFP_KERNEL);
++	if (!imx374)
++		return -ENOMEM;
++
++	imx374->dev = dev;
++
++	v4l2_i2c_subdev_init(&imx374->sd, client, &imx374_subdev_ops);
++	imx374->sd.internal_ops = &imx374_internal_ops;
++
++	ret = imx374_check_hwcfg(imx374);
++	if (ret)
++		return ret;
++
++	imx374->mode = imx374_default_mode(imx374);
++
++	imx374->regmap = devm_cci_regmap_init_i2c(client, 16);
++	if (IS_ERR(imx374->regmap))
++		return dev_err_probe(dev, PTR_ERR(imx374->regmap),
++				     "failed to initialize CCI\n");
++
++	imx374->xclk = devm_v4l2_sensor_clk_get(dev, NULL);
++	if (IS_ERR(imx374->xclk))
++		return dev_err_probe(dev, PTR_ERR(imx374->xclk),
++				     "failed to get clock\n");
++
++	freq = clk_get_rate(imx374->xclk);
++	if (freq != IMX374_XCLK_FREQ)
++		return dev_err_probe(dev, -EINVAL,
++				     "clock frequency %lu Hz not supported, need %u Hz\n",
++				     freq, IMX374_XCLK_FREQ);
++
++	for (i = 0; i < IMX374_NUM_SUPPLIES; i++)
++		imx374->supplies[i].supply = imx374_supply_name[i];
++
++	ret = devm_regulator_bulk_get(dev, IMX374_NUM_SUPPLIES,
++				      imx374->supplies);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to get regulators\n");
++
++	/* XCLR is active low: request it asserted, the sensor held in reset */
++	imx374->reset_gpio = devm_gpiod_get_optional(dev, "reset",
++						     GPIOD_OUT_HIGH);
++	if (IS_ERR(imx374->reset_gpio))
++		return dev_err_probe(dev, PTR_ERR(imx374->reset_gpio),
++				     "failed to get reset gpio\n");
++
++	ret = imx374_power_on(dev);
++	if (ret)
++		return ret;
++
++	ret = imx374_identify_module(imx374);
++	if (ret)
++		goto error_power_off;
++
++	ret = imx374_init_controls(imx374);
++	if (ret)
++		goto error_power_off;
++
++	imx374->sd.flags |= V4L2_SUBDEV_FL_HAS_DEVNODE;
++	imx374->sd.entity.function = MEDIA_ENT_F_CAM_SENSOR;
++	imx374->pad.flags = MEDIA_PAD_FL_SOURCE;
++
++	ret = media_entity_pads_init(&imx374->sd.entity, 1, &imx374->pad);
++	if (ret) {
++		dev_err_probe(dev, ret, "failed to init entity pads\n");
++		goto error_handler_free;
++	}
++
++	imx374->sd.state_lock = imx374->ctrl_handler.lock;
++	ret = v4l2_subdev_init_finalize(&imx374->sd);
++	if (ret < 0) {
++		dev_err_probe(dev, ret, "subdev init error\n");
++		goto error_media_entity;
++	}
++
++	pm_runtime_set_active(dev);
++	pm_runtime_enable(dev);
++
++	ret = v4l2_async_register_subdev_sensor(&imx374->sd);
++	if (ret < 0) {
++		dev_err_probe(dev, ret, "failed to register sensor sub-device\n");
++		goto error_subdev_cleanup;
++	}
++
++	pm_runtime_set_autosuspend_delay(dev, 1000);
++	pm_runtime_use_autosuspend(dev);
++	pm_runtime_idle(dev);
++
++	return 0;
++
++error_subdev_cleanup:
++	v4l2_subdev_cleanup(&imx374->sd);
++	pm_runtime_disable(dev);
++	pm_runtime_set_suspended(dev);
++
++error_media_entity:
++	media_entity_cleanup(&imx374->sd.entity);
++
++error_handler_free:
++	v4l2_ctrl_handler_free(&imx374->ctrl_handler);
++
++error_power_off:
++	imx374_power_off(dev);
++
++	return ret;
++}
++
++static void imx374_remove(struct i2c_client *client)
++{
++	struct v4l2_subdev *sd = i2c_get_clientdata(client);
++	struct imx374 *imx374 = to_imx374(sd);
++
++	v4l2_async_unregister_subdev(sd);
++	v4l2_subdev_cleanup(sd);
++	media_entity_cleanup(&sd->entity);
++	v4l2_ctrl_handler_free(&imx374->ctrl_handler);
++
++	pm_runtime_disable(&client->dev);
++	if (!pm_runtime_status_suspended(&client->dev)) {
++		imx374_power_off(&client->dev);
++		pm_runtime_set_suspended(&client->dev);
++	}
++}
++
++static const struct of_device_id imx374_of_match[] = {
++	{ .compatible = "sony,imx374" },
++	{ /* sentinel */ }
++};
++MODULE_DEVICE_TABLE(of, imx374_of_match);
++
++static DEFINE_RUNTIME_DEV_PM_OPS(imx374_pm_ops, imx374_power_off,
++				 imx374_power_on, NULL);
++
++static struct i2c_driver imx374_i2c_driver = {
++	.driver = {
++		.name = "imx374",
++		.of_match_table = imx374_of_match,
++		.pm = pm_ptr(&imx374_pm_ops),
++	},
++	.probe = imx374_probe,
++	.remove = imx374_remove,
++};
++
++module_i2c_driver(imx374_i2c_driver);
++
++MODULE_AUTHOR("Noa Himesaka <himesaka@noa.codes>");
++MODULE_DESCRIPTION("Sony IMX374 sensor driver");
++MODULE_LICENSE("GPL");
