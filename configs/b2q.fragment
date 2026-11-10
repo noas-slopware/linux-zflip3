@@ -61,6 +61,10 @@ CONFIG_I2C_GPIO=y
 CONFIG_MFD_SEC_CORE=y
 CONFIG_MFD_SEC_I2C=y
 CONFIG_REGULATOR_S2DOS05=y
+# S2MPB02 companion PMIC on its own bit-banged bus (patches/linux/0026-0031):
+# its regulators (the cover panel's VCI) and the rear flash/torch LED.
+CONFIG_REGULATOR_S2MPB02=y
+CONFIG_LEDS_S2MPB02=y
 # PMK8350 RTC, its offset kept in SDAM14 (built in for hctosys)
 CONFIG_RTC_DRV_PM8XXX=y
 CONFIG_NVMEM_SPMI_SDAM=y

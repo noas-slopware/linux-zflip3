@@ -1,0 +1,204 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] regulator: add a Samsung S2MPB02 regulator driver
+
+The S2MPB02 has 18 LDOs, two bucks and a buck-boost, each controlled by
+a plain enable bit and voltage field, so the generic regmap helpers
+drive them. Ranges, steps, enable bits, enable times and the 12 mV/us
+ramp follow Samsung's s2mpb02-regulator.c: LDO1-5 from 600 mV in
+12.5 mV steps, LDO6-18 from 600 mV in 25 mV steps, the bucks from 400 mV
+in 6.25 mV steps and the buck-boost from 2.6 V in 12.5 mV steps.
+
+All regulators are registered, but one without a DT node gets no
+constraints, so the core never switches it; only the rails a board
+describes are managed.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/regulator/Kconfig             |   8 ++
+ drivers/regulator/Makefile            |   1 +
+ drivers/regulator/s2mpb02-regulator.c | 148 ++++++++++++++++++++++++++++++++++
+ 3 files changed, 157 insertions(+)
+
+diff --git a/drivers/regulator/Kconfig b/drivers/regulator/Kconfig
+--- a/drivers/regulator/Kconfig
++++ b/drivers/regulator/Kconfig
+@@ -1453,6 +1453,14 @@ config REGULATOR_S2DOS05
+ 	  The S2DOS05 is a companion power management IC for the smart phones.
+ 	  The S2DOS05 has 4 LDOs and 1 BUCK outputs.
+ 
++config REGULATOR_S2MPB02
++	tristate "Samsung S2MPB02 voltage regulator"
++	depends on MFD_SEC_CORE || COMPILE_TEST
++	help
++	  This driver provides support for the voltage regulators of the
++	  Samsung S2MPB02, a companion PMIC for camera and display rails in
++	  smart phones. The S2MPB02 has 18 LDOs, 2 bucks and a buck-boost.
++
+ config REGULATOR_S2MPA01
+ 	tristate "Samsung S2MPA01 voltage regulator"
+ 	depends on MFD_SEC_CORE || COMPILE_TEST
+diff --git a/drivers/regulator/Makefile b/drivers/regulator/Makefile
+--- a/drivers/regulator/Makefile
++++ b/drivers/regulator/Makefile
+@@ -167,6 +167,7 @@ obj-$(CONFIG_REGULATOR_RTQ2134) += rtq2134-regulator.o
+ obj-$(CONFIG_REGULATOR_RTQ6752)	+= rtq6752-regulator.o
+ obj-$(CONFIG_REGULATOR_RTQ2208) += rtq2208-regulator.o
+ obj-$(CONFIG_REGULATOR_S2DOS05) += s2dos05-regulator.o
++obj-$(CONFIG_REGULATOR_S2MPB02) += s2mpb02-regulator.o
+ obj-$(CONFIG_REGULATOR_S2MPA01) += s2mpa01.o
+ obj-$(CONFIG_REGULATOR_S2MPS11) += s2mps11.o
+ obj-$(CONFIG_REGULATOR_S5M8767) += s5m8767.o
+diff --git a/drivers/regulator/s2mpb02-regulator.c b/drivers/regulator/s2mpb02-regulator.c
+new file mode 100644
+--- /dev/null
++++ b/drivers/regulator/s2mpb02-regulator.c
+@@ -0,0 +1,148 @@
++// SPDX-License-Identifier: GPL-2.0+
++//
++// Regulator driver for the Samsung S2MPB02 companion PMIC
++//
++// The ranges, steps, enable bits and timings follow Samsung's
++// s2mpb02-regulator.c in the SM-F711N kernel source. Every control is a
++// plain register field, so the generic regmap helpers cover it.
++
++#include <linux/err.h>
++#include <linux/mfd/samsung/core.h>
++#include <linux/mfd/samsung/s2mpb02.h>
++#include <linux/module.h>
++#include <linux/platform_device.h>
++#include <linux/regmap.h>
++#include <linux/regulator/driver.h>
++
++static const struct regulator_ops s2mpb02_ops = {
++	.list_voltage		= regulator_list_voltage_linear,
++	.map_voltage		= regulator_map_voltage_linear,
++	.is_enabled		= regulator_is_enabled_regmap,
++	.enable			= regulator_enable_regmap,
++	.disable		= regulator_disable_regmap,
++	.get_voltage_sel	= regulator_get_voltage_sel_regmap,
++	.set_voltage_sel	= regulator_set_voltage_sel_regmap,
++	.set_voltage_time_sel	= regulator_set_voltage_time_sel,
++};
++
++#define S2MPB02_LDO(_num, _step) {					\
++	.name		= "ldo" #_num,					\
++	.of_match	= "ldo" #_num,			\
++	.of_match_full_name = true,					\
++	.regulators_node = "regulators",			\
++	.id		= S2MPB02_LDO##_num,				\
++	.ops		= &s2mpb02_ops,					\
++	.type		= REGULATOR_VOLTAGE,				\
++	.owner		= THIS_MODULE,					\
++	.min_uV		= S2MPB02_LDO_MIN_UV,				\
++	.uV_step	= _step,					\
++	.n_voltages	= S2MPB02_LDO_N_VOLTAGES,			\
++	.vsel_reg	= S2MPB02_REG_L##_num##CTRL,			\
++	.vsel_mask	= S2MPB02_LDO_VSEL_MASK,			\
++	.enable_reg	= S2MPB02_REG_L##_num##CTRL,			\
++	.enable_mask	= S2MPB02_LDO_ENABLE_MASK,			\
++	.enable_time	= S2MPB02_ENABLE_TIME_LDO,			\
++	.ramp_delay	= S2MPB02_RAMP_DELAY,				\
++}
++
++#define S2MPB02_BUCK(_name, _id, _min, _step, _ctrl1, _ctrl2, _time) {	\
++	.name		= _name,					\
++	.of_match	= _name,				\
++	.of_match_full_name = true,					\
++	.regulators_node = "regulators",			\
++	.id		= _id,						\
++	.ops		= &s2mpb02_ops,					\
++	.type		= REGULATOR_VOLTAGE,				\
++	.owner		= THIS_MODULE,					\
++	.min_uV		= _min,						\
++	.uV_step	= _step,					\
++	.n_voltages	= S2MPB02_BUCK_N_VOLTAGES,			\
++	.vsel_reg	= _ctrl2,					\
++	.vsel_mask	= S2MPB02_BUCK_VSEL_MASK,			\
++	.enable_reg	= _ctrl1,					\
++	.enable_mask	= S2MPB02_BUCK_ENABLE_MASK,			\
++	.enable_time	= _time,					\
++	.ramp_delay	= S2MPB02_RAMP_DELAY,				\
++}
++
++static const struct regulator_desc s2mpb02_regulators[] = {
++	S2MPB02_LDO(1, S2MPB02_LDO_STEP1_UV),
++	S2MPB02_LDO(2, S2MPB02_LDO_STEP1_UV),
++	S2MPB02_LDO(3, S2MPB02_LDO_STEP1_UV),
++	S2MPB02_LDO(4, S2MPB02_LDO_STEP1_UV),
++	S2MPB02_LDO(5, S2MPB02_LDO_STEP1_UV),
++	S2MPB02_LDO(6, S2MPB02_LDO_STEP2_UV),
++	S2MPB02_LDO(7, S2MPB02_LDO_STEP2_UV),
++	S2MPB02_LDO(8, S2MPB02_LDO_STEP2_UV),
++	S2MPB02_LDO(9, S2MPB02_LDO_STEP2_UV),
++	S2MPB02_LDO(10, S2MPB02_LDO_STEP2_UV),
++	S2MPB02_LDO(11, S2MPB02_LDO_STEP2_UV),
++	S2MPB02_LDO(12, S2MPB02_LDO_STEP2_UV),
++	S2MPB02_LDO(13, S2MPB02_LDO_STEP2_UV),
++	S2MPB02_LDO(14, S2MPB02_LDO_STEP2_UV),
++	S2MPB02_LDO(15, S2MPB02_LDO_STEP2_UV),
++	S2MPB02_LDO(16, S2MPB02_LDO_STEP2_UV),
++	S2MPB02_LDO(17, S2MPB02_LDO_STEP2_UV),
++	S2MPB02_LDO(18, S2MPB02_LDO_STEP2_UV),
++	S2MPB02_BUCK("buck1", S2MPB02_BUCK1, S2MPB02_BUCK_MIN_UV,
++		     S2MPB02_BUCK_STEP_UV, S2MPB02_REG_B1CTRL1,
++		     S2MPB02_REG_B1CTRL2, S2MPB02_ENABLE_TIME_BUCK),
++	S2MPB02_BUCK("buck2", S2MPB02_BUCK2, S2MPB02_BUCK_MIN_UV,
++		     S2MPB02_BUCK_STEP_UV, S2MPB02_REG_B2CTRL1,
++		     S2MPB02_REG_B2CTRL2, S2MPB02_ENABLE_TIME_BUCK),
++	S2MPB02_BUCK("bb", S2MPB02_BB1, S2MPB02_BB_MIN_UV,
++		     S2MPB02_BB_STEP_UV, S2MPB02_REG_BB1CTRL1,
++		     S2MPB02_REG_BB1CTRL2, S2MPB02_ENABLE_TIME_BB),
++};
++
++static_assert(ARRAY_SIZE(s2mpb02_regulators) == S2MPB02_REGULATOR_MAX);
++
++static int s2mpb02_regulator_probe(struct platform_device *pdev)
++{
++	struct sec_pmic_dev *iodev = dev_get_drvdata(pdev->dev.parent);
++	struct device *dev = &pdev->dev;
++	struct regulator_config config = { };
++
++	/* The regulators node lives in the PMIC's node, not in a child of its own. */
++	if (!dev->of_node)
++		device_set_of_node_from_dev(dev, dev->parent);
++
++	config.dev = dev;
++	config.regmap = iodev->regmap_pmic;
++
++	/*
++	 * A regulator without a DT node gets no constraints, so the core never
++	 * switches it; only the rails the board describes are managed.
++	 */
++	for (unsigned int i = 0; i < ARRAY_SIZE(s2mpb02_regulators); i++) {
++		struct regulator_dev *rdev;
++
++		rdev = devm_regulator_register(dev, &s2mpb02_regulators[i],
++					       &config);
++		if (IS_ERR(rdev))
++			return dev_err_probe(dev, PTR_ERR(rdev),
++					     "failed to register %s\n",
++					     s2mpb02_regulators[i].name);
++	}
++
++	return 0;
++}
++
++static const struct platform_device_id s2mpb02_regulator_id[] = {
++	{ .name = "s2mpb02-regulator" },
++	{ }
++};
++MODULE_DEVICE_TABLE(platform, s2mpb02_regulator_id);
++
++static struct platform_driver s2mpb02_regulator_driver = {
++	.driver = {
++		.name = "s2mpb02-regulator",
++		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
++	},
++	.probe = s2mpb02_regulator_probe,
++	.id_table = s2mpb02_regulator_id,
++};
++module_platform_driver(s2mpb02_regulator_driver);
++
++MODULE_DESCRIPTION("Samsung S2MPB02 regulator driver");
++MODULE_LICENSE("GPL");

@@ -1,0 +1,524 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] leds: add Samsung S2MPB02 flash and torch LED driver
+
+The S2MPB02 is a Samsung camera PMIC with a flash LED controller. The
+controller has separate flash and torch current sources, each enabled
+by its own GPIO pin, with a programmable current and a safety timer
+that turns the LED off after at most 16 seconds in torch mode and one
+second in flash mode.
+
+The Galaxy Z Flip3 uses this controller for the rear flash. The mainline
+PM8350C flash node is a different, unconnected controller on this board,
+which is why programming it never kept the LED on.
+
+Add the driver as a cell of the S2MPB02 MFD, using the PMIC's regmap. It
+exposes the torch through the LED class and the flash through the LED
+flash class. Like Samsung's s2mpb02_led_setup(), it switches the
+low-voltage mode off and sets its operating minimum to 3.0 V.
+
+The torch timer is refreshed every 8 seconds while the torch is on. The
+refresh pulses the torch pin, which restarts the timer, and while the
+pin is low the LED is held from the I2C torch enable, the path Samsung's
+camera driver drives the torch through, so the light does not go dark
+for the pulse. The timeout is rewritten at the same time.
+
+A strobe ends when the hardware timer runs out, so a one-shot work at the
+programmed timeout drops the flash pin and clears the strobe state, and
+switching to the torch clears it too; strobe_get() then matches the LED.
+On unbind both enable pins are driven low, since the LED class only
+turns the torch off.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/leds/flash/Kconfig        |  13 ++
+ drivers/leds/flash/Makefile       |   1 +
+ drivers/leds/flash/leds-s2mpb02.c | 447 ++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 461 insertions(+)
+
+diff --git a/drivers/leds/flash/Kconfig b/drivers/leds/flash/Kconfig
+--- a/drivers/leds/flash/Kconfig
++++ b/drivers/leds/flash/Kconfig
+@@ -125,6 +125,19 @@ config LEDS_S2M_FLASH
+ 	  dedicated for every physical LED. The LEDs can be controlled in flash
+ 	  and torch modes.
+ 
++config LEDS_S2MPB02
++	tristate "Samsung S2MPB02 flash/torch LED support"
++	depends on MFD_SEC_CORE && OF
++	depends on GPIOLIB
++	depends on LEDS_CLASS_FLASH
++	help
++	  This option enables support for the flash and torch LED of the
++	  Samsung S2MPB02 PMIC. The LED is enabled by two GPIO pins, one
++	  for each current source, and the chip has its own safety timer.
++
++	  To compile this driver as a module, choose M here: the module
++	  will be called leds-s2mpb02.
++
+ config LEDS_SGM3140
+ 	tristate "LED support for the SGM3140"
+ 	depends on V4L2_FLASH_LED_CLASS || !V4L2_FLASH_LED_CLASS
+diff --git a/drivers/leds/flash/Makefile b/drivers/leds/flash/Makefile
+--- a/drivers/leds/flash/Makefile
++++ b/drivers/leds/flash/Makefile
+@@ -11,6 +11,7 @@ obj-$(CONFIG_LEDS_QCOM_FLASH)	+= leds-qcom-flash.o
+ obj-$(CONFIG_LEDS_RT4505)	+= leds-rt4505.o
+ obj-$(CONFIG_LEDS_RT8515)	+= leds-rt8515.o
+ obj-$(CONFIG_LEDS_S2M_FLASH)	+= leds-s2m-flash.o
++obj-$(CONFIG_LEDS_S2MPB02)	+= leds-s2mpb02.o
+ obj-$(CONFIG_LEDS_SGM3140)	+= leds-sgm3140.o
+ obj-$(CONFIG_LEDS_SY7802)	+= leds-sy7802.o
+ obj-$(CONFIG_LEDS_TPS6131X)	+= leds-tps6131x.o
+diff --git a/drivers/leds/flash/leds-s2mpb02.c b/drivers/leds/flash/leds-s2mpb02.c
+new file mode 100644
+--- /dev/null
++++ b/drivers/leds/flash/leds-s2mpb02.c
+@@ -0,0 +1,447 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Flash and torch LED driver for the Samsung S2MPB02 PMIC.
++ *
++ * The S2MPB02 drives the flash LED from two enable pins, one for the
++ * torch current source and one for the flash current source. The chip
++ * also has a safety timer that turns the LED off by itself, with a
++ * maximum of 16 seconds in torch mode and 1 second in flash mode.
++ *
++ * The LED controller is a cell of the S2MPB02 MFD (drivers/mfd/sec-*), which
++ * owns the I2C client and the register map.
++ */
++
++#include <linux/bitfield.h>
++#include <linux/bits.h>
++#include <linux/delay.h>
++#include <linux/devm-helpers.h>
++#include <linux/gpio/consumer.h>
++#include <linux/led-class-flash.h>
++#include <linux/leds.h>
++#include <linux/mfd/samsung/s2mpb02.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/platform_device.h>
++#include <linux/property.h>
++#include <linux/regmap.h>
++
++/*
++ * FLED_CTRL1: bit 7 enables the LED over I2C, bit 6 picks torch (1) or
++ * flash (0) for that, both clear hand the LED to the enable pins. Bit 3 is
++ * the low-voltage mode, bits 2:0 its operating minimum voltage.
++ */
++#define S2MPB02_FLED_CTRL1_LV_MODE	BIT(3)
++#define S2MPB02_FLED_CTRL1_LV_SEL_MASK	GENMASK(2, 0)
++/* (3000 mV - 2700 mV) / 100 mV, Samsung's S2MPB02_LV_SEL_VOLT(3000) */
++#define S2MPB02_FLED_CTRL1_LV_SEL_3V	3
++#define S2MPB02_FLED_CTRL1_EN_MASK	GENMASK(7, 6)
++#define S2MPB02_FLED_CTRL1_PINS		0
++#define S2MPB02_FLED_CTRL1_I2C_TORCH	(BIT(7) | BIT(6))
++#define S2MPB02_FLED_CTRL2_TORCH_MASK	GENMASK(3, 0)
++#define S2MPB02_FLED_CTRL2_TORCH_VAL	0x4
++
++#define S2MPB02_FLED_CUR_FLASH_MASK	GENMASK(7, 4)
++#define S2MPB02_FLED_CUR_TORCH_MASK	GENMASK(3, 0)
++#define S2MPB02_FLED_TIME_FLASH_MASK	GENMASK(7, 4)
++#define S2MPB02_FLED_TIME_TORCH_MASK	GENMASK(3, 0)
++
++#define S2MPB02_FLASH_STEP_UA		100000
++#define S2MPB02_TORCH_STEP_UA		20000
++#define S2MPB02_FLASH_STEP_US		62500
++#define S2MPB02_BRIGHTNESS_MAX		15
++#define S2MPB02_TIMEOUT_MAX		15
++
++/* refresh the torch safety timer well before it can expire */
++#define S2MPB02_TORCH_KICK_MS		8000
++
++struct s2mpb02_led {
++	struct device *dev;
++	struct regmap *regmap;
++	struct gpio_desc *torch_gpio;
++	struct gpio_desc *flash_gpio;
++	struct led_classdev_flash fled;
++	/* protects the register and GPIO state */
++	struct mutex lock;
++	struct delayed_work kick_work;
++	/* ends a strobe in software when the hardware safety timer does */
++	struct delayed_work strobe_work;
++	u32 torch_code_max;
++	u32 flash_code_max;
++	u32 flash_code;
++	u32 flash_timeout_code;
++	bool torch_on;
++	bool flash_on;
++};
++
++static int s2mpb02_torch_brightness_set(struct led_classdev *cdev,
++					enum led_brightness value)
++{
++	struct led_classdev_flash *fled = lcdev_to_flcdev(cdev);
++	struct s2mpb02_led *led = container_of(fled, struct s2mpb02_led, fled);
++	u32 code;
++	int ret;
++
++	if (!value) {
++		cancel_delayed_work_sync(&led->kick_work);
++
++		mutex_lock(&led->lock);
++		gpiod_set_value_cansleep(led->torch_gpio, 0);
++		led->torch_on = false;
++		mutex_unlock(&led->lock);
++
++		return 0;
++	}
++
++	code = DIV_ROUND_CLOSEST(value * led->torch_code_max,
++				 cdev->max_brightness);
++	code = clamp(code, 1, led->torch_code_max);
++
++	/* the torch replaces a running strobe */
++	cancel_delayed_work_sync(&led->strobe_work);
++
++	mutex_lock(&led->lock);
++
++	ret = regmap_update_bits(led->regmap, S2MPB02_REG_FLED_CUR1,
++				 S2MPB02_FLED_CUR_TORCH_MASK, code);
++	if (ret)
++		goto unlock;
++
++	ret = regmap_update_bits(led->regmap, S2MPB02_REG_FLED_TIME1,
++				 S2MPB02_FLED_TIME_TORCH_MASK,
++				 S2MPB02_TIMEOUT_MAX);
++	if (ret)
++		goto unlock;
++
++	/* the flash and torch sinks share the same LED */
++	gpiod_set_value_cansleep(led->flash_gpio, 0);
++	led->flash_on = false;
++	gpiod_set_value_cansleep(led->torch_gpio, 1);
++	led->torch_on = true;
++
++	schedule_delayed_work(&led->kick_work,
++			      msecs_to_jiffies(S2MPB02_TORCH_KICK_MS));
++
++unlock:
++	mutex_unlock(&led->lock);
++
++	return ret;
++}
++
++static void s2mpb02_torch_kick(struct work_struct *work)
++{
++	struct s2mpb02_led *led =
++		container_of(work, struct s2mpb02_led, kick_work.work);
++
++	int ret;
++
++	mutex_lock(&led->lock);
++	if (led->torch_on) {
++		/*
++		 * The safety timer restarts when the torch pin goes high
++		 * again, so the pin has to drop for a moment. Hold the LED
++		 * from the I2C torch enable meanwhile (the path Samsung's
++		 * camera driver drives the torch through), so the light
++		 * does not go dark for the pulse, and rewrite the timeout
++		 * too. Then hand the LED back to the pin.
++		 */
++		ret = regmap_update_bits(led->regmap, S2MPB02_REG_FLED_CTRL1,
++					 S2MPB02_FLED_CTRL1_EN_MASK,
++					 S2MPB02_FLED_CTRL1_I2C_TORCH);
++		if (ret)
++			dev_warn_once(led->dev,
++				      "cannot hold the torch over I2C (%d), it blinks on refresh\n",
++				      ret);
++
++		regmap_write_bits(led->regmap, S2MPB02_REG_FLED_TIME1,
++				  S2MPB02_FLED_TIME_TORCH_MASK,
++				  S2MPB02_TIMEOUT_MAX);
++
++		gpiod_set_value_cansleep(led->torch_gpio, 0);
++		usleep_range(1000, 2000);
++		gpiod_set_value_cansleep(led->torch_gpio, 1);
++
++		if (!ret)
++			regmap_update_bits(led->regmap, S2MPB02_REG_FLED_CTRL1,
++					   S2MPB02_FLED_CTRL1_EN_MASK,
++					   S2MPB02_FLED_CTRL1_PINS);
++
++		schedule_delayed_work(&led->kick_work,
++				      msecs_to_jiffies(S2MPB02_TORCH_KICK_MS));
++	}
++	mutex_unlock(&led->lock);
++}
++
++static void s2mpb02_strobe_timeout(struct work_struct *work)
++{
++	struct s2mpb02_led *led =
++		container_of(work, struct s2mpb02_led, strobe_work.work);
++
++	/*
++	 * The safety timer has switched the flash off; follow it so the pin
++	 * and strobe_get() match the LED.
++	 */
++	mutex_lock(&led->lock);
++	gpiod_set_value_cansleep(led->flash_gpio, 0);
++	led->flash_on = false;
++	mutex_unlock(&led->lock);
++}
++
++static int s2mpb02_flash_brightness_set(struct led_classdev_flash *fled,
++					u32 brightness)
++{
++	struct s2mpb02_led *led = container_of(fled, struct s2mpb02_led, fled);
++
++	mutex_lock(&led->lock);
++	led->flash_code = clamp(brightness / S2MPB02_FLASH_STEP_UA,
++				1U, led->flash_code_max);
++	mutex_unlock(&led->lock);
++
++	return 0;
++}
++
++static int s2mpb02_flash_timeout_set(struct led_classdev_flash *fled,
++				     u32 timeout)
++{
++	struct s2mpb02_led *led = container_of(fled, struct s2mpb02_led, fled);
++	u32 code = timeout / S2MPB02_FLASH_STEP_US;
++
++	if (code)
++		code--;
++
++	mutex_lock(&led->lock);
++	led->flash_timeout_code = min_t(u32, code, S2MPB02_TIMEOUT_MAX);
++	mutex_unlock(&led->lock);
++
++	return 0;
++}
++
++static int s2mpb02_flash_strobe_set(struct led_classdev_flash *fled, bool state)
++{
++	struct s2mpb02_led *led = container_of(fled, struct s2mpb02_led, fled);
++	u32 timeout_us;
++	int ret;
++
++	if (!state) {
++		cancel_delayed_work_sync(&led->strobe_work);
++
++		mutex_lock(&led->lock);
++		gpiod_set_value_cansleep(led->flash_gpio, 0);
++		led->flash_on = false;
++		mutex_unlock(&led->lock);
++
++		return 0;
++	}
++
++	cancel_delayed_work_sync(&led->kick_work);
++	cancel_delayed_work_sync(&led->strobe_work);
++
++	mutex_lock(&led->lock);
++
++	ret = regmap_update_bits(led->regmap, S2MPB02_REG_FLED_CUR1,
++				 S2MPB02_FLED_CUR_FLASH_MASK,
++				 led->flash_code << 4);
++	if (ret)
++		goto unlock;
++
++	ret = regmap_update_bits(led->regmap, S2MPB02_REG_FLED_TIME1,
++				 S2MPB02_FLED_TIME_FLASH_MASK,
++				 led->flash_timeout_code << 4);
++	if (ret)
++		goto unlock;
++
++	gpiod_set_value_cansleep(led->torch_gpio, 0);
++	led->torch_on = false;
++	gpiod_set_value_cansleep(led->flash_gpio, 1);
++	led->flash_on = true;
++
++	/* the hardware ends the strobe after (code + 1) * 62.5 ms */
++	timeout_us = (led->flash_timeout_code + 1) * S2MPB02_FLASH_STEP_US;
++	schedule_delayed_work(&led->strobe_work,
++			      usecs_to_jiffies(timeout_us));
++
++unlock:
++	mutex_unlock(&led->lock);
++
++	return ret;
++}
++
++static int s2mpb02_flash_strobe_get(struct led_classdev_flash *fled, bool *state)
++{
++	struct s2mpb02_led *led = container_of(fled, struct s2mpb02_led, fled);
++
++	mutex_lock(&led->lock);
++	*state = led->flash_on;
++	mutex_unlock(&led->lock);
++
++	return 0;
++}
++
++static const struct led_flash_ops s2mpb02_flash_ops = {
++	.flash_brightness_set = s2mpb02_flash_brightness_set,
++	.timeout_set = s2mpb02_flash_timeout_set,
++	.strobe_set = s2mpb02_flash_strobe_set,
++	.strobe_get = s2mpb02_flash_strobe_get,
++};
++
++static void s2mpb02_led_off(void *data)
++{
++	struct s2mpb02_led *led = data;
++
++	/*
++	 * The LED class unregister only turns the torch off; a strobe that
++	 * is still running must not leave the flash pin high.
++	 */
++	mutex_lock(&led->lock);
++	gpiod_set_value_cansleep(led->flash_gpio, 0);
++	gpiod_set_value_cansleep(led->torch_gpio, 0);
++	led->flash_on = false;
++	led->torch_on = false;
++	mutex_unlock(&led->lock);
++}
++
++static int s2mpb02_led_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct fwnode_handle *child;
++	struct s2mpb02_led *led;
++	struct led_init_data init_data = {};
++	u32 torch_ua = 180000, flash_ua = 1000000, timeout_us = 500000;
++	u32 id;
++	int ret;
++
++	led = devm_kzalloc(dev, sizeof(*led), GFP_KERNEL);
++	if (!led)
++		return -ENOMEM;
++
++	led->dev = dev;
++	led->regmap = dev_get_regmap(dev->parent, NULL);
++	if (!led->regmap)
++		return dev_err_probe(dev, -ENODEV, "no regmap from the S2MPB02\n");
++
++	ret = regmap_read(led->regmap, S2MPB02_REG_ID, &id);
++	if (ret)
++		return dev_err_probe(dev, ret, "no response from the S2MPB02\n");
++
++	led->torch_gpio = devm_gpiod_get(dev, "torch", GPIOD_OUT_LOW);
++	if (IS_ERR(led->torch_gpio))
++		return dev_err_probe(dev, PTR_ERR(led->torch_gpio),
++				     "failed to get the torch enable GPIO\n");
++
++	led->flash_gpio = devm_gpiod_get(dev, "flash", GPIOD_OUT_LOW);
++	if (IS_ERR(led->flash_gpio))
++		return dev_err_probe(dev, PTR_ERR(led->flash_gpio),
++				     "failed to get the flash enable GPIO\n");
++
++	child = device_get_next_child_node(dev, NULL);
++	if (!child)
++		return dev_err_probe(dev, -ENODEV, "missing LED child node\n");
++
++	fwnode_property_read_u32(child, "led-max-microamp", &torch_ua);
++	fwnode_property_read_u32(child, "flash-max-microamp", &flash_ua);
++	fwnode_property_read_u32(child, "flash-max-timeout-us", &timeout_us);
++
++	led->torch_code_max = clamp(torch_ua / S2MPB02_TORCH_STEP_UA,
++				    1U, (u32)S2MPB02_BRIGHTNESS_MAX);
++	led->flash_code_max = clamp(flash_ua / S2MPB02_FLASH_STEP_UA,
++				    1U, (u32)S2MPB02_BRIGHTNESS_MAX);
++	led->flash_code = led->flash_code_max;
++	led->flash_timeout_code = timeout_us / S2MPB02_FLASH_STEP_US;
++	if (led->flash_timeout_code)
++		led->flash_timeout_code--;
++	led->flash_timeout_code = min_t(u32, led->flash_timeout_code,
++					S2MPB02_TIMEOUT_MAX);
++
++	ret = devm_mutex_init(dev, &led->lock);
++	if (ret)
++		goto err_put_child;
++
++	ret = devm_delayed_work_autocancel(dev, &led->kick_work,
++					   s2mpb02_torch_kick);
++	if (ret)
++		goto err_put_child;
++
++	ret = devm_delayed_work_autocancel(dev, &led->strobe_work,
++					   s2mpb02_strobe_timeout);
++	if (ret)
++		goto err_put_child;
++
++	/*
++	 * Pins control the LED, low-voltage mode off with its operating
++	 * minimum at 3.0 V, as Samsung's s2mpb02_led_setup() programs it.
++	 */
++	ret = regmap_update_bits(led->regmap, S2MPB02_REG_FLED_CTRL1,
++				 S2MPB02_FLED_CTRL1_LV_MODE |
++				 S2MPB02_FLED_CTRL1_LV_SEL_MASK,
++				 S2MPB02_FLED_CTRL1_LV_SEL_3V);
++	if (ret)
++		goto err_put_child;
++
++	ret = regmap_update_bits(led->regmap, S2MPB02_REG_FLED_CTRL1,
++				 S2MPB02_FLED_CTRL1_EN_MASK,
++				 S2MPB02_FLED_CTRL1_PINS);
++	if (ret)
++		goto err_put_child;
++
++	ret = regmap_update_bits(led->regmap, S2MPB02_REG_FLED_CTRL2,
++				 S2MPB02_FLED_CTRL2_TORCH_MASK,
++				 S2MPB02_FLED_CTRL2_TORCH_VAL);
++	if (ret)
++		goto err_put_child;
++
++	led->fled.led_cdev.max_brightness = S2MPB02_BRIGHTNESS_MAX;
++	led->fled.led_cdev.brightness_set_blocking =
++		s2mpb02_torch_brightness_set;
++	led->fled.led_cdev.flags |= LED_DEV_CAP_FLASH;
++
++	led->fled.brightness.min = S2MPB02_FLASH_STEP_UA;
++	led->fled.brightness.step = S2MPB02_FLASH_STEP_UA;
++	led->fled.brightness.max = led->flash_code_max * S2MPB02_FLASH_STEP_UA;
++	led->fled.brightness.val = led->fled.brightness.max;
++
++	led->fled.timeout.min = S2MPB02_FLASH_STEP_US;
++	led->fled.timeout.step = S2MPB02_FLASH_STEP_US;
++	led->fled.timeout.max =
++		(led->flash_timeout_code + 1) * S2MPB02_FLASH_STEP_US;
++	led->fled.timeout.val = led->fled.timeout.max;
++
++	led->fled.ops = &s2mpb02_flash_ops;
++
++	/* runs after the LED class device is gone, before the works are cancelled */
++	ret = devm_add_action_or_reset(dev, s2mpb02_led_off, led);
++	if (ret)
++		goto err_put_child;
++
++	init_data.fwnode = child;
++	init_data.devicename = NULL;
++	init_data.default_label = NULL;
++	init_data.devname_mandatory = false;
++
++	ret = devm_led_classdev_flash_register_ext(dev, &led->fled, &init_data);
++	if (ret)
++		goto err_put_child;
++
++	dev_info(dev, "S2MPB02 flash LED, id 0x%02x\n", id);
++
++err_put_child:
++	fwnode_handle_put(child);
++
++	return ret;
++}
++
++static const struct of_device_id s2mpb02_led_of_match[] = {
++	{ .compatible = "samsung,s2mpb02-flash" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, s2mpb02_led_of_match);
++
++static struct platform_driver s2mpb02_led_driver = {
++	.driver = {
++		.name = "s2mpb02-flash",
++		.of_match_table = s2mpb02_led_of_match,
++	},
++	.probe = s2mpb02_led_probe,
++};
++module_platform_driver(s2mpb02_led_driver);
++
++MODULE_DESCRIPTION("Samsung S2MPB02 flash and torch LED driver");
++MODULE_LICENSE("GPL");

@@ -1,0 +1,232 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] mfd: sec: add the Samsung S2MPB02
+
+Add the S2MPB02 to the Samsung sec PMIC core, next to the S2DOS05 it
+resembles: an I2C regmap over registers 0x00-0x32 (Samsung's
+s2mpb02-regulator.h), a regulator cell and a flash LED cell. The b2q
+board wires no interrupt line for it, so like the S2DOS05 it has no IRQ
+chip.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/mfd/sec-common.c            |   9 +++
+ drivers/mfd/sec-i2c.c               |  14 +++++
+ drivers/mfd/sec-irq.c               |   1 +
+ include/linux/mfd/samsung/core.h    |   1 +
+ include/linux/mfd/samsung/s2mpb02.h | 115 ++++++++++++++++++++++++++++++++++++
+ 5 files changed, 140 insertions(+)
+
+diff --git a/drivers/mfd/sec-common.c b/drivers/mfd/sec-common.c
+--- a/drivers/mfd/sec-common.c
++++ b/drivers/mfd/sec-common.c
+@@ -38,6 +38,11 @@ static const struct mfd_cell s2dos05_devs[] = {
+ 	MFD_CELL_NAME("s2dos05-regulator"),
+ };
+ 
++static const struct mfd_cell s2mpb02_devs[] = {
++	MFD_CELL_NAME("s2mpb02-regulator"),
++	MFD_CELL_OF("s2mpb02-flash", NULL, NULL, 0, 0, "samsung,s2mpb02-flash"),
++};
++
+ static const struct resource s2mpg10_rtc_resources[] = {
+ 	DEFINE_RES_IRQ_NAMED(S2MPG10_IRQ_RTCA0, "alarm"),
+ };
+@@ -239,6 +244,10 @@ int sec_pmic_probe(struct device *dev, int device_type, unsigned int irq,
+ 		sec_devs = s2mpa01_devs;
+ 		num_sec_devs = ARRAY_SIZE(s2mpa01_devs);
+ 		break;
++	case S2MPB02:
++		sec_devs = s2mpb02_devs;
++		num_sec_devs = ARRAY_SIZE(s2mpb02_devs);
++		break;
+ 	case S2MPG10:
+ 		sec_devs = s2mpg10_devs;
+ 		num_sec_devs = ARRAY_SIZE(s2mpg10_devs);
+diff --git a/drivers/mfd/sec-i2c.c b/drivers/mfd/sec-i2c.c
+--- a/drivers/mfd/sec-i2c.c
++++ b/drivers/mfd/sec-i2c.c
+@@ -12,6 +12,7 @@
+ #include <linux/i2c.h>
+ #include <linux/mfd/samsung/core.h>
+ #include <linux/mfd/samsung/s2mpa01.h>
++#include <linux/mfd/samsung/s2mpb02.h>
+ #include <linux/mfd/samsung/s2mps11.h>
+ #include <linux/mfd/samsung/s2mps13.h>
+ #include <linux/mfd/samsung/s2mps14.h>
+@@ -93,6 +94,13 @@ static const struct regmap_config s2mpa01_regmap_config = {
+ 	.cache_type = REGCACHE_FLAT,
+ };
+ 
++static const struct regmap_config s2mpb02_regmap_config = {
++	.reg_bits = 8,
++	.val_bits = 8,
++
++	.max_register = S2MPB02_REG_LDO_DSCH3,
++};
++
+ static const struct regmap_config s2mps11_regmap_config = {
+ 	.reg_bits = 8,
+ 	.val_bits = 8,
+@@ -195,6 +203,11 @@ static const struct sec_pmic_i2c_platform_data s2mpa01_data = {
+ 	.device_type = S2MPA01,
+ };
+ 
++static const struct sec_pmic_i2c_platform_data s2mpb02_data = {
++	.regmap_cfg = &s2mpb02_regmap_config,
++	.device_type = S2MPB02,
++};
++
+ static const struct sec_pmic_i2c_platform_data s2mps11_data = {
+ 	.regmap_cfg = &s2mps11_regmap_config,
+ 	.device_type = S2MPS11X,
+@@ -238,6 +251,7 @@ static const struct sec_pmic_i2c_platform_data s5m8767_data = {
+ static const struct of_device_id sec_pmic_i2c_of_match[] = {
+ 	{ .compatible = "samsung,s2dos05", .data = &s2dos05_data, },
+ 	{ .compatible = "samsung,s2mpa01-pmic", .data = &s2mpa01_data, },
++	{ .compatible = "samsung,s2mpb02", .data = &s2mpb02_data, },
+ 	{ .compatible = "samsung,s2mps11-pmic", .data = &s2mps11_data, },
+ 	{ .compatible = "samsung,s2mps13-pmic", .data = &s2mps13_data, },
+ 	{ .compatible = "samsung,s2mps14-pmic", .data = &s2mps14_data, },
+diff --git a/drivers/mfd/sec-irq.c b/drivers/mfd/sec-irq.c
+--- a/drivers/mfd/sec-irq.c
++++ b/drivers/mfd/sec-irq.c
+@@ -487,6 +487,7 @@ struct regmap_irq_chip_data *sec_irq_init(struct sec_pmic_dev *sec_pmic)
+ 		sec_irq_chip = &s5m8767_irq_chip;
+ 		break;
+ 	case S2DOS05:
++	case S2MPB02:
+ 		return NULL;
+ 	case S2MPA01:
+ 		sec_irq_chip = &s2mps14_irq_chip;
+diff --git a/include/linux/mfd/samsung/core.h b/include/linux/mfd/samsung/core.h
+--- a/include/linux/mfd/samsung/core.h
++++ b/include/linux/mfd/samsung/core.h
+@@ -39,6 +39,7 @@ enum sec_device_type {
+ 	S5M8767X,
+ 	S2DOS05,
+ 	S2MPA01,
++	S2MPB02,
+ 	S2MPG10,
+ 	S2MPG11,
+ 	S2MPS11X,
+diff --git a/include/linux/mfd/samsung/s2mpb02.h b/include/linux/mfd/samsung/s2mpb02.h
+new file mode 100644
+--- /dev/null
++++ b/include/linux/mfd/samsung/s2mpb02.h
+@@ -0,0 +1,115 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
++/*
++ * Samsung S2MPB02 companion PMIC: 18 LDOs, two bucks, a buck-boost and a
++ * flash/torch LED controller, all behind one I2C address.
++ *
++ * Register map from Samsung's s2mpb02-regulator.h (SM-F711N kernel source).
++ */
++
++#ifndef __LINUX_MFD_S2MPB02_H
++#define __LINUX_MFD_S2MPB02_H
++
++#include <linux/bits.h>
++
++enum s2mpb02_reg {
++	S2MPB02_REG_ID,
++	S2MPB02_REG_INT1,
++	S2MPB02_REG_INT1M,
++	S2MPB02_REG_ST1,
++	S2MPB02_REG_CTRL,
++	S2MPB02_REG_RSVD5,
++	S2MPB02_REG_RSVD6,
++	S2MPB02_REG_RSVD7,
++	S2MPB02_REG_RSVD8,
++	S2MPB02_REG_BBEN_DBT,
++	S2MPB02_REG_RSVDA,
++	S2MPB02_REG_B1CTRL1,
++	S2MPB02_REG_B1CTRL2,
++	S2MPB02_REG_B2CTRL1,
++	S2MPB02_REG_B2CTRL2,
++	S2MPB02_REG_BB1CTRL1,
++	S2MPB02_REG_BB1CTRL2,
++	S2MPB02_REG_BUCK_RAMP,
++	S2MPB02_REG_FLED_CTRL1,
++	S2MPB02_REG_FLED_CTRL2,
++	S2MPB02_REG_FLED_CUR1,
++	S2MPB02_REG_FLED_TIME1,
++	S2MPB02_REG_FLED_CUR2,
++	S2MPB02_REG_FLED_TIME2,
++	S2MPB02_REG_FLED_IRON1,
++	S2MPB02_REG_FLED_IRON2,
++	S2MPB02_REG_FLED_IRD1,
++	S2MPB02_REG_FLED_IRD2,
++	S2MPB02_REG_BST_CTRL1,
++	S2MPB02_REG_BST_CTRL2,
++	S2MPB02_REG_L1CTRL,
++	S2MPB02_REG_L2CTRL,
++	S2MPB02_REG_L3CTRL,
++	S2MPB02_REG_L4CTRL,
++	S2MPB02_REG_L5CTRL,
++	S2MPB02_REG_L6CTRL,
++	S2MPB02_REG_L7CTRL,
++	S2MPB02_REG_L8CTRL,
++	S2MPB02_REG_L9CTRL,
++	S2MPB02_REG_L10CTRL,
++	S2MPB02_REG_L11CTRL,
++	S2MPB02_REG_L12CTRL,
++	S2MPB02_REG_L13CTRL,
++	S2MPB02_REG_L14CTRL,
++	S2MPB02_REG_L15CTRL,
++	S2MPB02_REG_L16CTRL,
++	S2MPB02_REG_L17CTRL,
++	S2MPB02_REG_L18CTRL,
++	S2MPB02_REG_LDO_DSCH1,
++	S2MPB02_REG_LDO_DSCH2,
++	S2MPB02_REG_LDO_DSCH3,
++};
++
++enum s2mpb02_regulators {
++	S2MPB02_LDO1,
++	S2MPB02_LDO2,
++	S2MPB02_LDO3,
++	S2MPB02_LDO4,
++	S2MPB02_LDO5,
++	S2MPB02_LDO6,
++	S2MPB02_LDO7,
++	S2MPB02_LDO8,
++	S2MPB02_LDO9,
++	S2MPB02_LDO10,
++	S2MPB02_LDO11,
++	S2MPB02_LDO12,
++	S2MPB02_LDO13,
++	S2MPB02_LDO14,
++	S2MPB02_LDO15,
++	S2MPB02_LDO16,
++	S2MPB02_LDO17,
++	S2MPB02_LDO18,
++	S2MPB02_BUCK1,
++	S2MPB02_BUCK2,
++	S2MPB02_BB1,
++	S2MPB02_REGULATOR_MAX,
++};
++
++/* LDO1-5 step 12.5 mV, LDO6-18 25 mV, both from 600 mV in 7 bits */
++#define S2MPB02_LDO_MIN_UV		600000
++#define S2MPB02_LDO_STEP1_UV		12500
++#define S2MPB02_LDO_STEP2_UV		25000
++#define S2MPB02_LDO_VSEL_MASK		GENMASK(6, 0)
++#define S2MPB02_LDO_N_VOLTAGES		(S2MPB02_LDO_VSEL_MASK + 1)
++#define S2MPB02_LDO_ENABLE_MASK		BIT(7)
++
++/* bucks from 400 mV in 6.25 mV steps, the buck-boost from 2.6 V in 12.5 mV */
++#define S2MPB02_BUCK_MIN_UV		400000
++#define S2MPB02_BUCK_STEP_UV		6250
++#define S2MPB02_BB_MIN_UV		2600000
++#define S2MPB02_BB_STEP_UV		12500
++#define S2MPB02_BUCK_VSEL_MASK		GENMASK(7, 0)
++#define S2MPB02_BUCK_N_VOLTAGES		(S2MPB02_BUCK_VSEL_MASK + 1)
++#define S2MPB02_BUCK_ENABLE_MASK	GENMASK(7, 6)
++
++#define S2MPB02_RAMP_DELAY		12000	/* uV/us */
++#define S2MPB02_ENABLE_TIME_LDO		180	/* us */
++#define S2MPB02_ENABLE_TIME_BUCK	100
++#define S2MPB02_ENABLE_TIME_BB		210
++
++#endif /* __LINUX_MFD_S2MPB02_H */

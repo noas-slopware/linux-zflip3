@@ -1,0 +1,157 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] arm64: dts: qcom: sm8350-b2q: add the S2MPB02 PMIC and its flash LED
+
+The rear flash on b2q is driven by the S2MPB02, not the PM8350C. The
+S2MPB02 sits on its own bit-banged I2C bus on GPIO 78 and 79, with the
+torch enable on GPIO 115 and the flash enable on GPIO 155.
+
+Our existing bit-banged bus on GPIO 104 and 105 is the stock i2c@52 bus
+that carries the S2DOS05; rename it to match and add the missing
+i2c@51 bus for the S2MPB02.
+
+Describe the PMIC with its flash LED and the three rails stock keeps
+always on (LDO17 3.3 V, BUCK2 1.3 V, the buck-boost 3.5 V, from stock's
+s2mpb02_pmic@59). Every other rail stays undescribed until it has a
+consumer, because the regulator core switches off a described rail that
+nobody claims.
+
+Keep the PM8350C flash controller disabled. It is not connected to the
+LED on this board and the enable pins belong to the S2MPB02.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts | 86 +++++++++++++++++++++++--
+ 1 file changed, 81 insertions(+), 5 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+--- a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+@@ -9,6 +9,7 @@
+  * its stock device tree.
+  */
+ 
++#include <dt-bindings/gpio/gpio.h>
+ #include <dt-bindings/input/gpio-keys.h>
+ #include <dt-bindings/leds/common.h>
+ #include <dt-bindings/pinctrl/qcom,pmic-gpio.h>
+@@ -364,12 +365,12 @@ codec {
+ 		};
+ 	};
+ 
+-	s2dos05_i2c: i2c-51 {
++	s2dos05_i2c: i2c-52 {
+ 		compatible = "i2c-gpio";
+ 	 	sda-gpios = <&tlmm 104 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+ 		scl-gpios = <&tlmm 105 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+ 		i2c-gpio,delay-us = <2>;
+-		pinctrl-0 = <&i2c51_sda_state &i2c51_scl_state>;
++		pinctrl-0 = <&i2c52_sda_state &i2c52_scl_state>;
+ 		pinctrl-names = "default";
+ 		#address-cells = <1>;
+ 		#size-cells = <0>;
+@@ -423,6 +424,67 @@ s2dos05_buck: buck {
+ 			};
+ 		};
+ 	};
++
++	s2mpb02_i2c: i2c-51 {
++		compatible = "i2c-gpio";
++		sda-gpios = <&tlmm 78 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++		scl-gpios = <&tlmm 79 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++		i2c-gpio,delay-us = <2>;
++		pinctrl-0 = <&i2c51_sda_state &i2c51_scl_state>;
++		pinctrl-names = "default";
++		#address-cells = <1>;
++		#size-cells = <0>;
++
++		/*
++		 * Stock's s2mpb02_pmic@59 (dtbo entry 3). Only the rails with a
++		 * consumer here, or that stock keeps always on, are described:
++		 * the core switches off an unclaimed rail it manages. Stock's
++		 * L16 (VDD_BTP_3P3, the fingerprint sensor) and the camera
++		 * rails stay undescribed until their consumers exist.
++		 */
++		s2mpb02: pmic@59 {
++			compatible = "samsung,s2mpb02";
++			reg = <0x59>;
++
++			flash {
++				compatible = "samsung,s2mpb02-flash";
++
++				torch-gpios = <&tlmm 115 GPIO_ACTIVE_HIGH>;
++				flash-gpios = <&tlmm 155 GPIO_ACTIVE_HIGH>;
++
++				led {
++					function = LED_FUNCTION_FLASH;
++					color = <LED_COLOR_ID_WHITE>;
++					led-max-microamp = <180000>;
++					flash-max-microamp = <1000000>;
++					flash-max-timeout-us = <500000>;
++				};
++			};
++
++			regulators {
++				s2mpb02_l17: ldo17 {
++					regulator-name = "s2mpb02-l17";
++					regulator-min-microvolt = <3300000>;
++					regulator-max-microvolt = <3300000>;
++					regulator-always-on;
++				};
++
++				s2mpb02_b2: buck2 {
++					regulator-name = "s2mpb02-b2";
++					regulator-min-microvolt = <1300000>;
++					regulator-max-microvolt = <1300000>;
++					regulator-always-on;
++				};
++
++				s2mpb02_bb: bb {
++					regulator-name = "s2mpb02-bb";
++					regulator-min-microvolt = <3500000>;
++					regulator-max-microvolt = <3500000>;
++					regulator-always-on;
++				};
++			};
++		};
++	};
+ };
+ 
+ // PMIC
+@@ -1170,19 +1232,33 @@ ts_int_default: ts-int-default-state {
+ 		input-enable;
+ 	};
+ 
+-	 i2c51_sda_state: i2c51-sda-state {
+-		pins = "gpio104";
++	i2c51_sda_state: i2c51-sda-state {
++		pins = "gpio78";
+ 		function = "gpio";
+ 		drive-strength = <2>;
+ 		bias-disable;
+ 	};
+ 
+ 	i2c51_scl_state: i2c51-scl-state {
++		pins = "gpio79";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-disable;
++	};
++
++	i2c52_sda_state: i2c52-sda-state {
++		pins = "gpio104";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-disable;
++	};
++
++	i2c52_scl_state: i2c52-scl-state {
+ 		pins = "gpio105";
+ 		function = "gpio";
+ 		drive-strength = <2>;
+ 		bias-disable;
+-        };
++	};
+ 
+ 	bt_en_state: bt-en-state {
+ 		pins = "gpio65";
