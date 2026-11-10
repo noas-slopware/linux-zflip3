@@ -1,0 +1,645 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] firmware: qcom: add a userspace interface to QSEE trusted applications
+
+Some phones ship vendor trusted applications that their Android stack
+loads from the HLOS side through downstream qseecom and drives with
+QSEECom_send_cmd(). Samsung's fingerprint TA (securefp) is one: the
+sensor sits on a TrustZone-owned SPI bus, and only the TA can talk to it.
+
+Add /dev/qsee-app on top of the QSEECOM calls from 0040. A descriptor
+loads one application (QSEE_APP_IOC_LOAD: look it up, otherwise load its
+.mdt/.bNN image with APP_START, and allocate the shared buffer the
+commands live in) and sends it commands (QSEE_APP_IOC_SEND: request at
+the start of the shared buffer, response at the 64-byte aligned offset
+after it, as the Android client library lays them out). An application
+the descriptor loaded is shut down on close.
+
+Both areas go in and come back, because apps use the shared buffer the
+way QSEECom clients see it: securefp reads an output capacity from the
+response area, and Samsung's skeymast answers inside the request area.
+Images may be ELF64 (securefp, authhat) or ELF32 (hwvault, skeymast).
+
+QSEE_APP_IOC_VMBUF gives the descriptor one buffer owned by another VM
+(qcom_scm_assign_mem from HLOS to the requested VMID, read/write) and
+reports its physical address: keymaster64's SPU_INIT takes such a buffer,
+owned by CP_SPSS_SP_SHARED (0x22), as stock's ION sp_mem heap provides
+it. It is assigned back and freed when the descriptor closes, unless
+QSEE_APP_VMBUF_KEEP asks for it to stay with the other VM until reboot
+(keymaster64 keeps using its SPU buffer after SPU_INIT returns). The
+buffer is allocated below 4 GiB, as the secure processor needs.
+
+QSEE_APP_VMBUF_HLOS keeps HLOS in the destination list, so the buffer is
+shared rather than handed over: {VMID read/write, HLOS read/write}, from
+dma_alloc_coherent() with a 32-bit mask, and mmap() maps it. The SPSS's
+NVM service needs that: sec_nvm loads each partition into a buffer owned
+by CP_SPSS_HLOS_SHARED (0x24) and HLOS, as the ION sp_mem heap gives it,
+and commits from it; its scratch buffers are the same kind.
+
+Listener-blocked and INCOMPLETE results are still not handled.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/firmware/qcom/Kconfig         |   12 +
+ drivers/firmware/qcom/Makefile        |    1 
+ drivers/firmware/qcom/qcom_qsee_app.c |  466 +++++++++++++++++++++++++++++++++
+ include/uapi/linux/qcom_qsee_app.h    |   85 ++++++
+ 4 files changed, 564 insertions(+)
+
+diff --git a/drivers/firmware/qcom/Kconfig b/drivers/firmware/qcom/Kconfig
+index 66b2209..5109b20 100644
+--- a/drivers/firmware/qcom/Kconfig
++++ b/drivers/firmware/qcom/Kconfig
+@@ -90,6 +90,18 @@ config QCOM_QSEECOM_PROBE
+ 
+ 	  If unsure, say N.
+ 
++config QCOM_QSEE_APP
++	tristate "Userspace access to QSEE trusted applications"
++	depends on QCOM_QSEECOM
++	help
++	  A /dev/qsee-app character device through which a userspace daemon
++	  loads one QSEE trusted application per file descriptor (from its
++	  .mdt/.bNN image with request_firmware()) and exchanges commands with
++	  it in a TZ shared buffer, the way Android stacks do with downstream
++	  qseecom. Samsung's fingerprint TA is driven this way.
++
++	  If unsure, say N.
++
+ config QCOM_QSEECOM_UEFISECAPP
+ 	bool "Qualcomm SEE UEFI Secure App client driver"
+ 	depends on QCOM_QSEECOM
+diff --git a/drivers/firmware/qcom/Makefile b/drivers/firmware/qcom/Makefile
+index a30f8e7..3a998fe 100644
+--- a/drivers/firmware/qcom/Makefile
++++ b/drivers/firmware/qcom/Makefile
+@@ -10,5 +10,6 @@ obj-$(CONFIG_QCOM_TZMEM)	+= qcom_tzmem.o
+ obj-$(CONFIG_QCOM_QSEECOM)	+= qcom_qseecom.o
+ obj-$(CONFIG_QCOM_QSEECOM_UEFISECAPP) += qcom_qseecom_uefisecapp.o
+ obj-$(CONFIG_QCOM_QSEECOM_PROBE) += qcom_qseecom_probe.o
++obj-$(CONFIG_QCOM_QSEE_APP)	+= qcom_qsee_app.o
+ obj-$(CONFIG_QCOM_PAS)		+= qcom_pas.o
+ obj-$(CONFIG_QCOM_PAS_TEE)	+= qcom_pas_tee.o
+diff --git a/drivers/firmware/qcom/qcom_qsee_app.c b/drivers/firmware/qcom/qcom_qsee_app.c
+new file mode 100644
+index 0000000..8463540
+--- /dev/null
++++ b/drivers/firmware/qcom/qcom_qsee_app.c
+@@ -0,0 +1,466 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Userspace access to a QSEE trusted application, one per file descriptor.
++ *
++ * Some phones keep vendor trusted applications that their Android stack
++ * loads from the HLOS side through downstream qseecom and then drives with
++ * QSEECom_send_cmd() (Samsung's fingerprint TA, for one). This exposes the
++ * same two operations on top of the mainline QSEECOM calls:
++ *
++ *   QSEE_APP_IOC_LOAD  look the app up and, if it is not resident, load its
++ *                      .mdt/.bNN image (APP_START); allocate the shared
++ *                      buffer the commands are exchanged in
++ *   QSEE_APP_IOC_SEND  copy the request to the start of the shared buffer
++ *                      and the caller's response buffer to the 64-byte
++ *                      aligned offset after it, send (APP_SEND), then copy
++ *                      both areas back
++ *
++ * Both areas go in and come back because apps use the shared buffer the way
++ * QSEECom clients see it: some read input words from the response area
++ * (an output capacity, for one) and some answer inside the request area.
++ *
++ * An app this descriptor loaded is shut down when it is closed.
++ * INCOMPLETE and listener-blocked results are not handled (see
++ * qcom_scm_qseecom_call()), so apps that need listeners do not work.
++ */
++
++#include <linux/bits.h>
++#include <linux/dma-mapping.h>
++#include <linux/elf.h>
++#include <linux/gfp.h>
++#include <linux/limits.h>
++#include <linux/firmware.h>
++#include <linux/firmware/qcom/qcom_scm.h>
++#include <linux/firmware/qcom/qcom_tzmem.h>
++#include <linux/fs.h>
++#include <linux/miscdevice.h>
++#include <linux/mm.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/slab.h>
++#include <linux/string.h>
++#include <linux/uaccess.h>
++#include <uapi/linux/qcom_qsee_app.h>
++
++#define QSEE_APP_SBUF_MAX	SZ_16M
++
++struct qsee_app {
++	struct mutex lock;		/* serializes LOAD, SEND and release */
++	bool loaded;
++	bool loaded_here;
++	u32 app_id;
++	struct qcom_tzmem_pool *pool;
++	void *sbuf;
++	u32 sbuf_size;
++	void *vmbuf;			/* QSEE_APP_IOC_VMBUF, owned by another VM */
++	size_t vmbuf_size;
++	u64 vmbuf_perms;
++	bool vmbuf_keep;
++	bool vmbuf_hlos;		/* shared with HLOS: dma_alloc_coherent, mmap-able */
++	dma_addr_t vmbuf_dma;
++};
++
++static struct miscdevice qsee_app_misc;
++
++static int qsee_app_part(const char *path, const char *suffix,
++			 const struct firmware **fw)
++{
++	char *name = kasprintf(GFP_KERNEL, "%s.%s", path, suffix);
++	int ret;
++
++	if (!name)
++		return -ENOMEM;
++	ret = request_firmware(fw, name, qsee_app_misc.this_device);
++	kfree(name);
++	return ret;
++}
++
++/*
++ * The image layout downstream qseecom hands to APP_START: the .mdt, then
++ * every .bNN segment in order, back to back. mdt_len is the .mdt size.
++ */
++static int qsee_app_start(const char *path, u32 *app_id)
++{
++	struct qcom_tzmem_pool_config cfg = { .policy = QCOM_TZMEM_POLICY_STATIC };
++	const struct firmware *mdt, *seg;
++	struct qcom_tzmem_pool *pool;
++	char suffix[16];
++	size_t total, off;
++	int i, phnum, ret;
++	void *img;
++
++	ret = qsee_app_part(path, "mdt", &mdt);
++	if (ret)
++		return ret;
++
++	/* Apps come as ELF64 (securefp, authhat) and ELF32 (hwvault, skeymast) */
++	if (mdt->size < sizeof(struct elf32_hdr) || memcmp(mdt->data, ELFMAG, SELFMAG)) {
++		ret = -ENOEXEC;
++		goto out_mdt;
++	}
++	if (mdt->data[EI_CLASS] == ELFCLASS64 && mdt->size >= sizeof(struct elf64_hdr)) {
++		phnum = ((const struct elf64_hdr *)mdt->data)->e_phnum;
++	} else if (mdt->data[EI_CLASS] == ELFCLASS32) {
++		phnum = ((const struct elf32_hdr *)mdt->data)->e_phnum;
++	} else {
++		ret = -ENOEXEC;
++		goto out_mdt;
++	}
++
++	total = mdt->size;
++	for (i = 0; i < phnum; i++) {
++		snprintf(suffix, sizeof(suffix), "b%02d", i);
++		ret = qsee_app_part(path, suffix, &seg);
++		if (ret)
++			goto out_mdt;
++		total += seg->size;
++		release_firmware(seg);
++	}
++	if (total > U32_MAX) {
++		ret = -EFBIG;
++		goto out_mdt;
++	}
++
++	cfg.initial_size = PAGE_ALIGN(total);
++	pool = qcom_tzmem_pool_new(&cfg);
++	if (IS_ERR(pool)) {
++		ret = PTR_ERR(pool);
++		goto out_mdt;
++	}
++	img = qcom_tzmem_alloc(pool, total, GFP_KERNEL);
++	if (!img) {
++		ret = -ENOMEM;
++		goto out_pool;
++	}
++
++	memcpy(img, mdt->data, mdt->size);
++	off = mdt->size;
++	for (i = 0; i < phnum; i++) {
++		snprintf(suffix, sizeof(suffix), "b%02d", i);
++		ret = qsee_app_part(path, suffix, &seg);
++		if (ret)
++			goto out_img;
++		if (seg->size > total - off) {
++			release_firmware(seg);
++			ret = -EINVAL;
++			goto out_img;
++		}
++		memcpy(img + off, seg->data, seg->size);
++		off += seg->size;
++		release_firmware(seg);
++	}
++
++	ret = qcom_scm_qseecom_app_start(qcom_tzmem_to_phys(img), mdt->size,
++					 total, app_id);
++out_img:
++	qcom_tzmem_free(img);
++out_pool:
++	qcom_tzmem_pool_free(pool);
++out_mdt:
++	release_firmware(mdt);
++	return ret;
++}
++
++static long qsee_app_load(struct qsee_app *app, void __user *argp)
++{
++	struct qcom_tzmem_pool_config cfg = { .policy = QCOM_TZMEM_POLICY_STATIC };
++	struct qsee_app_load req;
++	const char *name;
++	u32 app_id = 0;
++	int ret;
++
++	if (copy_from_user(&req, argp, sizeof(req)))
++		return -EFAULT;
++	req.path[sizeof(req.path) - 1] = '\0';
++	if (!req.path[0] || strstr(req.path, "..") || req.path[0] == '/')
++		return -EINVAL;
++	if (!req.sbuf_size || req.sbuf_size > QSEE_APP_SBUF_MAX)
++		return -EINVAL;
++	if (app->loaded)
++		return -EBUSY;
++
++	name = strrchr(req.path, '/');
++	name = name ? name + 1 : req.path;
++	if (!name[0] || strlen(name) >= QSEE_APP_NAME_MAX)
++		return -EINVAL;
++
++	cfg.initial_size = PAGE_ALIGN(req.sbuf_size);
++	app->pool = qcom_tzmem_pool_new(&cfg);
++	if (IS_ERR(app->pool)) {
++		ret = PTR_ERR(app->pool);
++		app->pool = NULL;
++		return ret;
++	}
++	app->sbuf = qcom_tzmem_alloc(app->pool, req.sbuf_size, GFP_KERNEL);
++	if (!app->sbuf) {
++		ret = -ENOMEM;
++		goto err_pool;
++	}
++	app->sbuf_size = req.sbuf_size;
++
++	ret = qcom_scm_qseecom_app_get_id(name, &app_id);
++	if (ret == -ENOENT) {
++		ret = qsee_app_start(req.path, &app_id);
++		if (ret)
++			goto err_sbuf;
++		app->loaded_here = true;
++	} else if (ret) {
++		goto err_sbuf;
++	}
++
++	app->app_id = app_id;
++	app->loaded = true;
++	req.app_id = app_id;
++	req.flags = app->loaded_here ? QSEE_APP_LOADED_HERE : 0;
++	if (copy_to_user(argp, &req, sizeof(req)))
++		return -EFAULT;	/* stays loaded; released on close */
++	return 0;
++
++err_sbuf:
++	qcom_tzmem_free(app->sbuf);
++	app->sbuf = NULL;
++err_pool:
++	qcom_tzmem_pool_free(app->pool);
++	app->pool = NULL;
++	return ret;
++}
++
++static long qsee_app_send(struct qsee_app *app, void __user *argp)
++{
++	struct qsee_app_send req;
++	u32 rsp_off;
++	int ret;
++
++	if (!app->loaded)
++		return -ENODEV;
++	if (copy_from_user(&req, argp, sizeof(req)))
++		return -EFAULT;
++	if (!req.req_len || !req.rsp_len)
++		return -EINVAL;
++	rsp_off = ALIGN(req.req_len, 64);
++	if (rsp_off < req.req_len || rsp_off > app->sbuf_size ||
++	    req.rsp_len > app->sbuf_size - rsp_off)
++		return -EINVAL;
++
++	memset(app->sbuf + req.req_len, 0, rsp_off - req.req_len);
++	if (copy_from_user(app->sbuf, u64_to_user_ptr(req.req), req.req_len) ||
++	    copy_from_user(app->sbuf + rsp_off, u64_to_user_ptr(req.rsp), req.rsp_len))
++		return -EFAULT;
++
++	ret = qcom_scm_qseecom_app_send(app->app_id, app->sbuf, req.req_len,
++					app->sbuf + rsp_off, req.rsp_len);
++	if (ret)
++		return ret;
++
++	if (copy_to_user(u64_to_user_ptr(req.req), app->sbuf, req.req_len) ||
++	    copy_to_user(u64_to_user_ptr(req.rsp), app->sbuf + rsp_off, req.rsp_len))
++		return -EFAULT;
++	return 0;
++}
++
++/* Give @size bytes to another VM and report their physical address */
++static long qsee_app_vmbuf(struct qsee_app *app, void __user *argp)
++{
++	struct qcom_scm_vmperm to[2];
++	struct qsee_app_vmbuf req;
++	bool hlos;
++	u64 src = BIT(QCOM_SCM_VMID_HLOS);
++	size_t size;
++	phys_addr_t pa;
++	void *buf;
++	int ret;
++
++	if (copy_from_user(&req, argp, sizeof(req)))
++		return -EFAULT;
++	if (!req.size || req.size > SZ_4M ||
++	    (req.flags & ~(QSEE_APP_VMBUF_KEEP | QSEE_APP_VMBUF_HLOS)) || !req.vmid ||
++	    req.vmid >= 64 || req.vmid == QCOM_SCM_VMID_HLOS)
++		return -EINVAL;
++	if (app->vmbuf)
++		return -EBUSY;
++
++	/*
++	 * Below 4 GiB, as stock's sp_mem heap (alloc-ranges 0 - 0xffffffff):
++	 * the secure processor cannot reach memory above that, and keymaster64
++	 * does not check, so a higher buffer fails only inside the SPSS.
++	 */
++	size = PAGE_ALIGN(req.size);
++	hlos = req.flags & QSEE_APP_VMBUF_HLOS;
++	if (hlos) {
++		/* Uncached and below 4 GiB (the misc device's DMA mask) */
++		buf = dma_alloc_coherent(qsee_app_misc.this_device, size, &app->vmbuf_dma,
++					 GFP_KERNEL);
++		if (!buf)
++			return -ENOMEM;
++		pa = app->vmbuf_dma;	/* no IOMMU behind this device */
++	} else {
++		buf = alloc_pages_exact(size, GFP_KERNEL | GFP_DMA32 | __GFP_ZERO);
++		if (!buf)
++			return -ENOMEM;
++		pa = virt_to_phys(buf);
++	}
++	if (pa + size - 1 > U32_MAX) {
++		ret = -ENOMEM;
++		goto err_free;
++	}
++
++	to[0].vmid = req.vmid;
++	to[0].perm = QCOM_SCM_PERM_RW;
++	to[1].vmid = QCOM_SCM_VMID_HLOS;
++	to[1].perm = QCOM_SCM_PERM_RW;
++	ret = qcom_scm_assign_mem(pa, size, &src, to, hlos ? 2 : 1);
++	if (ret)
++		goto err_free;
++
++	app->vmbuf = buf;
++	app->vmbuf_size = size;
++	app->vmbuf_hlos = hlos;
++	app->vmbuf_keep = req.flags & QSEE_APP_VMBUF_KEEP;
++	app->vmbuf_perms = src;		/* now the owner set, for the way back */
++	req.phys = pa;
++	if (copy_to_user(argp, &req, sizeof(req)))
++		return -EFAULT;		/* kept; returned on close */
++	return 0;
++
++err_free:
++	if (hlos)
++		dma_free_coherent(qsee_app_misc.this_device, size, buf, app->vmbuf_dma);
++	else
++		free_pages_exact(buf, size);
++	return ret;
++}
++
++static int qsee_app_mmap(struct file *file, struct vm_area_struct *vma)
++{
++	struct qsee_app *app = file->private_data;
++	int ret = -ENODEV;
++
++	mutex_lock(&app->lock);
++	if (app->vmbuf && app->vmbuf_hlos && !vma->vm_pgoff &&
++	    vma->vm_end - vma->vm_start <= app->vmbuf_size)
++		ret = dma_mmap_coherent(qsee_app_misc.this_device, vma, app->vmbuf,
++					app->vmbuf_dma, vma->vm_end - vma->vm_start);
++	mutex_unlock(&app->lock);
++	return ret;
++}
++
++static void qsee_app_vmbuf_release(struct qsee_app *app)
++{
++	struct qcom_scm_vmperm hlos = {
++		.vmid = QCOM_SCM_VMID_HLOS,
++		.perm = QCOM_SCM_PERM_RWX,
++	};
++	u64 src = app->vmbuf_perms;
++
++	if (!app->vmbuf)
++		return;
++	if (app->vmbuf_keep) {
++		/* The secure side still has its address: it stays theirs until reboot */
++		pr_info("qsee-app: %zu bytes at %pa stay with VMs %llx\n", app->vmbuf_size,
++			&(phys_addr_t){ app->vmbuf_hlos ? app->vmbuf_dma : virt_to_phys(app->vmbuf) },
++			app->vmbuf_perms);
++		return;
++	}
++	/* Leak it rather than free memory another VM may still own */
++	phys_addr_t pa = app->vmbuf_hlos ? app->vmbuf_dma : virt_to_phys(app->vmbuf);
++
++	if (qcom_scm_assign_mem(pa, app->vmbuf_size, &src, &hlos, 1)) {
++		pr_err("qsee-app: could not reclaim %zu bytes at %pa, leaking them\n",
++		       app->vmbuf_size, &pa);
++		return;
++	}
++	if (app->vmbuf_hlos)
++		dma_free_coherent(qsee_app_misc.this_device, app->vmbuf_size, app->vmbuf,
++				  app->vmbuf_dma);
++	else
++		free_pages_exact(app->vmbuf, app->vmbuf_size);
++}
++
++static long qsee_app_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
++{
++	struct qsee_app *app = file->private_data;
++	long ret;
++
++	mutex_lock(&app->lock);
++	switch (cmd) {
++	case QSEE_APP_IOC_LOAD:
++		ret = qsee_app_load(app, (void __user *)arg);
++		break;
++	case QSEE_APP_IOC_SEND:
++		ret = qsee_app_send(app, (void __user *)arg);
++		break;
++	case QSEE_APP_IOC_VMBUF:
++		ret = qsee_app_vmbuf(app, (void __user *)arg);
++		break;
++	default:
++		ret = -ENOTTY;
++	}
++	mutex_unlock(&app->lock);
++	return ret;
++}
++
++static int qsee_app_open(struct inode *inode, struct file *file)
++{
++	struct qsee_app *app = kzalloc(sizeof(*app), GFP_KERNEL);
++
++	if (!app)
++		return -ENOMEM;
++	mutex_init(&app->lock);
++	file->private_data = app;
++	return nonseekable_open(inode, file);
++}
++
++static int qsee_app_release(struct inode *inode, struct file *file)
++{
++	struct qsee_app *app = file->private_data;
++
++	if (app->loaded_here)
++		qcom_scm_qseecom_app_shutdown(app->app_id);
++	qsee_app_vmbuf_release(app);
++	if (app->sbuf)
++		qcom_tzmem_free(app->sbuf);
++	if (app->pool)
++		qcom_tzmem_pool_free(app->pool);
++	mutex_destroy(&app->lock);
++	kfree(app);
++	return 0;
++}
++
++static const struct file_operations qsee_app_fops = {
++	.owner = THIS_MODULE,
++	.open = qsee_app_open,
++	.release = qsee_app_release,
++	.unlocked_ioctl = qsee_app_ioctl,
++	.mmap = qsee_app_mmap,
++	.compat_ioctl = compat_ptr_ioctl,
++};
++
++static struct miscdevice qsee_app_misc = {
++	.minor = MISC_DYNAMIC_MINOR,
++	.name = "qsee-app",
++	.fops = &qsee_app_fops,
++	.mode = 0600,
++};
++
++static int __init qsee_app_init(void)
++{
++	int ret = misc_register(&qsee_app_misc);
++
++	if (ret)
++		return ret;
++	/* QSEE_APP_VMBUF_HLOS buffers: below 4 GiB, as the secure processor needs */
++	ret = dma_coerce_mask_and_coherent(qsee_app_misc.this_device, DMA_BIT_MASK(32));
++	if (ret)
++		misc_deregister(&qsee_app_misc);
++	return ret;
++}
++module_init(qsee_app_init);
++
++static void __exit qsee_app_exit(void)
++{
++	misc_deregister(&qsee_app_misc);
++}
++module_exit(qsee_app_exit);
++
++MODULE_DESCRIPTION("Userspace access to QSEE trusted applications");
++MODULE_LICENSE("GPL");
+diff --git a/include/uapi/linux/qcom_qsee_app.h b/include/uapi/linux/qcom_qsee_app.h
+new file mode 100644
+index 0000000..fae39c8
+--- /dev/null
++++ b/include/uapi/linux/qcom_qsee_app.h
+@@ -0,0 +1,85 @@
++/* SPDX-License-Identifier: GPL-2.0-only WITH Linux-syscall-note */
++/*
++ * Userspace access to one QSEE trusted application per file descriptor,
++ * through the legacy QSEECOM calls (see drivers/firmware/qcom/qcom_qsee_app.c).
++ */
++#ifndef _UAPI_LINUX_QCOM_QSEE_APP_H
++#define _UAPI_LINUX_QCOM_QSEE_APP_H
++
++#include <linux/ioctl.h>
++#include <linux/types.h>
++
++#define QSEE_APP_NAME_MAX	64
++
++/**
++ * struct qsee_app_load - load a trusted application for this descriptor
++ * @path:	firmware path without suffix, e.g. "qcom/sm8350/Samsung/b2q/securefp";
++ *		<path>.mdt and <path>.b00.. are read with request_firmware()
++ * @sbuf_size:	size of the shared buffer the application exchanges commands in
++ * @app_id:	out: the id QSEE gave the application
++ * @flags:	out: QSEE_APP_LOADED_HERE if this call loaded it, 0 if it was
++ *		already resident (it is then not unloaded on close)
++ */
++struct qsee_app_load {
++	char path[128];
++	__u32 sbuf_size;
++	__u32 app_id;
++	__u32 flags;
++	__u32 reserved;
++};
++
++#define QSEE_APP_LOADED_HERE	(1 << 0)
++
++/**
++ * struct qsee_app_send - send one command to the loaded application
++ * @req:	userspace request buffer, copied to the start of the shared buffer
++ *		before the call and back from it afterwards
++ * @req_len:	request length
++ * @rsp:	userspace response buffer, copied to the shared buffer at the
++ *		64-byte aligned offset after the request before the call (apps
++ *		may read input from it) and back from it afterwards
++ * @rsp_len:	response length; ALIGN(req_len, 64) + rsp_len must fit in
++ *		sbuf_size
++ */
++struct qsee_app_send {
++	__u64 req;
++	__u32 req_len;
++	__u32 rsp_len;
++	__u64 rsp;
++};
++
++/**
++ * struct qsee_app_vmbuf - a buffer handed to another VM for this descriptor
++ * @size:	bytes, rounded up to pages
++ * @vmid:	VM that gets read/write access (e.g. 0x22, CP_SPSS_SP_SHARED);
++ *		Linux loses access until the descriptor is closed
++ * @flags:	QSEE_APP_VMBUF_KEEP or 0
++ * @phys:	out: physical address to pass to the application
++ *
++ * Some apps take a shared buffer by physical address that must belong to
++ * another VM (keymaster64's SPU_INIT wants one owned by CP_SPSS_SP_SHARED).
++ * One per descriptor; it is assigned back to HLOS and freed on close,
++ * unless QSEE_APP_VMBUF_KEEP is set: then it stays with the other VM until
++ * reboot, for buffers the secure side keeps using after the call.
++ */
++struct qsee_app_vmbuf {
++	__u64 size;
++	__u32 vmid;
++	__u32 flags;
++	__u64 phys;
++};
++
++#define QSEE_APP_VMBUF_KEEP	(1 << 0)
++/*
++ * Share instead of hand over: Linux keeps read/write access next to @vmid,
++ * and the descriptor can be mmap()ed (uncached) to read and fill the buffer.
++ * The SPSS NVM service's DDR copy is such a buffer (VMID CP_SPSS_HLOS_SHARED).
++ */
++#define QSEE_APP_VMBUF_HLOS	(1 << 1)
++
++#define QSEE_APP_IOC_MAGIC	'Q'
++#define QSEE_APP_IOC_LOAD	_IOWR(QSEE_APP_IOC_MAGIC, 1, struct qsee_app_load)
++#define QSEE_APP_IOC_SEND	_IOW(QSEE_APP_IOC_MAGIC, 2, struct qsee_app_send)	/* buffers are in/out */
++#define QSEE_APP_IOC_VMBUF	_IOWR(QSEE_APP_IOC_MAGIC, 3, struct qsee_app_vmbuf)
++
++#endif /* _UAPI_LINUX_QCOM_QSEE_APP_H */

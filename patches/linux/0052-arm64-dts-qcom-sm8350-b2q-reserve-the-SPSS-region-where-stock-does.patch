@@ -1,0 +1,43 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] arm64: dts: qcom: sm8350-b2q: reserve the SPSS region where stock does
+
+The board file deleted sm8350.dtsi's pil_spss_mem and put it back at
+0x8b51c000, 1 MiB below stock. Stock reserves 0x8b600000-0x8b700000
+(pil_spss_region@8b600000), which is also what sm8350.dtsi has. The
+secure processor is started by the bootloader on this phone (stock
+"qcom,boot-enabled") and runs from that region, while Linux listed
+0x8b61c000-0x8b7fffff as System RAM, so it could allocate pages under
+the running SPSS.
+
+Drop the override and keep sm8350.dtsi's node.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts |    6 ------
+ 1 file changed, 6 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+index 14313f7..287b433 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+@@ -28,7 +28,6 @@
+ /delete-node/ &pil_cvp_mem;
+ /delete-node/ &pil_adsp_mem;
+ /delete-node/ &pil_slpi_mem;
+-/delete-node/ &pil_spss_mem;
+ /delete-node/ &rmtfs_mem;
+ /delete-node/ &removed_mem;
+ 
+@@ -203,11 +202,6 @@
+ 			no-map;
+ 		};
+ 
+-		pil_spss_mem: memory@8b51c000 {
+-			reg = <0 0x8b51c000 0 0x100000>;
+-			no-map;
+-		};
+-
+ 		// Should be fine with default?
+ 		pil_modem_mem: memory@8b800000 {
+ 			reg = <0 0x8b800000 0 0xf600000>;

@@ -1,0 +1,478 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] firmware: qcom: scm: add QSEECOM app start and a TA load probe
+
+Mainline's QSEECOM interface can only look up and talk to apps that
+firmware already loaded (uefisecapp on the laptops). Samsung's fingerprint
+stack loads its TA from Linux: libbauthtzcommon.so calls
+QSEECom_start_app("/vendor/firmware_mnt/image", "securefp", 0x1f4140),
+which downstream qseecom turns into the QSEOS APP_START call (owner
+QSEE_OS, service APP_MGR, command 1) with the .mdt and every .bNN
+segment back to back in one contiguous buffer.
+
+Add qcom_scm_qseecom_app_start() and qcom_scm_qseecom_app_shutdown() for
+that, and QCOM_QSEECOM_PROBE, a test module that looks an app up, loads
+it from <fw_dir>/<app>.mdt + .bNN through request_firmware() into a TZ
+memory pool, and sends it one raw command, in stages set by a module
+parameter. The defaults are securefp's BAuth_Type_Check: opcode 0x10 in
+a 64-byte request at the start of the shared buffer, the 64-byte reply
+at offset 0x40.
+
+INCOMPLETE and listener-blocked results are still not handled; APP_START
+reports them as -EIO with the raw result, type and data.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/firmware/qcom/Kconfig              |  12 +
+ drivers/firmware/qcom/Makefile             |   1 +
+ drivers/firmware/qcom/qcom_qseecom_probe.c | 266 +++++++++++++++++++++++++++++
+ drivers/firmware/qcom/qcom_scm.c           |  89 ++++++++++
+ include/linux/firmware/qcom/qcom_scm.h     |  14 ++
+ 5 files changed, 382 insertions(+)
+ create mode 100644 drivers/firmware/qcom/qcom_qseecom_probe.c
+
+diff --git a/drivers/firmware/qcom/Kconfig b/drivers/firmware/qcom/Kconfig
+index c7f8413..66b2209 100644
+--- a/drivers/firmware/qcom/Kconfig
++++ b/drivers/firmware/qcom/Kconfig
+@@ -78,6 +78,18 @@ config QCOM_QSEECOM
+ 
+ 	  Select Y here to enable the QSEECOM interface driver.
+ 
++config QCOM_QSEECOM_PROBE
++	tristate "Qualcomm QSEE app load probe"
++	depends on QCOM_QSEECOM
++	help
++	  Test module for bringing up a QSEE trusted application from Linux.
++	  On load it queries the QSEECOM version, looks the app up, and,
++	  depending on the "stage" parameter, loads the app's .mdt/.bNN image
++	  through request_firmware() and sends it one raw command. Everything it
++	  learns goes to the kernel log. It does nothing until it is loaded.
++
++	  If unsure, say N.
++
+ config QCOM_QSEECOM_UEFISECAPP
+ 	bool "Qualcomm SEE UEFI Secure App client driver"
+ 	depends on QCOM_QSEECOM
+diff --git a/drivers/firmware/qcom/Makefile b/drivers/firmware/qcom/Makefile
+index 88ce74d..a30f8e7 100644
+--- a/drivers/firmware/qcom/Makefile
++++ b/drivers/firmware/qcom/Makefile
+@@ -9,5 +9,6 @@ CFLAGS_qcom_scm-smc.o := -I$(src)
+ obj-$(CONFIG_QCOM_TZMEM)	+= qcom_tzmem.o
+ obj-$(CONFIG_QCOM_QSEECOM)	+= qcom_qseecom.o
+ obj-$(CONFIG_QCOM_QSEECOM_UEFISECAPP) += qcom_qseecom_uefisecapp.o
++obj-$(CONFIG_QCOM_QSEECOM_PROBE) += qcom_qseecom_probe.o
+ obj-$(CONFIG_QCOM_PAS)		+= qcom_pas.o
+ obj-$(CONFIG_QCOM_PAS_TEE)	+= qcom_pas_tee.o
+diff --git b/drivers/firmware/qcom/qcom_qseecom_probe.c b/drivers/firmware/qcom/qcom_qseecom_probe.c
+new file mode 100644
+index 0000000..3d501ee
+--- /dev/null
++++ b/drivers/firmware/qcom/qcom_qseecom_probe.c
+@@ -0,0 +1,266 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * QSEE app load probe.
++ *
++ * Bring-up tool for trusted applications that stock Android loads through
++ * downstream qseecom (QSEECOM_IOCTL_LOAD_APP_REQ) and then drives with
++ * QSEECom_send_cmd(). It runs once, at module load, in stages:
++ *
++ *   stage=0  look the app up (QSEOS APP_LOOKUP)
++ *   stage=1  if it is not loaded, load <fw_dir>/<app>.mdt + .bNN (APP_START)
++ *   stage=2  send one raw command: a u32 opcode and a u32 argument in a
++ *            req_len request at the start of the shared buffer, the reply
++ *            read back from rsp_off
++ *
++ * The defaults match Samsung's securefp TA as libbauthtzcommon.so drives it:
++ * a 0x1f4140-byte shared buffer and BAuth_Type_Check, opcode 0x10, 64-byte
++ * request at offset 0 and 64-byte reply at offset 0x40, status in the first
++ * reply word and the value in the second.
++ *
++ * Everything goes to the kernel log. An app this module loaded is shut down
++ * again when the module is removed.
++ */
++
++#include <linux/device/faux.h>
++#include <linux/elf.h>
++#include <linux/firmware.h>
++#include <linux/firmware/qcom/qcom_scm.h>
++#include <linux/firmware/qcom/qcom_tzmem.h>
++#include <linux/mm.h>
++#include <linux/module.h>
++#include <linux/slab.h>
++#include <linux/string.h>
++
++static char *app = "securefp";
++module_param(app, charp, 0444);
++MODULE_PARM_DESC(app, "QSEE app name (default securefp)");
++
++static char *fw_dir = "qcom/sm8350/Samsung/b2q";
++module_param(fw_dir, charp, 0444);
++MODULE_PARM_DESC(fw_dir, "firmware directory holding <app>.mdt and <app>.bNN");
++
++static int stage;
++module_param(stage, int, 0444);
++MODULE_PARM_DESC(stage, "0: lookup, 1: + load, 2: + send one command");
++
++static uint cmd = 0x10;
++module_param(cmd, uint, 0444);
++MODULE_PARM_DESC(cmd, "opcode, first u32 of the request");
++
++static uint arg;
++module_param(arg, uint, 0444);
++MODULE_PARM_DESC(arg, "second u32 of the request");
++
++static uint sbuf_size = 0x1f4140;
++module_param(sbuf_size, uint, 0444);
++MODULE_PARM_DESC(sbuf_size, "shared buffer size");
++
++static uint req_len = 0x40;
++module_param(req_len, uint, 0444);
++
++static uint rsp_off = 0x40;
++module_param(rsp_off, uint, 0444);
++
++static uint rsp_len = 0x40;
++module_param(rsp_len, uint, 0444);
++
++static struct faux_device *probe_dev;
++static u32 loaded_app_id;
++static bool we_loaded;
++
++static int qprobe_read_part(const char *name, const struct firmware **fw)
++{
++	int ret;
++
++	ret = request_firmware(fw, name, &probe_dev->dev);
++	if (ret)
++		pr_err("qseecom-probe: %s: %d\n", name, ret);
++	return ret;
++}
++
++/*
++ * Same layout as downstream __qseecom_get_fw_data(): the .mdt, then every
++ * .bNN in order, back to back. mdt_len is the .mdt size, img_len the total.
++ */
++static int qprobe_load(u32 *app_id)
++{
++	struct qcom_tzmem_pool_config cfg = { .policy = QCOM_TZMEM_POLICY_STATIC };
++	const struct firmware *mdt, *seg;
++	struct qcom_tzmem_pool *pool;
++	const struct elf64_hdr *eh;
++	size_t total, off;
++	char *name;
++	void *img;
++	int i, ret;
++
++	name = kasprintf(GFP_KERNEL, "%s/%s.mdt", fw_dir, app);
++	if (!name)
++		return -ENOMEM;
++	ret = qprobe_read_part(name, &mdt);
++	kfree(name);
++	if (ret)
++		return ret;
++
++	eh = (const struct elf64_hdr *)mdt->data;
++	if (mdt->size < sizeof(*eh) || memcmp(eh->e_ident, ELFMAG, SELFMAG) ||
++	    eh->e_ident[EI_CLASS] != ELFCLASS64) {
++		pr_err("qseecom-probe: %s.mdt is not a 64-bit ELF\n", app);
++		ret = -EINVAL;
++		goto out_mdt;
++	}
++
++	/* First pass: total size. */
++	total = mdt->size;
++	for (i = 0; i < eh->e_phnum; i++) {
++		name = kasprintf(GFP_KERNEL, "%s/%s.b%02d", fw_dir, app, i);
++		if (!name) {
++			ret = -ENOMEM;
++			goto out_mdt;
++		}
++		ret = qprobe_read_part(name, &seg);
++		kfree(name);
++		if (ret)
++			goto out_mdt;
++		total += seg->size;
++		release_firmware(seg);
++	}
++	if (total > U32_MAX) {
++		ret = -EFBIG;
++		goto out_mdt;
++	}
++
++	cfg.initial_size = PAGE_ALIGN(total);
++	pool = qcom_tzmem_pool_new(&cfg);
++	if (IS_ERR(pool)) {
++		ret = PTR_ERR(pool);
++		pr_err("qseecom-probe: no TZ memory for %zu bytes: %d\n", total, ret);
++		goto out_mdt;
++	}
++	img = qcom_tzmem_alloc(pool, total, GFP_KERNEL);
++	if (!img) {
++		ret = -ENOMEM;
++		goto out_pool;
++	}
++
++	/* Second pass: copy. */
++	memcpy(img, mdt->data, mdt->size);
++	off = mdt->size;
++	for (i = 0; i < eh->e_phnum; i++) {
++		name = kasprintf(GFP_KERNEL, "%s/%s.b%02d", fw_dir, app, i);
++		if (!name) {
++			ret = -ENOMEM;
++			goto out_img;
++		}
++		ret = qprobe_read_part(name, &seg);
++		kfree(name);
++		if (ret)
++			goto out_img;
++		if (seg->size > total - off) {
++			release_firmware(seg);
++			ret = -EINVAL;
++			goto out_img;
++		}
++		memcpy(img + off, seg->data, seg->size);
++		off += seg->size;
++		release_firmware(seg);
++	}
++
++	pr_info("qseecom-probe: APP_START %s: mdt %zu, image %zu bytes at %pa\n",
++		app, mdt->size, total, &(phys_addr_t){ qcom_tzmem_to_phys(img) });
++	ret = qcom_scm_qseecom_app_start(qcom_tzmem_to_phys(img), mdt->size,
++					 total, app_id);
++	pr_info("qseecom-probe: APP_START %s: %d, app id %u\n", app, ret,
++		ret ? 0 : *app_id);
++
++out_img:
++	qcom_tzmem_free(img);
++out_pool:
++	qcom_tzmem_pool_free(pool);
++out_mdt:
++	release_firmware(mdt);
++	return ret;
++}
++
++static int qprobe_send(u32 app_id)
++{
++	struct qcom_tzmem_pool_config cfg = { .policy = QCOM_TZMEM_POLICY_STATIC };
++	struct qcom_tzmem_pool *pool;
++	u32 *rsp;
++	u8 *sbuf;
++	int ret;
++
++	if (req_len < 8 || rsp_len < 8 || rsp_off < req_len ||
++	    rsp_off + rsp_len > sbuf_size)
++		return -EINVAL;
++
++	cfg.initial_size = PAGE_ALIGN(sbuf_size);
++	pool = qcom_tzmem_pool_new(&cfg);
++	if (IS_ERR(pool))
++		return PTR_ERR(pool);
++	sbuf = qcom_tzmem_alloc(pool, sbuf_size, GFP_KERNEL);
++	if (!sbuf) {
++		ret = -ENOMEM;
++		goto out_pool;
++	}
++	memset(sbuf, 0, sbuf_size);
++	((u32 *)sbuf)[0] = cmd;
++	((u32 *)sbuf)[1] = arg;
++	rsp = (u32 *)(sbuf + rsp_off);
++
++	ret = qcom_scm_qseecom_app_send(app_id, sbuf, req_len, rsp, rsp_len);
++	pr_info("qseecom-probe: send %s cmd %#x arg %#x: %d\n", app, cmd, arg, ret);
++	if (!ret)
++		print_hex_dump(KERN_INFO, "qseecom-probe: rsp ", DUMP_PREFIX_OFFSET,
++			       16, 4, rsp, rsp_len, false);
++
++	qcom_tzmem_free(sbuf);
++out_pool:
++	qcom_tzmem_pool_free(pool);
++	return ret;
++}
++
++static int __init qprobe_init(void)
++{
++	u32 app_id = 0;
++	int ret;
++
++	probe_dev = faux_device_create("qcom-qseecom-probe", NULL, NULL);
++	if (!probe_dev)
++		return -ENODEV;
++
++	ret = qcom_scm_qseecom_app_get_id(app, &app_id);
++	pr_info("qseecom-probe: APP_LOOKUP %s: %d, app id %u\n", app, ret, app_id);
++	if (stage < 1)
++		goto out;
++
++	if (ret == -ENOENT) {
++		ret = qprobe_load(&app_id);
++		if (ret)
++			goto out;
++		loaded_app_id = app_id;
++		we_loaded = true;
++	} else if (ret) {
++		goto out;
++	}
++	if (stage < 2)
++		goto out;
++
++	ret = qprobe_send(app_id);
++out:
++	/* Stay loaded so a loaded app can be shut down on removal. */
++	return 0;
++}
++
++static void __exit qprobe_exit(void)
++{
++	if (we_loaded)
++		pr_info("qseecom-probe: APP_SHUTDOWN %u: %d\n", loaded_app_id,
++			qcom_scm_qseecom_app_shutdown(loaded_app_id));
++	faux_device_destroy(probe_dev);
++}
++
++module_init(qprobe_init);
++module_exit(qprobe_exit);
++
++MODULE_DESCRIPTION("QSEE app load probe");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/firmware/qcom/qcom_scm.c b/drivers/firmware/qcom/qcom_scm.c
+index 3eaa4c9..9492eeb 100644
+--- a/drivers/firmware/qcom/qcom_scm.c
++++ b/drivers/firmware/qcom/qcom_scm.c
+@@ -119,6 +119,12 @@ enum qcom_scm_qseecom_tz_cmd_app {
+ 	QSEECOM_TZ_CMD_APP_LOOKUP		= 3,
+ };
+ 
++/* QSEECOM_TZ_SVC_APP_MGR commands, owner QSEECOM_TZ_OWNER_QSEE_OS. */
++enum qcom_scm_qseecom_tz_cmd_app_mgr {
++	QSEECOM_TZ_CMD_APP_START		= 1,
++	QSEECOM_TZ_CMD_APP_SHUTDOWN		= 2,
++};
++
+ enum qcom_scm_qseecom_tz_cmd_info {
+ 	QSEECOM_TZ_CMD_INFO_VERSION		= 3,
+ };
+@@ -2295,6 +2301,89 @@ int qcom_scm_qseecom_app_send(u32 app_id, void *req, size_t req_size,
+ }
+ EXPORT_SYMBOL_GPL(qcom_scm_qseecom_app_send);
+ 
++/**
++ * qcom_scm_qseecom_app_start() - Load a QSEE app into the secure world.
++ * @img_phys: Physical address of the image: the .mdt followed by every
++ *            .bNN segment, in order, in one physically contiguous buffer
++ *            (TZ memory).
++ * @mdt_len:  Size of the .mdt part.
++ * @img_len:  Size of the whole image, .mdt included.
++ * @app_id:   Set to the ID of the loaded app on success.
++ *
++ * This is the legacy QSEOS APP_START call (owner QSEE_OS, service APP_MGR,
++ * command 1) that downstream qseecom issues for QSEECOM_IOCTL_LOAD_APP_REQ.
++ * TZ authenticates the image against its signature, so only images signed
++ * for this device load. Calls that come back INCOMPLETE or blocked on a
++ * listener are not handled (see qcom_scm_qseecom_call()) and fail here.
++ *
++ * Return: Zero on success, -EIO if TZ refused the image, or another negative
++ * error code.
++ */
++int qcom_scm_qseecom_app_start(phys_addr_t img_phys, u32 mdt_len, u32 img_len,
++			       u32 *app_id)
++{
++	struct qcom_scm_qseecom_resp res = {};
++	struct qcom_scm_desc desc = {};
++	int status;
++
++	if (!mdt_len || mdt_len > img_len)
++		return -EINVAL;
++
++	desc.owner = QSEECOM_TZ_OWNER_QSEE_OS;
++	desc.svc = QSEECOM_TZ_SVC_APP_MGR;
++	desc.cmd = QSEECOM_TZ_CMD_APP_START;
++	desc.arginfo = QCOM_SCM_ARGS(3, QCOM_SCM_VAL, QCOM_SCM_VAL, QCOM_SCM_VAL);
++	desc.args[0] = mdt_len;
++	desc.args[1] = img_len;
++	desc.args[2] = img_phys;
++
++	status = qcom_scm_qseecom_call(&desc, &res);
++	if (status)
++		return status;
++
++	if (res.result != QSEECOM_RESULT_SUCCESS) {
++		dev_err(__scm->dev, "qseecom: app start: result %#llx, type %#llx, data %#llx\n",
++			res.result, res.resp_type, res.data);
++		return -EIO;
++	}
++
++	if (res.resp_type != QSEECOM_SCM_RES_APP_ID)
++		return -EINVAL;
++
++	*app_id = res.data;
++	return 0;
++}
++EXPORT_SYMBOL_GPL(qcom_scm_qseecom_app_start);
++
++/**
++ * qcom_scm_qseecom_app_shutdown() - Unload a QSEE app.
++ * @app_id: ID returned by qcom_scm_qseecom_app_start().
++ *
++ * Return: Zero on success, nonzero on failure.
++ */
++int qcom_scm_qseecom_app_shutdown(u32 app_id)
++{
++	struct qcom_scm_qseecom_resp res = {};
++	struct qcom_scm_desc desc = {};
++	int status;
++
++	desc.owner = QSEECOM_TZ_OWNER_QSEE_OS;
++	desc.svc = QSEECOM_TZ_SVC_APP_MGR;
++	desc.cmd = QSEECOM_TZ_CMD_APP_SHUTDOWN;
++	desc.arginfo = QCOM_SCM_ARGS(1, QCOM_SCM_VAL);
++	desc.args[0] = app_id;
++
++	status = qcom_scm_qseecom_call(&desc, &res);
++	if (status)
++		return status;
++
++	if (res.result != QSEECOM_RESULT_SUCCESS)
++		return -EIO;
++
++	return 0;
++}
++EXPORT_SYMBOL_GPL(qcom_scm_qseecom_app_shutdown);
++
+ /*
+  * We do not yet support re-entrant calls via the qseecom interface. To prevent
+  + any potential issues with this, only allow validated machines for now.
+diff --git a/include/linux/firmware/qcom/qcom_scm.h b/include/linux/firmware/qcom/qcom_scm.h
+index 5747bd1..b712de6 100644
+--- a/include/linux/firmware/qcom/qcom_scm.h
++++ b/include/linux/firmware/qcom/qcom_scm.h
+@@ -172,6 +172,9 @@ int qcom_scm_shm_bridge_delete(u64 handle);
+ int qcom_scm_qseecom_app_get_id(const char *app_name, u32 *app_id);
+ int qcom_scm_qseecom_app_send(u32 app_id, void *req, size_t req_size,
+ 			      void *rsp, size_t rsp_size);
++int qcom_scm_qseecom_app_start(phys_addr_t img_phys, u32 mdt_len, u32 img_len,
++			       u32 *app_id);
++int qcom_scm_qseecom_app_shutdown(u32 app_id);
+ 
+ #else /* CONFIG_QCOM_QSEECOM */
+ 
+@@ -187,6 +190,17 @@ static inline int qcom_scm_qseecom_app_send(u32 app_id,
+ 	return -EINVAL;
+ }
+ 
++static inline int qcom_scm_qseecom_app_start(phys_addr_t img_phys, u32 mdt_len,
++					     u32 img_len, u32 *app_id)
++{
++	return -EINVAL;
++}
++
++static inline int qcom_scm_qseecom_app_shutdown(u32 app_id)
++{
++	return -EINVAL;
++}
++
+ #endif /* CONFIG_QCOM_QSEECOM */
+ 
+ int qcom_scm_qtee_invoke_smc(phys_addr_t inbuf, size_t inbuf_size,

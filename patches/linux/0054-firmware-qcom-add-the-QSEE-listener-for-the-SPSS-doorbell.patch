@@ -1,0 +1,230 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] firmware: qcom: add the QSEE listener for the SPSS doorbell
+
+Trusted applications reach apps on the secure processor (SPSS) over
+QTEE's own glink edge, but the SPSS "reply ready" interrupt (IPCC client
+SPSS, signal TZ) is routed to the application processor. QTEE asks the
+normal world to wait for it through QSEE listener 0xb000, which
+Qualcomm's Android stack serves from qseecomd (libspl): command 0x777
+with a timeout, answered with 0xaa once the interrupt fired or 0xbb on
+timeout, and any other command (QTEE's 0xdead ping) echoed with 0xff.
+Without it every synchronous SPSS send fails at once.
+
+Serve that listener in the kernel. Interrupts are counted from probe on,
+so a doorbell that fires before QTEE asks is not lost; a request consumes
+all pending ones, as libspl does. Describe the interrupt in sm8350.dtsi.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ arch/arm64/boot/dts/qcom/sm8350.dtsi       |    6 +
+ drivers/firmware/qcom/Kconfig              |    9 ++
+ drivers/firmware/qcom/Makefile             |    1 
+ drivers/firmware/qcom/qcom_spss_listener.c |  153 ++++++++++++++++++++++++++++
+ 4 files changed, 169 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350.dtsi b/arch/arm64/boot/dts/qcom/sm8350.dtsi
+index 99a7f8d..e3cca5a 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm8350.dtsi
+@@ -662,6 +662,12 @@
+ 		};
+ 	};
+ 
++	/* QSEE listener 0xb000: the SPSS -> TZ doorbell lands at APSS */
++	spss-qsee-listener {
++		compatible = "qcom,spss-qsee-listener";
++		interrupts-extended = <&ipcc IPCC_CLIENT_SPSS IPCC_MPROC_SIGNAL_TZ IRQ_TYPE_LEVEL_HIGH>;
++	};
++
+ 	soc: soc@0 {
+ 		#address-cells = <2>;
+ 		#size-cells = <2>;
+diff --git a/drivers/firmware/qcom/Kconfig b/drivers/firmware/qcom/Kconfig
+index 5109b20..9b5e47b 100644
+--- a/drivers/firmware/qcom/Kconfig
++++ b/drivers/firmware/qcom/Kconfig
+@@ -90,6 +90,15 @@ config QCOM_QSEECOM_PROBE
+ 
+ 	  If unsure, say N.
+ 
++config QCOM_SPSS_LISTENER
++	tristate "QSEE listener for the secure processor (SPSS) doorbell"
++	depends on QCOM_QSEECOM && QCOM_TZMEM
++	help
++	  Serves QSEE listener 0xb000, which tells the secure world that the
++	  secure processor (SPSS) raised its reply interrupt. Trusted apps that
++	  talk to SPSS apps synchronously (keymaster64's StrongBox calls) need
++	  it; Qualcomm's Android stack serves it from qseecomd.
++
+ config QCOM_QSEE_APP
+ 	tristate "Userspace access to QSEE trusted applications"
+ 	depends on QCOM_QSEECOM
+diff --git a/drivers/firmware/qcom/Makefile b/drivers/firmware/qcom/Makefile
+index 3a998fe..60c611a 100644
+--- a/drivers/firmware/qcom/Makefile
++++ b/drivers/firmware/qcom/Makefile
+@@ -13,3 +13,4 @@ obj-$(CONFIG_QCOM_QSEECOM_PROBE) += qcom_qseecom_probe.o
+ obj-$(CONFIG_QCOM_QSEE_APP)	+= qcom_qsee_app.o
+ obj-$(CONFIG_QCOM_PAS)		+= qcom_pas.o
+ obj-$(CONFIG_QCOM_PAS_TEE)	+= qcom_pas_tee.o
++obj-$(CONFIG_QCOM_SPSS_LISTENER)	+= qcom_spss_listener.o
+diff --git a/drivers/firmware/qcom/qcom_spss_listener.c b/drivers/firmware/qcom/qcom_spss_listener.c
+new file mode 100644
+index 0000000..a55fb2d
+--- /dev/null
++++ b/drivers/firmware/qcom/qcom_spss_listener.c
+@@ -0,0 +1,153 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * QSEE listener 0xb000: the secure processor (SPSS) doorbell for QTEE.
++ *
++ * Trusted applications talk to SPSS apps over QTEE's own glink edge, but the
++ * "reply is there" interrupt from SPSS (IPCC client SPSS, signal TZ) lands
++ * at the application processor. On Qualcomm's Android stack qseecomd's
++ * libspl serves listener 0xb000 for it: QTEE asks it to wait for that
++ * interrupt (command 0x777 with a timeout) and continues once told it fired.
++ * Without the listener every synchronous send to the SPSS fails at once
++ * (keymaster64's StrongBox calls, hence hwvault's key wrapping).
++ *
++ * This serves the same protocol in the kernel:
++ *   request  { u32 cmd, u32 unused, u32 timeout_ms }
++ *   response { u32 cmd, u32 status }  0xaa interrupt, 0xbb timeout,
++ *            any other cmd (QTEE's 0xdead ping) is echoed with 0xff
++ * Interrupts are counted from probe on, so one that fires before QTEE asks
++ * is not lost; a request consumes all pending ones, as libspl's poll does.
++ */
++
++#include <linux/atomic.h>
++#include <linux/firmware/qcom/qcom_scm.h>
++#include <linux/firmware/qcom/qcom_tzmem.h>
++#include <linux/interrupt.h>
++#include <linux/jiffies.h>
++#include <linux/minmax.h>
++#include <linux/mod_devicetable.h>
++#include <linux/module.h>
++#include <linux/platform_device.h>
++#include <linux/wait.h>
++
++#define SPSS_LISTENER_ID	0xb000
++#define SPSS_LISTENER_BUF	SZ_4K		/* stock registers 0x400 */
++#define SPSS_CMD_WAIT_IRQ	0x777
++#define SPSS_ST_IRQ		0xaa
++#define SPSS_ST_TIMEOUT		0xbb
++#define SPSS_ST_OTHER		0xff
++#define SPSS_WAIT_MAX_MS	120000		/* QTEE's own send timeout */
++
++struct spss_listener {
++	struct device *dev;
++	struct qcom_tzmem_pool *pool;
++	struct qcom_scm_qseecom_listener l;
++	wait_queue_head_t wq;
++	atomic_t pending;
++};
++
++static irqreturn_t spss_listener_irq(int irq, void *data)
++{
++	struct spss_listener *sl = data;
++
++	atomic_inc(&sl->pending);
++	wake_up(&sl->wq);
++	return IRQ_HANDLED;
++}
++
++static int spss_listener_handle(void *priv, void *buf, size_t size)
++{
++	struct spss_listener *sl = priv;
++	__le32 *w = buf;
++	u32 cmd = le32_to_cpu(w[0]);
++	u32 status = SPSS_ST_OTHER;
++
++	if (cmd == SPSS_CMD_WAIT_IRQ) {
++		u32 ms = min(le32_to_cpu(w[2]), (u32)SPSS_WAIT_MAX_MS);
++
++		if (wait_event_timeout(sl->wq, atomic_read(&sl->pending) > 0,
++				       msecs_to_jiffies(ms)) ||
++		    atomic_read(&sl->pending) > 0) {
++			atomic_set(&sl->pending, 0);
++			status = SPSS_ST_IRQ;
++		} else {
++			status = SPSS_ST_TIMEOUT;
++			dev_dbg(sl->dev, "no SPSS doorbell within %u ms\n", ms);
++		}
++	}
++	dev_dbg(sl->dev, "request %#x -> %#x\n", cmd, status);
++	w[0] = cpu_to_le32(cmd);
++	w[1] = cpu_to_le32(status);
++	return 0;
++}
++
++static int spss_listener_probe(struct platform_device *pdev)
++{
++	struct qcom_tzmem_pool_config cfg = {
++		.policy = QCOM_TZMEM_POLICY_STATIC,
++		.initial_size = SPSS_LISTENER_BUF,
++	};
++	struct device *dev = &pdev->dev;
++	struct spss_listener *sl;
++	int irq, ret;
++
++	sl = devm_kzalloc(dev, sizeof(*sl), GFP_KERNEL);
++	if (!sl)
++		return -ENOMEM;
++	sl->dev = dev;
++	init_waitqueue_head(&sl->wq);
++	atomic_set(&sl->pending, 0);
++
++	irq = platform_get_irq(pdev, 0);
++	if (irq < 0)
++		return irq;
++	ret = devm_request_irq(dev, irq, spss_listener_irq, 0, "spss-qsee-doorbell", sl);
++	if (ret)
++		return dev_err_probe(dev, ret, "requesting the SPSS doorbell\n");
++
++	sl->pool = devm_qcom_tzmem_pool_new(dev, &cfg);
++	if (IS_ERR(sl->pool))
++		return PTR_ERR(sl->pool);
++	sl->l.buf = qcom_tzmem_alloc(sl->pool, SPSS_LISTENER_BUF, GFP_KERNEL);
++	if (!sl->l.buf)
++		return -ENOMEM;
++	sl->l.id = SPSS_LISTENER_ID;
++	sl->l.buf_size = SPSS_LISTENER_BUF;
++	sl->l.handle = spss_listener_handle;
++	sl->l.priv = sl;
++
++	ret = qcom_scm_qseecom_listener_register(&sl->l);
++	if (ret) {
++		qcom_tzmem_free(sl->l.buf);
++		return dev_err_probe(dev, ret, "registering QSEE listener %#x\n", SPSS_LISTENER_ID);
++	}
++	platform_set_drvdata(pdev, sl);
++	dev_info(dev, "QSEE listener %#x registered\n", SPSS_LISTENER_ID);
++	return 0;
++}
++
++static void spss_listener_remove(struct platform_device *pdev)
++{
++	struct spss_listener *sl = platform_get_drvdata(pdev);
++
++	qcom_scm_qseecom_listener_unregister(&sl->l);
++	qcom_tzmem_free(sl->l.buf);
++}
++
++static const struct of_device_id spss_listener_of_match[] = {
++	{ .compatible = "qcom,spss-qsee-listener" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, spss_listener_of_match);
++
++static struct platform_driver spss_listener_driver = {
++	.probe = spss_listener_probe,
++	.remove = spss_listener_remove,
++	.driver = {
++		.name = "qcom-spss-qsee-listener",
++		.of_match_table = spss_listener_of_match,
++	},
++};
++module_platform_driver(spss_listener_driver);
++
++MODULE_DESCRIPTION("QSEE listener 0xb000 (secure processor doorbell)");
++MODULE_LICENSE("GPL");

@@ -95,3 +95,17 @@ CONFIG_RMNET=m
 # Audio: the sm8350 LPASS LPI pin controller lives in the sc7280 driver. Without
 # it lpass_tlmm has no driver and the DMIC pins never leave GPIO mode.
 CONFIG_PINCTRL_SC7280_LPASS_LPI=y
+# Fingerprint bring-up: the legacy QSEECOM SCM interface plus the probe module
+# from patches/linux/0040-*, which loads Samsung's securefp TA by hand. At boot
+# QSEECOM only queries the QSEE version; the probe does nothing until loaded.
+CONFIG_QCOM_QSEECOM=y
+CONFIG_QCOM_QSEECOM_PROBE=m
+# Fingerprint: the sensor rail (S2MPB02 L16) as a regulator-output node, switched by the
+# userspace HAL from sysfs, like stock's GF_IOC_POWER_CONTROL (patches/linux/0048-*).
+CONFIG_REGULATOR_USERSPACE_CONSUMER=y
+# Fingerprint: /dev/qsee-app, the userspace interface to the securefp TA (patches/linux/0049-*).
+CONFIG_QCOM_QSEE_APP=m
+CONFIG_QCOM_SPSS_LISTENER=m
+CONFIG_RPMSG_QCOM_GLINK_SPSS=m
+CONFIG_RPMSG_CTRL=m
+CONFIG_RPMSG_CHAR=m

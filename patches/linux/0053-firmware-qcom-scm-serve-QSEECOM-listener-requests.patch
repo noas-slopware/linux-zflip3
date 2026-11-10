@@ -1,0 +1,257 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] firmware: qcom: scm: serve QSEECOM listener requests
+
+A QSEE application call may need a service from the normal world
+("listener") before it can finish. QTEE then returns INCOMPLETE with the
+listener id in the response data, after writing the request into the
+buffer that listener registered, and waits for LISTENER_RESPONSE before it
+continues the call. qcom_scm_qseecom_call() only warned about such
+results, so any app that needs a listener failed, and the secure side was
+left waiting for an answer that never came (later calls got -EBUSY).
+
+Add listener registration (LISTENER service, the smcinvoke command first
+and the legacy one if that is not supported, as downstream qseecom does)
+and serve INCOMPLETE results in qcom_scm_qseecom_call(): run the
+registered handler on the request in its buffer and send its status back,
+repeating until QTEE returns the call's own result. A request for a
+listener nobody registered gets a failure status instead of no answer.
+As in downstream, the listener is taken from the data word; the response
+type was 0 on SM8350, not QSEECOM_SCM_RES_QSEOS_LISTENER_ID.
+
+Seen on the Galaxy Z Flip3 (SM8350): keymaster64's StrongBox calls wait for
+the secure processor through listener 0xb000 several times per command.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/firmware/qcom/qcom_scm.c       |  149 +++++++++++++++++++++++++++++++-
+ include/linux/firmware/qcom/qcom_scm.h |   21 +++++
+ 2 files changed, 167 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/firmware/qcom/qcom_scm.c b/drivers/firmware/qcom/qcom_scm.c
+index 9492eeb..2fb8d2d 100644
+--- a/drivers/firmware/qcom/qcom_scm.c
++++ b/drivers/firmware/qcom/qcom_scm.c
+@@ -111,9 +111,18 @@ enum qcom_scm_qseecom_tz_owner {
+ enum qcom_scm_qseecom_tz_svc {
+ 	QSEECOM_TZ_SVC_APP_ID_PLACEHOLDER	= 0,
+ 	QSEECOM_TZ_SVC_APP_MGR			= 1,
++	QSEECOM_TZ_SVC_LISTENER			= 2,
+ 	QSEECOM_TZ_SVC_INFO			= 6,
+ };
+ 
++/* QSEECOM_TZ_SVC_LISTENER commands, owner QSEECOM_TZ_OWNER_QSEE_OS. */
++enum qcom_scm_qseecom_tz_cmd_listener {
++	QSEECOM_TZ_CMD_LISTENER_REGISTER	= 1,
++	QSEECOM_TZ_CMD_LISTENER_DEREGISTER	= 2,
++	QSEECOM_TZ_CMD_LISTENER_RESPONSE	= 3,
++	QSEECOM_TZ_CMD_LISTENER_REGISTER_SMCINVOKE = 6,
++};
++
+ enum qcom_scm_qseecom_tz_cmd_app {
+ 	QSEECOM_TZ_CMD_APP_SEND			= 1,
+ 	QSEECOM_TZ_CMD_APP_LOOKUP		= 3,
+@@ -2090,6 +2099,9 @@ static int qcom_scm_find_dload_address(struct device *dev, u64 *addr)
+ /* Lock for QSEECOM SCM call executions */
+ static DEFINE_MUTEX(qcom_scm_qseecom_call_lock);
+ 
++/* Registered listeners, under qcom_scm_qseecom_call_lock */
++static LIST_HEAD(qcom_scm_qseecom_listeners);
++
+ static int __qcom_scm_qseecom_call(const struct qcom_scm_desc *desc,
+ 				   struct qcom_scm_qseecom_resp *res)
+ {
+@@ -2114,6 +2126,137 @@ static int __qcom_scm_qseecom_call(const struct qcom_scm_desc *desc,
+ 	return 0;
+ }
+ 
++static struct qcom_scm_qseecom_listener *qcom_scm_qseecom_find_listener(u32 id)
++{
++	struct qcom_scm_qseecom_listener *l;
++
++	list_for_each_entry(l, &qcom_scm_qseecom_listeners, node)
++		if (l->id == id)
++			return l;
++	return NULL;
++}
++
++/*
++ * While a call comes back INCOMPLETE, the secure world is waiting for a
++ * normal-world listener: its request is in that listener's shared buffer.
++ * Run the listener, put its status into LISTENER_RESPONSE and continue with
++ * whatever that returns (another listener request, or the original call's
++ * final result). A request for a listener nobody registered is answered
++ * with a failure status, so the secure world never stays blocked on it.
++ */
++static int qcom_scm_qseecom_serve_listeners(struct qcom_scm_qseecom_resp *res)
++{
++	lockdep_assert_held(&qcom_scm_qseecom_call_lock);
++
++	/*
++	 * As downstream qseecom: an INCOMPLETE result names the listener in
++	 * @data; @resp_type is not a type tag here (QTEE on SM8350 sets it to
++	 * something else than QSEECOM_SCM_RES_QSEOS_LISTENER_ID).
++	 */
++	while (res->result == QSEECOM_RESULT_INCOMPLETE) {
++		struct qcom_scm_desc desc = {
++			.owner = QSEECOM_TZ_OWNER_QSEE_OS,
++			.svc = QSEECOM_TZ_SVC_LISTENER,
++			.cmd = QSEECOM_TZ_CMD_LISTENER_RESPONSE,
++			.arginfo = QCOM_SCM_ARGS(2, QCOM_SCM_VAL, QCOM_SCM_VAL),
++		};
++		struct qcom_scm_qseecom_listener *l;
++		u32 id = res->data;
++		u32 status = QSEECOM_RESULT_FAILURE;
++		int ret;
++
++		dev_dbg(__scm->dev, "qseecom: listener %#x request (resp_type %#llx)\n",
++			id, res->resp_type);
++
++		l = qcom_scm_qseecom_find_listener(id);
++		if (l) {
++			if (!l->handle(l->priv, l->buf, l->buf_size))
++				status = QSEECOM_RESULT_SUCCESS;
++		} else {
++			dev_warn_ratelimited(__scm->dev,
++					     "qseecom: request for listener %#x, which is not registered\n", id);
++		}
++
++		desc.args[0] = id;
++		desc.args[1] = status;
++		ret = __qcom_scm_qseecom_call(&desc, res);
++		if (ret)
++			return ret;
++	}
++	return 0;
++}
++
++/**
++ * qcom_scm_qseecom_listener_register() - Register a normal-world listener.
++ * @l: listener; @l->buf must be a TZ memory buffer (qcom_tzmem) of @l->buf_size
++ *
++ * The secure world sends the listener's requests into @l->buf while an
++ * application call is in progress; @l->handle runs with the QSEECOM call lock
++ * held, reads the request from the buffer and writes its response over it.
++ *
++ * Return: Zero on success, nonzero on failure.
++ */
++int qcom_scm_qseecom_listener_register(struct qcom_scm_qseecom_listener *l)
++{
++	struct qcom_scm_desc desc = {
++		.owner = QSEECOM_TZ_OWNER_QSEE_OS,
++		.svc = QSEECOM_TZ_SVC_LISTENER,
++		.cmd = QSEECOM_TZ_CMD_LISTENER_REGISTER_SMCINVOKE,
++		.arginfo = QCOM_SCM_ARGS(3, QCOM_SCM_VAL, QCOM_SCM_RW, QCOM_SCM_VAL),
++	};
++	struct qcom_scm_qseecom_resp res;
++	int ret;
++
++	desc.args[0] = l->id;
++	desc.args[1] = qcom_tzmem_to_phys(l->buf);
++	desc.args[2] = l->buf_size;
++
++	mutex_lock(&qcom_scm_qseecom_call_lock);
++	if (qcom_scm_qseecom_find_listener(l->id)) {
++		ret = -EBUSY;
++		goto out;
++	}
++	ret = __qcom_scm_qseecom_call(&desc, &res);
++	if (ret == -EIO) {
++		/* As downstream: older QSEE only has the legacy command */
++		desc.cmd = QSEECOM_TZ_CMD_LISTENER_REGISTER;
++		ret = __qcom_scm_qseecom_call(&desc, &res);
++	}
++	if (!ret && res.result != QSEECOM_RESULT_SUCCESS)
++		ret = -EIO;
++	if (!ret)
++		list_add_tail(&l->node, &qcom_scm_qseecom_listeners);
++out:
++	mutex_unlock(&qcom_scm_qseecom_call_lock);
++	dev_dbg(__scm->dev, "qseecom: listener %#x register: %d (result %lld)\n",
++		l->id, ret, ret ? 0 : res.result);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(qcom_scm_qseecom_listener_register);
++
++/**
++ * qcom_scm_qseecom_listener_unregister() - Remove a listener again.
++ * @l: listener passed to qcom_scm_qseecom_listener_register()
++ */
++void qcom_scm_qseecom_listener_unregister(struct qcom_scm_qseecom_listener *l)
++{
++	struct qcom_scm_desc desc = {
++		.owner = QSEECOM_TZ_OWNER_QSEE_OS,
++		.svc = QSEECOM_TZ_SVC_LISTENER,
++		.cmd = QSEECOM_TZ_CMD_LISTENER_DEREGISTER,
++		.arginfo = QCOM_SCM_ARGS(1),
++		.args[0] = l->id,
++	};
++	struct qcom_scm_qseecom_resp res;
++
++	mutex_lock(&qcom_scm_qseecom_call_lock);
++	if (__qcom_scm_qseecom_call(&desc, &res) || res.result != QSEECOM_RESULT_SUCCESS)
++		dev_warn(__scm->dev, "qseecom: listener %#x deregister failed\n", l->id);
++	list_del(&l->node);
++	mutex_unlock(&qcom_scm_qseecom_call_lock);
++}
++EXPORT_SYMBOL_GPL(qcom_scm_qseecom_listener_unregister);
++
+ /**
+  * qcom_scm_qseecom_call() - Perform a QSEECOM SCM call.
+  * @desc: SCM call descriptor.
+@@ -2131,12 +2274,13 @@ static int qcom_scm_qseecom_call(const struct qcom_scm_desc *desc,
+ 
+ 	/*
+ 	 * Note: Multiple QSEECOM SCM calls should not be executed same time,
+-	 * so lock things here. This needs to be extended to callback/listener
+-	 * handling when support for that is implemented.
++	 * so lock things here, listener round trips included.
+ 	 */
+ 
+ 	mutex_lock(&qcom_scm_qseecom_call_lock);
+ 	status = __qcom_scm_qseecom_call(desc, res);
++	if (!status)
++		status = qcom_scm_qseecom_serve_listeners(res);
+ 	mutex_unlock(&qcom_scm_qseecom_call_lock);
+ 
+ 	dev_dbg(__scm->dev, "%s: owner=%x, svc=%x, cmd=%x, result=%lld, type=%llx, data=%llx\n",
+@@ -2156,7 +2300,6 @@ static int qcom_scm_qseecom_call(const struct qcom_scm_desc *desc,
+ 	 * prominently in case someone attempts to try these commands with a
+ 	 * device/command combination that isn't supported yet.
+ 	 */
+-	WARN_ON(res->result == QSEECOM_RESULT_INCOMPLETE);
+ 	WARN_ON(res->result == QSEECOM_RESULT_BLOCKED_ON_LISTENER);
+ 
+ 	return 0;
+diff --git a/include/linux/firmware/qcom/qcom_scm.h b/include/linux/firmware/qcom/qcom_scm.h
+index b712de6..2bd4f7e 100644
+--- a/include/linux/firmware/qcom/qcom_scm.h
++++ b/include/linux/firmware/qcom/qcom_scm.h
+@@ -176,6 +176,27 @@ int qcom_scm_qseecom_app_start(phys_addr_t img_phys, u32 mdt_len, u32 img_len,
+ 			       u32 *app_id);
+ int qcom_scm_qseecom_app_shutdown(u32 app_id);
+ 
++/**
++ * struct qcom_scm_qseecom_listener - normal-world service the secure world calls
++ * @id:		listener id, e.g. 0xb000 (secure processor doorbell)
++ * @buf:	qcom_tzmem buffer the requests arrive in and responses go back in
++ * @buf_size:	its size
++ * @handle:	serve the request in @buf, return 0 on success
++ * @priv:	passed to @handle
++ * @node:	internal
++ */
++struct qcom_scm_qseecom_listener {
++	u32 id;
++	void *buf;
++	size_t buf_size;
++	int (*handle)(void *priv, void *buf, size_t buf_size);
++	void *priv;
++	struct list_head node;
++};
++
++int qcom_scm_qseecom_listener_register(struct qcom_scm_qseecom_listener *l);
++void qcom_scm_qseecom_listener_unregister(struct qcom_scm_qseecom_listener *l);
++
+ #else /* CONFIG_QCOM_QSEECOM */
+ 
+ static inline int qcom_scm_qseecom_app_get_id(const char *app_name, u32 *app_id)

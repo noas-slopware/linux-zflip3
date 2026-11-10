@@ -71,8 +71,15 @@ check() {
 
 gzip -9 -n -c "$UBOOT" > "$WORK/u-boot.gz"
 cat "$WORK/u-boot.gz" "$DTB" > "$WORK/u-boot.gz-dtb"
+# ABL hands the boot image's OS version and patch level to keymaster64 (and
+# through it the secure processor); stock's boot.img carries 11.0.0 / 2026-08.
+# Ours had zero. Changing it alone did not change keymaster64's results, but
+# stock's values are kept so the secure world sees what it sees on stock. Use
+# them exactly, never newer ones: rollback state in the secure processor may
+# not come back down.
 mkbootimg --header_version 0 --kernel "$WORK/u-boot.gz-dtb" \
   --base 0x00000000 --kernel_offset 0x00008000 --ramdisk_offset 0x01000000 \
+  --os_version 11.0.0 --os_patch_level 2026-08 \
   --tags_offset 0x00000100 --pagesize 4096 -o "$OUT/boot.img"
 check "$OUT/boot.img"
 

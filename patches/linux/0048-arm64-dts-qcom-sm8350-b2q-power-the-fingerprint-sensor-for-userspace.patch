@@ -1,0 +1,112 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] arm64: dts: qcom: sm8350-b2q: power the fingerprint sensor for userspace
+
+The Goodix GW36T1 in the power key is driven by Samsung's securefp TA in
+TrustZone, which owns its SPI bus (GPIO 52-55). Linux only switches the
+sensor's 3.3 V rail, drives its reset and takes its data-ready
+interrupt, as stock's gw3x_common.c does in TZ mode.
+
+Describe S2MPB02 LDO16 (stock's VDD_BTP_3P3, 3.3 V) and expose it to the
+userspace HAL through a regulator-output node, which also applies stock's
+pin states for BTP_INT_N (GPIO 38, input, pull-down) and BTP_RST_N
+(GPIO 39, output low). Stop reserving GPIO 38-39: they are not in
+stock's lahaina_reserved_gpios, and stock's driver uses them from Linux.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts | 49 lines changed
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+--- a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+@@ -296,6 +296,22 @@
+ 		pinctrl-names = "default";
+ 	};
+ 
++	/*
++	 * The fingerprint sensor's 3.3 V rail, for the userspace HAL. Stock
++	 * runs the Goodix GW36T1 from the securefp TA in TrustZone, which owns
++	 * the SPI bus; Linux only switches VDD_BTP_3P3, drives reset (GPIO 39)
++	 * and takes the data-ready interrupt (GPIO 38), as stock's
++	 * gw3x_common.c does in TZ mode. Reset and interrupt are plain GPIO
++	 * lines for userspace; their pin states are applied here.
++	 */
++	fingerprint-power {
++		compatible = "regulator-output";
++		vout-supply = <&s2mpb02_l16>;
++
++		pinctrl-0 = <&btp_int_default>, <&btp_rst_default>;
++		pinctrl-names = "default";
++	};
++
+ 	sound: sound {
+ 		compatible = "qcom,sm8250-sndcard";
+ 		model = "SM-F711N";
+@@ -471,8 +487,7 @@
+ 		/*
+ 		 * Stock's s2mpb02_pmic@59 (dtbo entry 3). Only the rails with a
+ 		 * consumer here, or that stock keeps always on, are described:
+-		 * the core switches off an unclaimed rail it manages. Stock's
+-		 * L16 (VDD_BTP_3P3, the fingerprint sensor) and the camera
++		 * the core switches off an unclaimed rail it manages. The camera
+ 		 * rails stay undescribed until their consumers exist.
+ 		 */
+ 		s2mpb02: pmic@59 {
+@@ -507,6 +522,13 @@
+ 					regulator-boot-on;
+ 				};
+ 
++				/* Stock's VDD_BTP_3P3: the fingerprint sensor, 3.3 V */
++				s2mpb02_l16: ldo16 {
++					regulator-name = "VDD_BTP_3P3";
++					regulator-min-microvolt = <3300000>;
++					regulator-max-microvolt = <3300000>;
++				};
++
+ 				s2mpb02_l17: ldo17 {
+ 					regulator-name = "s2mpb02-l17";
+ 					regulator-min-microvolt = <3300000>;
+@@ -980,11 +1002,14 @@
+ &tlmm {
+ 	/*
+ 	 * TZ-owned pins. Touching their TLMM registers from the kernel resets the SoC.
+-	 * 4-7, 40-41 and 52-59 are reserved_gpios in Samsung's stock lahaina pinctrl;
+-	 * 30-31 (SE6 UART) reset this board on the first read; 38-39 are the
+-	 * fingerprint pins handed to TZ.
++	 * 30-31 (SE6 UART) reset this board on the first read; 52-55 (the
++	 * fingerprint SPI bus, owned by the securefp TA) and 30-31 are stock's
++	 * lahaina_reserved_gpios. 4-7, 40-41 and 56-59 were reserved from the
++	 * start of this port; where that came from is not recorded. 38-39
++	 * (BTP_INT_N, BTP_RST_N) are not reserved: stock's gw3x driver drives
++	 * them from Linux in TZ mode.
+ 	 */
+-	gpio-reserved-ranges = <4 4>, <30 2>, <38 4>, <52 8>;
++	gpio-reserved-ranges = <4 4>, <30 2>, <40 2>, <52 8>;
+ 
+ 	gpio-line-names =
+ 		"NC",			// GPIO_0
+@@ -1206,6 +1231,23 @@
+ 		bias-pull-down;
+ 	};
+ 
++	/* Fingerprint data ready, stock gfspi_drdypin_active: GPIO 38 */
++	btp_int_default: btp-int-default-state {
++		pins = "gpio38";
++		function = "gpio";
++		drive-strength = <6>;
++		input-enable;
++		bias-pull-down;
++	};
++
++	/* Fingerprint reset, stock gfspi_rstpin: GPIO 39, held low until powered */
++	btp_rst_default: btp-rst-default-state {
++		pins = "gpio39";
++		function = "gpio";
++		drive-strength = <2>;
++		output-low;
++	};
++
+ 	/* Cover touchscreen interrupt, stock sub_tsp_int: GPIO 34, active low */
+ 	sub_tsp_int: sub-tsp-int-state {
+ 		pins = "gpio34";
