@@ -1,0 +1,153 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] arm64: dts: qcom: sm8350-b2q: add the sensor hub and grip sensor
+
+The accelerometer, gyroscope, magnetometer, proximity and ambient light
+sensors sit behind the Snapdragon Sensor Core (SSC) on the SLPI, not on
+AP buses, so the board only needs the SLPI enabled with Samsung-signed
+firmware and the pins stock gives the SSC. The SLPI node already existed
+but without them and without power for the sensor rails.
+
+  - Stock's sensor_vdd is PM8350C LDO2, kept on for the SSC. The
+    mainline PAS driver has no supply for it, and the bootloader does
+    not guarantee it stays up.
+  - proxy_int on GPIO 89 and flicker_int on GPIO 91 are stock's SSC
+    interrupts, muxed as inputs exactly as in the vendor device tree.
+
+The grip sensor is the one sensor on the AP side: a Semtech SX9360 on
+stock i2c@17, a bit-banged bus on GPIO 10 and 11 with its interrupt on
+GPIO 90. Its supply is PM8350C L9C at 2.9 V, which stock keeps on; the
+RPMh step is 8 mV, so 2904000 uV is the representable value (2900000
+fails the voltage constraints and the regulator never registers).
+
+The SSC firmware is slpi.mbn from the stock BL tar
+(tools/extract-qcom-firmware.sh slpi) and its config is served at
+runtime by hexagonrpcd.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+---
+ arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts | 84 ++++++++++++++++++++++++-
+ 1 file changed, 82 insertions(+), 2 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+--- a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+@@ -425,6 +425,39 @@ s2dos05_buck: buck {
+ 		};
+ 	};
+ 
++	/*
++	 * The grip sensor's bus is stock i2c@17, bit-banged on GPIO 10 and 11
++	 * (not the qupv3 SE17 bus that our &i2c17 label points at).
++	 */
++	grip_i2c: i2c-grip {
++		compatible = "i2c-gpio";
++		sda-gpios = <&tlmm 10 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++		scl-gpios = <&tlmm 11 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++		i2c-gpio,delay-us = <2>;
++		pinctrl-0 = <&grip_i2c_state>;
++		pinctrl-names = "default";
++		#address-cells = <1>;
++		#size-cells = <0>;
++
++		grip_sensor: proximity@28 {
++			compatible = "semtech,sx9360";
++			reg = <0x28>;
++
++			interrupts-extended = <&tlmm 90 IRQ_TYPE_EDGE_FALLING>;
++			pinctrl-0 = <&grip_int_state>;
++			pinctrl-names = "default";
++
++			/*
++			 * Stock powers both rails from PM8350C L9C (2.9 V,
++			 * always on) and its driver never touches them.
++			 */
++			vdd-supply = <&vreg_l9c_2p96>;
++			svdd-supply = <&vreg_l9c_2p96>;
++
++			#io-channel-cells = <1>;
++		};
++	};
++
+ 	s2mpb02_i2c: i2c-51 {
+ 		compatible = "i2c-gpio";
+ 		sda-gpios = <&tlmm 78 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+@@ -650,6 +683,13 @@ vreg_l2c_1p8: ldo2 {
+ 			regulator-min-microvolt = <1800000>;
+ 			regulator-max-microvolt = <1800000>;
+ 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++
++			/*
++			 * Stock's sensor_vdd: it powers the sensors on the SSC and
++			 * is fed to qcom,ssc as an active regulator there. The
++			 * mainline PAS driver has no supply for it, so keep it on.
++			 */
++			regulator-always-on;
+ 		};
+ 
+ /*
+@@ -697,9 +737,13 @@ vreg_l8c_1p8: ldo8 {
+ 
+ 		vreg_l9c_2p96: ldo9 {
+ 			regulator-name = "vreg_l9c_2p96";
+-			regulator-min-microvolt = <2960000>;
+-			regulator-max-microvolt = <2960000>;
++			/* The RPMh step is 8 mV; 2.9 V exactly is not a step. */
++			regulator-min-microvolt = <2904000>;
++			regulator-max-microvolt = <2904000>;
+ 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++
++			/* Stock's L9C: 2.9 V, always on (grip sensor and friends). */
++			regulator-always-on;
+ 		};
+ 
+ 		vreg_l10c_1p2: ldo10 {
+@@ -1239,6 +1283,38 @@ i2c51_sda_state: i2c51-sda-state {
+ 		bias-disable;
+ 	};
+ 
++	/* Stock grip_i2c_active: the sx9360's bit-banged bus on GPIO 10/11 */
++	grip_i2c_state: grip-i2c-state {
++		pins = "gpio10", "gpio11";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-disable;
++	};
++
++	/* Stock grip_int_active: the sx9360's active-low interrupt */
++	grip_int_state: grip-int-state {
++		pins = "gpio90";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-disable;
++	};
++
++	/* Stock proxy_int_default: the SSC's proximity interrupt */
++	proxy_int_state: proxy-int-state {
++		pins = "gpio89";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-disable;
++	};
++
++	/* Stock flicker_int_default: the SSC's flicker interrupt */
++	flicker_int_state: flicker-int-state {
++		pins = "gpio91";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-disable;
++	};
++
+ 	i2c51_scl_state: i2c51-scl-state {
+ 		pins = "gpio79";
+ 		function = "gpio";
+@@ -1795,6 +1871,10 @@ &mpss {
+ &slpi {
+ 	status = "okay";
+ 	firmware-name = "qcom/sm8350/Samsung/b2q/slpi.mbn";
++
++	/* Stock's sensor interrupts for the SSC: proximity on 89, flicker on 91 */
++	pinctrl-0 = <&proxy_int_state>, <&flicker_int_state>;
++	pinctrl-names = "default";
+ };
+ 
+ &q6afedai {

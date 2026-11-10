@@ -1,0 +1,35 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] proximity: allow udev to select the raw channel
+
+The SX9360 grip sensor exposes two proximity channels, a reference
+(in_proximity0_raw) and the main electrode (in_proximity1_raw). The
+driver's first channel is the reference, which does not react to a hand,
+so the proxy would read the wrong one. Let a udev rule name the raw
+attribute to read, and keep the existing in_proximity/in_proximity0
+lookup as the fallback for other drivers.
+---
+--- a/src/drv-iio-poll-proximity.c
++++ b/src/drv-iio-poll-proximity.c
+@@ -85,8 +85,22 @@
+ 		"in_proximity",
+ 		"in_proximity0"
+ 	};
++	const char *attr_name;
+ 	guint i;
+ 
++	/* Some drivers expose several channels and the useful one is not the
++	 * first (the SX9360's channel 0 is the reference electrode). Let udev
++	 * name the attribute to read. */
++	attr_name = g_udev_device_get_property (device, "PROXIMITY_RAW_ATTR");
++	if (attr_name) {
++		g_autofree char *path = NULL;
++
++		path = g_strdup_printf ("%s/%s", g_udev_device_get_sysfs_path (device),
++					attr_name);
++		if (g_file_test (path, G_FILE_TEST_EXISTS))
++			return g_strdup (attr_name);
++	}
++
+ 	for (i = 0; i < G_N_ELEMENTS (channels); i++) {
+ 		g_autofree char *path = NULL, *attr = NULL;
+ 		gboolean exists = FALSE;

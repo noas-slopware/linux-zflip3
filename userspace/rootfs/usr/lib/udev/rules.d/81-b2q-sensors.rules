@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: MIT
+# SSC sensors on the SLPI's fastrpc node. The packaged iio-sensor-proxy rule
+# only claims light and compass from fastrpc-sdsp; the accelerometer is added
+# here, and the proxy is started for the device (the SSC sensors are not IIO
+# devices, so the packaged rule alone would never start it).
+#
+# The SSC firmware reports an all-zero mount matrix, so libssc falls back to
+# identity. On this phone the sensor is rotated 180 degrees in the display
+# plane: identity swapped top/bottom, flipping only Y then fixed portrait but
+# swapped left/right. Both X and Y are inverted here, which Noa confirmed on
+# 2026-11-09.
+SUBSYSTEM=="misc", KERNEL=="fastrpc-sdsp*", ENV{IIO_SENSOR_PROXY_TYPE}+="ssc-accel ssc-light ssc-compass", ENV{ACCEL_MOUNT_MATRIX}="-1, 0, 0; 0, -1, 0; 0, 0, 1", TAG+="systemd", ENV{SYSTEMD_WANTS}+="iio-sensor-proxy.service"
+
+# The phone has no dedicated proximity sensor: the SX9360 grip sensor's main
+# electrode is the one stock uses for touch proximity. Its channel 0 is the
+# reference, so name channel 1 and a near level (raw far ~0, near ~37+).
+SUBSYSTEM=="iio", KERNEL=="iio:device*", ATTR{name}=="sx9360", ENV{IIO_SENSOR_PROXY_TYPE}+="iio-poll-proximity", ENV{PROXIMITY_RAW_ATTR}="in_proximity1_raw", ENV{PROXIMITY_NEAR_LEVEL}="20"

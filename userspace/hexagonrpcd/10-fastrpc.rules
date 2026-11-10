@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: MIT
+# FastRPC character devices are owned by the daemon that runs them. On the
+# SLPI's sdsp node, also start the file server as soon as the sensor hub is
+# up, not at multi-user.
+SUBSYSTEM=="misc", KERNEL=="fastrpc-*", OWNER="fastrpc", GROUP="fastrpc", MODE="600"
+SUBSYSTEM=="misc", KERNEL=="fastrpc-sdsp", TAG+="systemd", ENV{SYSTEMD_WANTS}+="hexagonrpcd-sdsp.service"

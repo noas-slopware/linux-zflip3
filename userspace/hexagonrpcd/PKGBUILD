@@ -1,0 +1,42 @@
+# Maintainer: Noa Himesaka <himesaka@noa.codes>
+# SPDX-License-Identifier: MIT
+#
+# Qualcomm FastRPC filesystem daemon. The sensor hub (SSC) on the SLPI asks
+# the AP for its config, registry and DSP skels; hexagonrpcd serves them from
+# /usr/share/qcom/sm8350/Samsung/b2q (built by userspace/rootfs/usr/libexec/b2q-sensors-tree
+# and tools/extract-sensor-files.sh).
+
+pkgname=hexagonrpcd
+pkgver=0.5.0
+pkgrel=1
+pkgdesc="Qualcomm HexagonFS daemon for the sensor hub"
+arch=(aarch64)
+url="https://github.com/linux-msm/hexagonrpc"
+license=(GPL-3.0-or-later)
+depends=(glibc)
+makedepends=(linux-headers meson)
+source=("https://github.com/linux-msm/hexagonrpc/archive/refs/tags/v${pkgver}.tar.gz"
+        hexagonrpcd-sdsp.service
+        10-fastrpc.rules)
+sha256sums=('2173985932ab68d8ac593f9954357123bdbbbe9ba5f1b17a098d9cbcec22c5d5'
+            '77c607e8925703662d8e505dd624fe671d7c71e59bb8c62a1c943d353f028d10'
+            '8f4d5c191ea7e6877710152766ad27da37e1645a2333c255f26b60699f817ddb')
+
+build() {
+  arch-meson "hexagonrpc-${pkgver}" build
+  # The sscregistrygen tool needs json-c; it is not used on the phone.
+  meson compile -C build hexagonrpcd/hexagonrpcd
+}
+
+package() {
+  install -Dm755 "build/hexagonrpcd/hexagonrpcd" "$pkgdir/usr/bin/hexagonrpcd"
+  install -Dm755 "build/libhexagonrpc/libhexagonrpc.so.0.5" \
+    "$pkgdir/usr/lib/libhexagonrpc.so.0.5"
+
+  printf 'g fastrpc\nu fastrpc - "Qualcomm HexagonFS service" /var/lib/fastrpc\n' |
+    install -Dm644 /dev/stdin "$pkgdir/usr/lib/sysusers.d/fastrpc.conf"
+
+  install -Dm644 "$srcdir"/10-fastrpc.rules "$pkgdir"/usr/lib/udev/rules.d/10-fastrpc.rules
+  install -Dm644 "$srcdir"/hexagonrpcd-sdsp.service \
+    "$pkgdir"/usr/lib/systemd/system/hexagonrpcd-sdsp.service
+}

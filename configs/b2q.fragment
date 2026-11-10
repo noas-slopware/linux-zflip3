@@ -65,6 +65,8 @@ CONFIG_REGULATOR_S2DOS05=y
 # its regulators (the cover panel's VCI) and the rear flash/torch LED.
 CONFIG_REGULATOR_S2MPB02=y
 CONFIG_LEDS_S2MPB02=y
+# Grip sensor: Semtech SX9360 on a bit-banged bus (patches/linux/0032).
+CONFIG_SX9360=y
 # PMK8350 RTC, its offset kept in SDAM14 (built in for hctosys)
 CONFIG_RTC_DRV_PM8XXX=y
 CONFIG_NVMEM_SPMI_SDAM=y

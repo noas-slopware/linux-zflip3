@@ -12,7 +12,8 @@ give it the device.
 | `build-kernel.sh` | M1 | configure and build `Image` + the b2q dtb (encodes the TYPEC/PHY tristate traps) |
 | `mkimages.sh` | M1 | pack U-Boot `boot.img`, Linux `linux.img` for recovery, and an empty `dtbo.img` |
 | `build-u-boot.sh` | M1 | build U-Boot from the pinned tag plus `patches/u-boot/` |
-| `extract-qcom-firmware.sh` | M2 | Samsung-signed SoC firmware (GPU zap shader) from the BL tar, as `.mbn` |
+| `extract-qcom-firmware.sh` | M2 | Samsung-signed SoC firmware (GPU zap shader, IPA, SLPI, VPU) from the BL tar, as `.mbn` |
+| `extract-sensor-files.sh` | M4 | sensor hub configs, registry skel and DSP skels from the vendor image, for hexagonrpcd |
 | `pil-squash.py` | M2 | join a split `.mdt`/`.bNN` firmware image into one `.mbn` |
 | `install-images.sh` | M2 | write boot/recovery images from the running phone over ssh |
 | `build-initramfs.sh` | M1 | static busybox initramfs with the USB console init |

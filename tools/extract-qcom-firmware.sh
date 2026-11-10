@@ -10,6 +10,8 @@
 #   BL_*.tar.md5  NON-HLOS.bin (--fat default), the "apnhlos" partition
 #     a660_zap    GPU zap shader (lets the GPU leave secure mode)
 #     ipa_fws     IPA (IP accelerator) firmware
+#     slpi        sensor hub (SSC) firmware, for the sensors on the SSC
+#     vpu20_4v    video (Iris) firmware, for qcom-iris
 #   CP_*.tar.md5  modem.bin (--fat modem.bin), the CP firmware
 #     modem       cellular modem DSP image
 #
@@ -28,7 +30,7 @@ usage: extract-qcom-firmware.sh TAR [--fat NAME] [--out DIR] [NAME ...]
   --out DIR   output tree, laid out like / (default: out/firmware)
   NAME        images to extract (default: a660_zap)
 
-  BL tar: --fat NON-HLOS.bin holds a660_zap, ipa_fws.
+  BL tar: --fat NON-HLOS.bin holds a660_zap, ipa_fws, slpi, vpu20_4v.
   CP tar: --fat modem.bin holds modem.
 EOF
 }
@@ -47,6 +49,7 @@ done
 [ "${#NAMES[@]}" -gt 0 ] || NAMES=(a660_zap)
 need tar lz4 mcopy mdir python3
 
+mkdir -p "$REPO_ROOT/.cache"
 WORK=$(mktemp -d "$REPO_ROOT/.cache/qcomfw.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 
