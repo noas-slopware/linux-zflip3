@@ -139,7 +139,8 @@ Done by hand on the phone and not yet in `tools/build-rootfs.sh`; it goes in onc
 everything, cellular included, works:
 
 - packages beyond `ROOTFS_PACKAGES`: `mesa mesa-utils plasma-mobile plasma-login-manager
-  plasma-settings qmlkonsole bluedevil kscreen firefox feedbackd evtest i2c-tools plasma-dialer geoclue`
+  plasma-settings qmlkonsole bluedevil kscreen firefox feedbackd evtest i2c-tools plasma-dialer geoclue
+  polkit-kde-agent` (without it nothing can answer fprintd's `auth_self_keep` enroll prompt, and Settings gets "Not Authorized"),
   (plus the Adreno zap shader),
 - the cellular stack built on the phone: `b2q-imsd` from `userspace/imsd/packaging`,
   ModemManager 1.24.2-11 with `patches/modemmanager/` (0001, 0003, 0004), Spacebar from `userspace/spacebar` with

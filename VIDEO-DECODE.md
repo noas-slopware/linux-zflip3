@@ -78,9 +78,26 @@ H.264 (no B-frames) output is bit-exact vs software: PSNR inf.
 
 The kernel needs the qcom-va-driver patches `patches/0001` (decode-order output) and
 `patches/0002` (larger capture pools). Those two are written for HFI **gen2**; this phone is
-Gen1 (SM8350, `vpu20_4v.mbn`), so they have to be ported to the Gen1 capability and control
-path, not applied as-is. The kernel is hand-built with no source tree on the device, so it
-must be patched where the kernel is built.
+Gen1 (SM8350, `vpu20_4v.mbn`). The Gen1 ports are `patches/linux/0041-*` (display-delay
+controls, mapped to `HFI_PROPERTY_PARAM_VDEC_OUTPUT_ORDER` = `HFI_OUTPUT_ORDER_DECODE`, the
+property venus uses on these firmwares) and `0042-*` (CAPTURE limit 64 on the Gen1 decoder).
+Both apply on top of the current 0021 and compile with W=1; neither has been built into a
+kernel or run on the phone yet. Retest H.264 with `-bf 2` and HEVC once they are installed.
+`local-0001` turns a rejected display-delay control into a trace line and carries on, so a
+failed 0041 would look exactly like "B-frames still broken". For the retest, first check
+the kernel side: `v4l2-ctl -d /dev/video0 --list-ctrls` must list
+`display_delay_enable` and `display_delay`, and the libva trace must not print
+`DISPLAY_DELAY unsupported` or `DISPLAY_DELAY_ENABLE unsupported`. Only then does a B-frame
+result say anything about decode order. Drop `local-0001` once 0041 is confirmed.
+
+0041-0043 are all in the `qcom-iris` module, so the test is a module swap with no new image:
+`scratch/iris-port/ko/decode/qcom-iris.ko` (0021 + 0041 + 0042, encoder still skipped on
+SM8350) and `scratch/iris-port/ko/decode-encoder/qcom-iris.ko` (also 0043). Both are built
+in M= mode against kernel #81's `Module.symvers` (no `CONFIG_MODVERSIONS`, vermagic
+`7.3.1 SMP preempt mod_unload aarch64`) and signed with the tree's key from 2026-11-06, which
+#81 embeds. `modinfo -n qcom_iris` on the phone names the file to replace (keep the old
+one next to it). Test `decode` first. A firmware crash from the encoder takes the shared VPU down,
+decode included, so the `decode-encoder` module only goes in after decode is confirmed.
 
 ## Firefox
 
