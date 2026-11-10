@@ -10,7 +10,8 @@
 #   0012       AF scan steps scaled to the lens range (4095 here, not IPU3's 1023)
 #   0013       IMX563 tuning file with Af
 #   0014       the simple pipeline powers the lens only while streaming
-#   0015       Af skips the frames without statistics, as Agc and Awb do libcamera-docs is not built: its doxygen/sphinx/texlive toolchain is not
+#   0015       Af skips the frames without statistics, as Agc and Awb do
+#   0016       the AF scan finds the real peak, stays in range, rests on a flat scene libcamera-docs is not built: its doxygen/sphinx/texlive toolchain is not
 # worth building on the phone, and the docs are the same as Arch's.
 # Maintainer: David Runge <dvzrv@archlinux.org>
 # Maintainer: Carl Smedstad <carsme@archlinux.org>
@@ -24,7 +25,7 @@ pkgname=(
   python-libcamera
 )
 pkgver=0.7.2
-pkgrel=6
+pkgrel=7
 pkgdesc="A complex camera support library for Linux, Android, and ChromeOS"
 arch=(x86_64 aarch64)
 url="https://libcamera.org/"
@@ -70,6 +71,7 @@ source=(
   0013-ipa-simple-Add-an-IMX563-tuning-file-with-autofocus.patch
   0014-libcamera-pipeline-simple-Power-the-lens-only-while-.patch
   0015-ipa-simple-af-Skip-frames-without-statistics.patch
+  0016-ipa-libipa-af-Scan-for-the-real-peak-rest-on-a-flat-.patch
 )
 sha512sums=('a5656356617a01a7e8feb535380869d38b7c58139c7f99385af355629d3e1927bbd8847f7bec755c753c72f6b065df76de53c15f9af2e5901e83e7a144a2ddcd'
             '8b54cbdf6ed767ae8d52a14480a4653f4f3a1c2187c4ccf7ceb65eaa60c819cce514122591d6e0c2dfc39d7482739f8fdd4090dbaf63701445510eefc88fb19f'
@@ -87,7 +89,8 @@ sha512sums=('a5656356617a01a7e8feb535380869d38b7c58139c7f99385af355629d3e1927bbd
             '2104bd62704ef11921be703e92c1e3912e227df694618481cf95e3dd0c3c61045d3f5446308247c640db805a3958e4e62398fa0f73559338476f7fa093e47266'
             'da4d5fd80ff463c8c1c34a581d3c56358a64e97917e9ac7410abcb0af613501df107fa8eca86e501743785d2cb2116f93bf0cc6e8ae4f380922bc7c17300f395'
             '511aa5a2072b1b360f11e203c854505ecaf9bb8b8df69d58d573c5a1da593422847ecd38029c6aa30a39dfcd644ae45dc03b2f05980b088583b820f6f7e7494a'
-            'cc9a51769d72d2c70896fc2c644e64d6688980c407f5eeda1eb977653dfab12d38332be9ca347f0073b3a8449845bbf93c2640de9d1083c5700794c40efeba3e')
+            'cc9a51769d72d2c70896fc2c644e64d6688980c407f5eeda1eb977653dfab12d38332be9ca347f0073b3a8449845bbf93c2640de9d1083c5700794c40efeba3e'
+            'e0ee75378a83cb2fa8f7681086819d0b362fad6da7ce7f3c9c60fbc4fd96c361a82262613fc6f8f4943f8aae2e6ebe32099116bd53ae44452f5eda34df369529')
 b2sums=('1dbd3f78f8d9a2484331798b18b871d7585b5928988e91d586366049d85e3f126e7cfc58494400e69feeec99a77894252d582f0d8f183508e5d1b8220e70f3d5'
         '4a0e24feed22d32b83b0ec49c9a7616b77deb26cae82c17a38b54a81a0468e982852147bc2d5e3b611ba014ddbd7647acfe2e68591542420da73945ba1c0d6c2'
         'ee1c045ae34976b25f131457f239da36cee70a9854e6510aa657663ead310f19ed963d6c7399492ca40faf51b8d938dca1b6712af742e1dcef4ea3403e4a6570'
@@ -104,7 +107,8 @@ b2sums=('1dbd3f78f8d9a2484331798b18b871d7585b5928988e91d586366049d85e3f126e7cfc5
         '9f7bbe17fd27d6ac5f3a0ed8de06e9037b4ad1bc13cc79d620bc5e5747999bdcf44608e99c6113f7b73b83451ed6381413fac1bd7f457d5bd49f2bfbb78413d5'
         '8826a874351445d21118df9f8a908b9f473582ae1ea8211ccdd7b3e782bb261f74f19d1fc2363a0d1f628b2b6e1904fbecd5ccd1c2826376cc634dc0d7f52eaa'
         '59d246216c61a252002fa8b9395de38d00c84d15caf297ef2abd8354a7c2798c3c00cae57b8ded0f19f1060740e10c0d395d276df3315949b4f4b4507a389b55'
-        '7211ea03d263b723fc76d56241d2eed98c0d89249dbbdf3c2b0b524aa7ff1ebf3104b0b36597042831be730ab9ab251866665285b44616bccc019fcba5bf9050')
+        '7211ea03d263b723fc76d56241d2eed98c0d89249dbbdf3c2b0b524aa7ff1ebf3104b0b36597042831be730ab9ab251866665285b44616bccc019fcba5bf9050'
+        '99e80080f2450ce93280bf5350592b27b36e12051deeb27a69348d4c03db60e5fb75d600e50669105dc25d713e94f40cf6f06324b5901d7ebebff88fb05e5a80')
 
 _pick() {
   local p="$1" f d; shift
@@ -134,6 +138,7 @@ prepare() {
   patch -Np1 < ../0013-ipa-simple-Add-an-IMX563-tuning-file-with-autofocus.patch
   patch -Np1 < ../0014-libcamera-pipeline-simple-Power-the-lens-only-while-.patch
   patch -Np1 < ../0015-ipa-simple-af-Skip-frames-without-statistics.patch
+  patch -Np1 < ../0016-ipa-libipa-af-Scan-for-the-real-peak-rest-on-a-flat-.patch
 
   # add version, so that utils/gen-version.sh may rely on it
   printf "%s\n" "$pkgver" > .tarball-version
