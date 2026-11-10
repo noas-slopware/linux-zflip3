@@ -1,0 +1,114 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] arm64: dts: qcom: sm8350-b2q: bring up the SN100U at 0x2b
+
+Stock describes the NFC controller twice on this bus: a QTI
+"qcom,sn-nci" node at 0x28 (1 MHz, pinctrl nfc_*_active) and Samsung's
+"pn547" node at 0x2b (400 kHz, no pinctrl). The HAL opens /dev/pn547,
+so the second one is what stock runs, and the SN100U answers at 0x2b.
+
+Follow it: move the node to 0x2b, run the bus at 400 kHz and enable
+it. The pins stay at the TLMM reset state, as on stock, where nothing
+applies the QTI node's states: pulled down. The pull-up copied from
+nfc_int_active held the level-high interrupt line asserted while the
+controller was off, which flooded the CPU with interrupts (40 million
+in four minutes) and left nxp-nci in its hard-fault state, so the reply
+to the first CORE_RESET was never read. It also made the clock-request
+line read high with the controller off.
+
+With the sm8350 eGPIO fix, which lets GPIO 201 (firmware download)
+drive low, the controller powers up through nxp-nci, completes NCI
+init and detects a tag (a YubiKey 5C NFC) while polling.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts |   41 +++++++++++++----------
+ 1 file changed, 24 insertions(+), 17 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+index dab7426..14313f7 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+@@ -1405,24 +1405,32 @@
+ 		bias-disable;
+ 	};
+ 
+-	/* Stock nfc_int_active: the SN100U's interrupt on GPIO 87 */
++	/*
++	 * The NFC pins below keep the configuration stock really runs with.
++	 * Stock's pn547 node has no pinctrl, and the nfc_*_active states belong
++	 * to the unused QTI node, which does not apply them by itself. So the
++	 * pins stay at the TLMM reset state, pulled down. A pull-up on the
++	 * level-high interrupt line keeps it asserted while the controller is
++	 * off, which floods the CPU with interrupts.
++	 */
++	/* The SN100U's interrupt on GPIO 87 */
+ 	nfc_int_state: nfc-int-state {
+ 		pins = "gpio87";
+ 		function = "gpio";
+ 		drive-strength = <2>;
+-		bias-pull-up;
++		bias-pull-down;
+ 		input-enable;
+ 	};
+ 
+-	/* Stock nfc_enable_active: VEN on GPIO 62 */
++	/* VEN on GPIO 62 */
+ 	nfc_enable_state: nfc-enable-state {
+ 		pins = "gpio62";
+ 		function = "gpio";
+ 		drive-strength = <2>;
+-		bias-pull-up;
++		bias-pull-down;
+ 	};
+ 
+-	/* Stock nfc_fwdl_active: firmware download on GPIO 201 (NFC_FIRM) */
++	/* Firmware download on GPIO 201 (NFC_FIRM), an eGPIO */
+ 	nfc_fwdl_state: nfc-fwdl-state {
+ 		pins = "gpio201";
+ 		function = "gpio";
+@@ -1430,12 +1438,12 @@
+ 		bias-disable;
+ 	};
+ 
+-	/* Stock nfc_clk_req_active: the controller's clock request on GPIO 63 */
++	/* The controller's clock request on GPIO 63 */
+ 	nfc_clkreq_state: nfc-clkreq-state {
+ 		pins = "gpio63";
+ 		function = "gpio";
+ 		drive-strength = <2>;
+-		bias-pull-up;
++		bias-pull-down;
+ 		input-enable;
+ 	};
+ 
+@@ -1854,20 +1862,19 @@
+ 
+ &i2c15 {
+ 	status = "okay";
+-	/* Stock runs the SN100 bus at 1 MHz. */
+-	clock-frequency = <1000000>;
++	/* Stock's pn547 node runs the bus at 400 kHz. */
++	clock-frequency = <400000>;
+ 
+ 	/*
+-	 * The controller is an NXP SN100U (stock compatible "qcom,sn-nci",
+-	 * HAL lib nfc_nci_nxpsn), not the PN547 the stock tree also carries
+-	 * for other variants. It is NCI 2.0 and the mainline nxp-nci driver
+-	 * speaks to it. VEN 62, IRQ 87, FW 201 (NFC_FIRM), CLKREQ 63.
++	 * The controller is an NXP SN100U (NCI 2.0, HAL lib nfc_nci_nxpsn).
++	 * Stock carries two nodes for it on this bus, QTI "qcom,sn-nci" at
++	 * 0x28 and Samsung "pn547" at 0x2b; the HAL opens /dev/pn547, and the
++	 * chip answers at 0x2b. VEN 62, IRQ 87, FW 201 (NFC_FIRM), CLKREQ 63.
++	 * GPIO 201 is an eGPIO: it only drives once APPS claims it.
+ 	 */
+-	nfc: nfc@28 {
++	nfc: nfc@2b {
+ 		compatible = "nxp,pn553", "nxp,nxp-nci-i2c";
+-		reg = <0x28>;
+-		/* Disabled until the controller's clock/power is understood. */
+-		status = "disabled";
++		reg = <0x2b>;
+ 
+ 		interrupts-extended = <&tlmm 87 IRQ_TYPE_LEVEL_HIGH>;
+ 		enable-gpios = <&tlmm 62 GPIO_ACTIVE_HIGH>;
