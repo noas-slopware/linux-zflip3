@@ -1,0 +1,88 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] arm64: dts: qcom: sm8350-b2q: add the cover touchscreen
+
+The cover panel has a Zinitix ZTW522 at 0x20 on the QUP i2c17 bus
+(i2c@88c000). Stock's sub_tsp_zt gives the IRQ GPIO 34, AVDD from
+PM8350C L7, VDDIO from L12C and the 512x260 touch area.
+
+Stock's qupv3_se17_i2c_active also keeps the internal pull-ups on
+gpio72/73; this board has no external ones, so the mainline
+bias-disable leaves the bus floating low between transfers and the
+ZTW522 holds SCL. Use a pull-up state and enable the bus at 100 kHz,
+the rate the stock bus runs at.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts | 51 +++++++++++++++++++++++--
+ 1 file changed, 48 insertions(+), 3 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+--- a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+@@ -1206,6 +1206,28 @@ sub_disp_te_default: sub-disp-te-default-state {
+ 		bias-pull-down;
+ 	};
+ 
++	/* Cover touchscreen interrupt, stock sub_tsp_int: GPIO 34, active low */
++	sub_tsp_int: sub-tsp-int-state {
++		pins = "gpio34";
++		function = "gpio";
++		input-enable;
++		bias-disable;
++	};
++
++	/*
++	 * QUP i2c17 (gpio72 SDA, gpio73 SCL). Stock's
++	 * qupv3_se17_i2c_active keeps the internal pull-ups on; this board
++	 * has no external ones, so bias-disable leaves the bus floating low
++	 * between transfers and the ZTW522 holds SCL (geni_i2c then reports
++	 * "Bus arbitration lost, clock line undriveable").
++	 */
++	qup_i2c17_pull_up: qup-i2c17-pull-up-state {
++		pins = "gpio72", "gpio73";
++		function = "qup17";
++		drive-strength = <2>;
++		bias-pull-up;
++	};
++
+ 	main_bat_det_default: main-bat-det-default-state {
+ 		pins = "gpio131";
+ 		function = "gpio";
+@@ -1819,10 +1841,33 @@ nfc: nfc@28 {
+ 
+ &i2c17 {
+ 	status = "okay";
++	clock-frequency = <100000>;
+ 
+-	// Touchscreen options, EU (Poland) model:
+-	// zinitix,ztw522@20 (okay)
+-	// sec,sec_ts@48 (disabled)
++	pinctrl-names = "default";
++	pinctrl-0 = <&qup_i2c17_pull_up>;
++
++	/*
++	 * Cover touchscreen, stock's sub_tsp_zt (EU/Poland model). The ZTW522
++	 * is 512x260, matching the cover strip. VDD is PM8350C L7, VDDIO is
++	 * L12C; the interrupt is GPIO 34.
++	 */
++	touchscreen@20 {
++		compatible = "zinitix,ztw522";
++		reg = <0x20>;
++
++		/* Stock requests IRQF_TRIGGER_FALLING | IRQF_ONESHOT. */
++		interrupt-parent = <&tlmm>;
++		interrupts = <34 IRQ_TYPE_EDGE_FALLING>;
++
++		pinctrl-0 = <&sub_tsp_int>;
++		pinctrl-names = "default";
++
++		vcca-supply = <&vreg_l7c_3p0>;
++		vdd-supply = <&vreg_l12c_1p8>;
++
++		touchscreen-size-x = <512>;
++		touchscreen-size-y = <260>;
++	};
+ };
+ 
+ &uart2 {

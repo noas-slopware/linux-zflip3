@@ -1,0 +1,452 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] Input: zinitix: add the ZTW522 cover touchscreen
+
+The Galaxy Z Flip3 cover touchscreen is a Zinitix ZTW522 (chip code
+0xe532). It uses the Samsung ztw522 protocol rather than the BT541
+register layout:
+
+  - power-on: unlock 0x000a, vendor command 0xc000, chip code 0xcc00
+  - init: SWRESET, touch mode 0, cover control 0x023e, interrupt mask
+    0x000f, clear x10, unlock, optional setting 0x0116, 0x000b, wakeup
+  - touch report: struct point_info at 0x0200, further points at 0x0201,
+    one slot per touch id as in stock
+  - I2C: 50 us setup before each read and 10 us after each transfer
+
+Reading the BT541 touch_event at 0x0080 on this part hangs the QUP
+i2c bus, and the generic BT541 init wedges it too. Add the compatible
+with match data, the binding entry, and a separate ZTW522 power-on,
+init, transfer and report path. The BT541 family keeps its code paths
+unchanged. Positions go through touchscreen_report_pos(), so the
+touchscreen-* DT properties apply.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../bindings/input/touchscreen/zinitix,bt400.yaml  |   1 +
+ drivers/input/touchscreen/zinitix.c                | 334 ++++++++++++++++++++-
+ 2 files changed, 332 insertions(+), 3 deletions(-)
+
+diff --git a/Documentation/devicetree/bindings/input/touchscreen/zinitix,bt400.yaml b/Documentation/devicetree/bindings/input/touchscreen/zinitix,bt400.yaml
+--- a/Documentation/devicetree/bindings/input/touchscreen/zinitix,bt400.yaml
++++ b/Documentation/devicetree/bindings/input/touchscreen/zinitix,bt400.yaml
+@@ -37,6 +37,7 @@ properties:
+       - zinitix,bt541
+       - zinitix,bt548
+       - zinitix,bt554
++      - zinitix,ztw522
+       - zinitix,at100
+ 
+   reg:
+diff --git a/drivers/input/touchscreen/zinitix.c b/drivers/input/touchscreen/zinitix.c
+--- a/drivers/input/touchscreen/zinitix.c
++++ b/drivers/input/touchscreen/zinitix.c
+@@ -152,6 +152,60 @@ struct touch_event {
+ 	struct point_coord point_coord[MAX_SUPPORTED_FINGER_NUM];
+ };
+ 
++/*
++ * ZTW522 (Galaxy Z Flip3 cover touchscreen, stock ztw522/zinitix_ts.h).
++ * This part reports coordinates as struct point_info at 0x0200 and the
++ * remaining points at 0x0201; it does not use the BT541 touch_event at
++ * 0x0080. Reading the BT541 layout on this chip hangs the QUP i2c.
++ */
++#define ZTW522_UNLOCK_REG			0x000a
++#define ZTW522_UNLOCK_VALUE			0x000a
++#define ZTW522_START_SCAN_CMD			0x000b
++#define ZTW522_WAKEUP_CMD			0x0001
++#define ZTW522_OPTIONAL_SETTING_REG		0x0116
++#define ZTW522_CHIP_CODE_REG			0xcc00
++#define ZTW522_POINT_STATUS_REG			0x0200
++#define ZTW522_POINT_STATUS_REG1		0x0201
++#define ZTW522_COVER_CONTROL_REG		0x023e
++#define ZTW522_COVER_CLOSE			0x0000
++#define ZTW522_TOUCH_MODE_POINT			0
++
++/* touch_status values, stock FINGER_NONE..FINGER_RELEASE */
++#define ZTW522_FINGER_NONE			0
++#define ZTW522_FINGER_PRESS			1
++#define ZTW522_FINGER_MOVE			2
++#define ZTW522_FINGER_RELEASE			3
++
++struct ztw522_point {
++	u8 eid:2;
++	u8 tid:4;
++	u8 touch_status:2;
++	u8 x_11_4;
++	u8 y_11_4;
++	u8 y_3_0:4;
++	u8 x_3_0:4;
++	u8 major;
++	u8 minor;
++	u8 z:6;
++	u8 touch_type_3_2:2;
++	u8 left_event:5;
++	u8 max_energy:1;
++	u8 touch_type_1_0:2;
++	u8 noise_level;
++	u8 max_sensitivity;
++	u8 hover_id_num:4;
++	u8 location_area_3_0:4;
++	u8 reserved[5];
++} __packed;
++
++struct zinitix_chip_data {
++	bool ztw522;
++};
++
++static const struct zinitix_chip_data zinitix_ztw522_data = {
++	.ztw522 = true,
++};
++
+ struct bt541_ts_data {
+ 	struct i2c_client *client;
+ 	struct input_dev *input_dev;
+@@ -165,6 +219,7 @@ struct bt541_ts_data {
+ 	u16 firmware_version;
+ 	u16 regdata_version;
+ 	u16 icon_status_reg;
++	bool ztw522;
+ };
+ 
+ static int zinitix_read_data(struct i2c_client *client,
+@@ -431,6 +486,195 @@ static void zinitix_report_finger(struct bt541_ts_data *bt541, int slot,
+ 	}
+ }
+ 
++/*
++ * The ZTW522 needs the stock DELAY_FOR_TRANSCATION (50 us) between the
++ * register write and the read, and DELAY_FOR_POST_TRANSCATION (10 us)
++ * after each transfer. The BT541 family does not, so these are separate.
++ */
++static int ztw522_read_data(struct i2c_client *client,
++			    u16 reg, void *values, size_t length)
++{
++	__le16 reg_le = cpu_to_le16(reg);
++	int ret;
++
++	ret = i2c_master_send(client, (u8 *)&reg_le, sizeof(reg_le));
++	if (ret != sizeof(reg_le))
++		return ret < 0 ? ret : -EIO;
++
++	fsleep(50);
++
++	ret = i2c_master_recv(client, (u8 *)values, length);
++	if (ret != length)
++		return ret < 0 ? ret : -EIO;
++
++	fsleep(10);
++
++	return 0;
++}
++
++static int ztw522_write_u16(struct i2c_client *client, u16 reg, u16 value)
++{
++	int error;
++
++	error = zinitix_write_u16(client, reg, value);
++	if (error)
++		return error;
++
++	fsleep(10);
++
++	return 0;
++}
++
++static u16 ztw522_get_u16_reg(struct bt541_ts_data *bt541, u16 vreg)
++{
++	__le16 val;
++
++	if (ztw522_read_data(bt541->client, vreg, &val, sizeof(val)))
++		return U16_MAX;
++
++	return le16_to_cpu(val);
++}
++
++/*
++ * Stock zt75xx_power_sequence: key unlock, vendor command enable, then the
++ * chip code at 0xcc00. The BT541 0xc004/0xc002/0xc001 sequence is commented
++ * out by the vendor for this chip and wedges its I2C bus.
++ */
++static int ztw522_send_power_on_sequence(struct bt541_ts_data *bt541)
++{
++	struct i2c_client *client = bt541->client;
++	__le16 chip_code;
++	int error;
++
++	error = ztw522_write_u16(client, ZTW522_UNLOCK_REG, ZTW522_UNLOCK_VALUE);
++	if (error) {
++		dev_err(&client->dev, "Failed to unlock ZTW522\n");
++		return error;
++	}
++	udelay(10);
++
++	error = ztw522_write_u16(client, 0xc000, 0x0001);
++	if (error) {
++		dev_err(&client->dev,
++			"Failed to send power sequence (vendor cmd enable)\n");
++		return error;
++	}
++	udelay(10);
++
++	error = ztw522_read_data(client, ZTW522_CHIP_CODE_REG, &chip_code,
++				 sizeof(chip_code));
++	if (error) {
++		dev_err(&client->dev, "Failed to read ZTW522 chip code\n");
++		return error;
++	}
++	dev_dbg(&client->dev, "ZTW522 chip code 0x%04x\n",
++		le16_to_cpu(chip_code));
++
++	return 0;
++}
++
++/*
++ * Stock mini_init_touch and init_touch for the ZTW522. The BT541 writes
++ * (initial touch mode, resolution, finger and button counts, int mask
++ * reset) are not used by the stock driver and wedge this panel's I2C.
++ */
++static int ztw522_init_touch(struct bt541_ts_data *bt541)
++{
++	struct i2c_client *client = bt541->client;
++	u16 mode, mask, cover, optional;
++	int error;
++	int i;
++
++	error = ztw522_write_u16(client, ZTW522_UNLOCK_REG, ZTW522_UNLOCK_VALUE);
++	if (error) {
++		dev_err(&client->dev, "Failed to unlock ZTW522\n");
++		return error;
++	}
++
++	bt541->chip_revision = ztw522_get_u16_reg(bt541, ZINITIX_CHIP_REVISION);
++	bt541->firmware_version = ztw522_get_u16_reg(bt541,
++						     ZINITIX_FIRMWARE_VERSION);
++	bt541->regdata_version = ztw522_get_u16_reg(bt541,
++						    ZINITIX_DATA_VERSION_REG);
++	dev_dbg(&client->dev,
++		"chip revision %04x firmware version %04x regdata version %04x\n",
++		bt541->chip_revision, bt541->firmware_version,
++		bt541->regdata_version);
++
++	error = zinitix_write_cmd(client, ZINITIX_SWRESET_CMD);
++	if (error) {
++		dev_err(&client->dev, "Failed to write reset command\n");
++		return error;
++	}
++
++	/*
++	 * Stock sets touch_mode to TOUCH_POINT_MODE (0), not the BT541 mode
++	 * 2, and puts the part in wallet-cover-closed mode while folded.
++	 */
++	error = ztw522_write_u16(client, ZINITIX_TOUCH_MODE,
++				 ZTW522_TOUCH_MODE_POINT);
++	if (error)
++		return error;
++
++	error = ztw522_write_u16(client, ZTW522_COVER_CONTROL_REG,
++				 ZTW522_COVER_CLOSE);
++	if (error) {
++		dev_err(&client->dev, "Failed to set ZTW522 cover state\n");
++		return error;
++	}
++
++	error = ztw522_write_u16(client, ZINITIX_INT_ENABLE_FLAG,
++				 BIT_PT_CNT_CHANGE | BIT_DOWN | BIT_MOVE |
++				 BIT_UP);
++	if (error)
++		return error;
++
++	/* clear queue */
++	for (i = 0; i < 10; i++) {
++		zinitix_write_cmd(client, ZINITIX_CLEAR_INT_STATUS_CMD);
++		udelay(10);
++	}
++
++	/* Stock mini_init_touch re-writes the unlock after the clear. */
++	error = ztw522_write_u16(client, ZTW522_UNLOCK_REG, ZTW522_UNLOCK_VALUE);
++	if (error) {
++		dev_err(&client->dev, "Failed to relock ZTW522\n");
++		return error;
++	}
++
++	/* Stock init_touch: optional mode, then start scanning. */
++	error = ztw522_write_u16(client, ZTW522_OPTIONAL_SETTING_REG, 0);
++	if (error)
++		return error;
++
++	error = zinitix_write_cmd(client, ZTW522_START_SCAN_CMD);
++	if (error) {
++		dev_err(&client->dev, "Failed to start ZTW522 scan\n");
++		return error;
++	}
++
++	mode = ztw522_get_u16_reg(bt541, ZINITIX_TOUCH_MODE);
++	mask = ztw522_get_u16_reg(bt541, ZINITIX_INT_ENABLE_FLAG);
++	cover = ztw522_get_u16_reg(bt541, ZTW522_COVER_CONTROL_REG);
++	optional = ztw522_get_u16_reg(bt541, ZTW522_OPTIONAL_SETTING_REG);
++	dev_dbg(&client->dev,
++		"ZTW522 state: mode %04x int %04x cover %04x optional %04x\n",
++		mode, mask, cover, optional);
++
++	/*
++	 * Stock zt75xx_ts_set_lowpowermode(TO_TOUCH_MODE) wakes the part with
++	 * ZT75XX_WAKEUP_CMD before it returns to touch mode.
++	 */
++	error = zinitix_write_cmd(client, ZTW522_WAKEUP_CMD);
++	if (error) {
++		dev_err(&client->dev, "ZTW522 wakeup failed\n");
++		return error;
++	}
++	usleep_range(5000, 6000);
++
++	return 0;
++}
++
+ static void zinitix_report_keys(struct bt541_ts_data *bt541, u16 icon_events)
+ {
+ 	int i;
+@@ -440,6 +684,75 @@ static void zinitix_report_keys(struct bt541_ts_data *bt541, u16 icon_events)
+ 				 bt541->keycodes[i], icon_events & BIT(i));
+ }
+ 
++static irqreturn_t ztw522_ts_irq_handler(struct bt541_ts_data *bt541)
++{
++	struct i2c_client *client = bt541->client;
++	struct ztw522_point points[MAX_SUPPORTED_FINGER_NUM] = {};
++	int error;
++	int left;
++	int i;
++
++	error = ztw522_read_data(client, ZTW522_POINT_STATUS_REG,
++				 &points[0], sizeof(points[0]));
++	if (error) {
++		dev_err(&client->dev, "Failed to read point info\n");
++		goto out;
++	}
++
++	/* Coordinate event only; gestures and status events are not used. */
++	if (points[0].eid != 0)
++		goto out;
++
++	left = min_t(int, points[0].left_event, MAX_SUPPORTED_FINGER_NUM - 1);
++	if (left > 0) {
++		error = ztw522_read_data(client, ZTW522_POINT_STATUS_REG1,
++					 &points[1], left * sizeof(points[0]));
++		if (error) {
++			dev_err(&client->dev,
++				"Failed to read %d extra points\n", left);
++			goto out;
++		}
++	}
++
++	/* The slot is the chip's touch id, as in stock (cur_coord[tid]). */
++	for (i = 0; i <= left; i++) {
++		const struct ztw522_point *p = &points[i];
++		unsigned int x = (p->x_11_4 << 4) | p->x_3_0;
++		unsigned int y = (p->y_11_4 << 4) | p->y_3_0;
++		bool down;
++
++		if (p->touch_status == ZTW522_FINGER_NONE)
++			continue;
++
++		if (p->tid >= MAX_SUPPORTED_FINGER_NUM) {
++			dev_dbg(&client->dev, "touch id %u out of range\n",
++				p->tid);
++			continue;
++		}
++
++		down = p->touch_status != ZTW522_FINGER_RELEASE;
++		input_mt_slot(bt541->input_dev, p->tid);
++		if (input_mt_report_slot_state(bt541->input_dev,
++					       MT_TOOL_FINGER, down)) {
++			touchscreen_report_pos(bt541->input_dev, &bt541->prop,
++					       x, y, true);
++			input_report_abs(bt541->input_dev,
++					 ABS_MT_TOUCH_MAJOR, p->major);
++		}
++		dev_dbg(&client->dev, "finger %u %s (%u, %u)\n", p->tid,
++			p->touch_status == ZTW522_FINGER_PRESS ? "down" :
++			p->touch_status == ZTW522_FINGER_MOVE ? "move" : "up",
++			x, y);
++	}
++
++	input_mt_sync_frame(bt541->input_dev);
++	input_sync(bt541->input_dev);
++
++out:
++	zinitix_write_cmd(client, ZINITIX_CLEAR_INT_STATUS_CMD);
++	return IRQ_HANDLED;
++}
++
+ static irqreturn_t zinitix_ts_irq_handler(int irq, void *bt541_handler)
+ {
+ 	struct bt541_ts_data *bt541 = bt541_handler;
+@@ -450,6 +763,9 @@ static irqreturn_t zinitix_ts_irq_handler(int irq, void *bt541_handler)
+ 	int error;
+ 	int i;
+ 
++	if (bt541->ztw522)
++		return ztw522_ts_irq_handler(bt541);
++
+ 	memset(&touch_event, 0, sizeof(struct touch_event));
+ 
+ 	error = zinitix_read_data(bt541->client, ZINITIX_POINT_STATUS_REG,
+@@ -501,14 +817,20 @@ static int zinitix_start(struct bt541_ts_data *bt541)
+ 
+ 	msleep(CHIP_ON_DELAY);
+ 
+-	error = zinitix_send_power_on_sequence(bt541);
++	if (bt541->ztw522)
++		error = ztw522_send_power_on_sequence(bt541);
++	else
++		error = zinitix_send_power_on_sequence(bt541);
+ 	if (error) {
+ 		dev_err(&bt541->client->dev,
+ 			"Error while sending power-on sequence: %d\n", error);
+ 		return error;
+ 	}
+ 
+-	error = zinitix_init_touch(bt541);
++	if (bt541->ztw522)
++		error = ztw522_init_touch(bt541);
++	else
++		error = zinitix_init_touch(bt541);
+ 	if (error) {
+ 		dev_err(&bt541->client->dev,
+ 			"Error while configuring touch IC\n");
+@@ -613,6 +935,7 @@ static int zinitix_init_input_dev(struct bt541_ts_data *bt541)
+ 
+ static int zinitix_ts_probe(struct i2c_client *client)
+ {
++	const struct zinitix_chip_data *chip;
+ 	struct bt541_ts_data *bt541;
+ 	int error;
+ 
+@@ -629,6 +952,9 @@ static int zinitix_ts_probe(struct i2c_client *client)
+ 	bt541->client = client;
+ 	i2c_set_clientdata(client, bt541);
+ 
++	chip = device_get_match_data(&client->dev);
++	bt541->ztw522 = chip && chip->ztw522;
++
+ 	error = zinitix_init_regulators(bt541);
+ 	if (error) {
+ 		dev_err(&client->dev,
+@@ -684,7 +1010,8 @@ static int zinitix_ts_probe(struct i2c_client *client)
+ 		bt541->zinitix_mode = DEFAULT_TOUCH_POINT_MODE;
+ 	}
+ 
+-	if (bt541->zinitix_mode != 2) {
++	/* The ZTW522 runs in its own point mode (0); see ztw522_init_touch. */
++	if (!bt541->ztw522 && bt541->zinitix_mode != 2) {
+ 		/*
+ 		 * If there are devices that don't support mode 2, support
+ 		 * for other modes (0, 1) will be needed.
+@@ -745,6 +1072,7 @@ static const struct of_device_id zinitix_of_match[] = {
+ 	{ .compatible = "zinitix,bt541" },
+ 	{ .compatible = "zinitix,bt548" },
+ 	{ .compatible = "zinitix,bt554" },
++	{ .compatible = "zinitix,ztw522", .data = &zinitix_ztw522_data },
+ 	{ .compatible = "zinitix,at100" },
+ 	{ }
+ };
