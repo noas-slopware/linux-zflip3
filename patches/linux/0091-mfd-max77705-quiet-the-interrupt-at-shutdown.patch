@@ -1,0 +1,36 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] mfd: max77705: quiet the interrupt at shutdown
+
+Shutdown opens the USB switch, which raises an interrupt, and leaves the
+interrupt enabled. The I2C controller shuts down right after its
+clients and marks its adapter suspended, so the regmap-irq thread then
+transferred on a suspended adapter: "i2c i2c-9: Transfer while
+suspended" and a WARN in __i2c_transfer on every reboot. Disable the
+interrupt once the switch is open.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/mfd/max77705.c |    8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+
+diff --git a/drivers/mfd/max77705.c b/drivers/mfd/max77705.c
+index 4f381e4..99e4a99 100644
+--- a/drivers/mfd/max77705.c
++++ b/drivers/mfd/max77705.c
+@@ -243,6 +243,14 @@ static void max77705_i2c_shutdown(struct i2c_client *i2c)
+ 
+ 	if (max77705->regmap_muic)
+ 		max77705_usbc_set_switch(max77705->regmap_muic, MAX77705_USBC_SW_OPEN);
++
++	/*
++	 * Nothing may talk to the chip after this: the I2C controller is shut
++	 * down right after its clients and marks its adapter suspended, and an
++	 * interrupt (the switch change above raises one) would make the
++	 * regmap-irq thread transfer on it ("Transfer while suspended").
++	 */
++	disable_irq(i2c->irq);
+ }
+ 
+ static int max77705_suspend(struct device *dev)

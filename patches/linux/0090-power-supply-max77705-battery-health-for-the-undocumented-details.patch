@@ -1,0 +1,51 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] power: supply: max77705: battery health for the undocumented details
+
+BAT_DTLS 0x06 is a battery overcurrent (stock's B2SOVRC; the MAX77818,
+the same charger family, documents it so), and the driver called it an
+unspecified failure. 0x07 is not documented; on the Galaxy Z Flip3 it
+reads back with no input and a healthy battery (CHG_DTLS 0x8, BAT_OK
+set), so the charger reported "Unspecified failure" whenever it was
+unplugged. Report 0x06 as overcurrent and take BAT_OK for anything
+undocumented.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/power/supply/max77705_charger.c |   20 +++++++++++++++++---
+ 1 file changed, 17 insertions(+), 3 deletions(-)
+
+
+diff --git a/drivers/power/supply/max77705_charger.c b/drivers/power/supply/max77705_charger.c
+index 54e147e..92e7f61 100644
+--- a/drivers/power/supply/max77705_charger.c
++++ b/drivers/power/supply/max77705_charger.c
+@@ -412,11 +412,25 @@ static int max77705_get_battery_health(struct max77705_charger_data *chg,
+ 		dev_dbg(chg->dev, "%s: battery ovp\n", __func__);
+ 		*value = POWER_SUPPLY_HEALTH_OVERVOLTAGE;
+ 		break;
+-	default:
+-		dev_dbg(chg->dev, "%s: battery unknown\n", __func__);
+-		*value = POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
++	case MAX77705_BATTERY_RESERVED:
++		/* 0x06: battery overcurrent (stock's B2SOVRC; MAX77818 datasheet) */
++		*value = POWER_SUPPLY_HEALTH_OVERCURRENT;
++		break;
++	default: {
++		unsigned int int_ok;
++
++		/*
++		 * 0x07 is not documented and reads back with no input and a
++		 * healthy battery; take the chip's own battery-OK flag then.
++		 */
++		if (!regmap_read(regmap, MAX77705_CHG_REG_INT_OK, &int_ok) &&
++		    (int_ok & MAX77705_BAT_OK))
++			*value = POWER_SUPPLY_HEALTH_GOOD;
++		else
++			*value = POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
+ 		break;
+ 	}
++	}
+ 
+ 	return 0;
+ }
