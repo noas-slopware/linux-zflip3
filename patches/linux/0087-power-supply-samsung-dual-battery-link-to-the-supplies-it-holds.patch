@@ -7,20 +7,22 @@ theirs: unbinding one of them, or unloading its module, left this driver
 with a power supply whose callbacks were gone, and the next poll called
 into freed code. Add a managed device link to each supply's device, so
 the driver core unbinds this driver first and probes it again once the
-supply is back.
+supply is back. A supply registers from its driver's probe, so wait
+until that driver is bound: a link to a supplier still probing made the
+cleanup after a deferred probe warn.
 
 Signed-off-by: Noa Himesaka <himesaka@noa.codes>
 Assisted-by: Claude:claude-opus-5-5
 ---
- drivers/power/supply/samsung-dual-battery.c |   11 +++++++++++
- 1 file changed, 11 insertions(+)
+ drivers/power/supply/samsung-dual-battery.c |   14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
 
 
 diff --git a/drivers/power/supply/samsung-dual-battery.c b/drivers/power/supply/samsung-dual-battery.c
-index f18cf6f..79f4730 100644
+index f18cf6f..29df908 100644
 --- a/drivers/power/supply/samsung-dual-battery.c
 +++ b/drivers/power/supply/samsung-dual-battery.c
-@@ -327,6 +327,17 @@ static int sdb_get_psy(struct device *dev, const char *prop,
+@@ -327,6 +327,20 @@ static int sdb_get_psy(struct device *dev, const char *prop,
  		return dev_err_probe(dev, PTR_ERR(*psy), "%s\n", prop);
  	if (!*psy)
  		return -EPROBE_DEFER;
@@ -32,6 +34,9 @@ index f18cf6f..79f4730 100644
 +	 * outlives the callbacks behind it (unloading the charger module
 +	 * otherwise left this driver calling into freed code).
 +	 */
++	/* a supply registers from its driver's probe: link once that is done */
++	if (!device_is_bound((*psy)->dev.parent))
++		return -EPROBE_DEFER;
 +	if (!device_link_add(dev, (*psy)->dev.parent, DL_FLAG_AUTOPROBE_CONSUMER))
 +		return dev_err_probe(dev, -EINVAL, "no device link to %s\n",
 +				     dev_name((*psy)->dev.parent));
