@@ -1,0 +1,55 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] nfc: nci: map the Frame RF protocols explicitly
+
+The NCI specification says protocols without an RF_DISCOVER_MAP entry
+default to the Frame RF interface, but NXP NCI 2.0 controllers such as
+the SN100x require the mapping to be present. Without explicit T1T,
+T2T, T3T and T5T Frame mappings, RF discovery reports success but no tag
+ever activates.
+
+Map the four Frame protocols in nci_init_complete_req() before the
+ISO-DEP and NFC-DEP entries, with the same NCI_MAX_NUM_MAPPING_CONFIGS
+guard the loop already uses. Only do it for controllers that report NCI
+2.0: NCI 1.x does not define T5T (protocol 0x06), and a 1.x controller
+could reject the whole RF_DISCOVER_MAP, so their map stays as before.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ net/nfc/nci/core.c | 24 ++++++++++++++++++++++++
+ 1 file changed, 24 insertions(+)
+
+diff --git a/net/nfc/nci/core.c b/net/nfc/nci/core.c
+--- a/net/nfc/nci/core.c
++++ b/net/nfc/nci/core.c
+@@ -187,6 +187,30 @@ static void nci_init_complete_req(struct nci_dev *ndev, const void *opt)
+ 	/* set rf mapping configurations */
+ 	*num = 0;
+ 
++	/*
++	 * Explicitly map T1T, T2T, T3T and T5T to the Frame RF interface on
++	 * NCI 2.0 controllers. The specification says unmapped protocols
++	 * default to Frame RF, but NXP NCI 2.0 controllers such as the SN100x
++	 * require the mapping to be explicit or tag discovery yields no
++	 * notifications. NCI 1.x does not define T5T (protocol 0x06), so a
++	 * 1.x controller could reject the whole RF_DISCOVER_MAP; leave those
++	 * as they were.
++	 */
++	if (ndev->nci_ver & NCI_VER_2_MASK) {
++		static const u8 frame_protocols[] = {
++			NCI_RF_PROTOCOL_T1T, NCI_RF_PROTOCOL_T2T,
++			NCI_RF_PROTOCOL_T3T, NCI_RF_PROTOCOL_T5T,
++		};
++
++		for (i = 0; i < ARRAY_SIZE(frame_protocols) &&
++			    *num < NCI_MAX_NUM_MAPPING_CONFIGS; i++) {
++			cfg[*num].rf_protocol = frame_protocols[i];
++			cfg[*num].mode = NCI_DISC_MAP_MODE_POLL;
++			cfg[*num].rf_interface = NCI_RF_INTERFACE_FRAME;
++			(*num)++;
++		}
++	}
++
+ 	/* by default mapping is set to NCI_RF_INTERFACE_FRAME */
+ 	for (i = 0; i < ndev->num_supported_rf_interfaces; i++) {
+ 		if (ndev->supported_rf_interfaces[i] ==

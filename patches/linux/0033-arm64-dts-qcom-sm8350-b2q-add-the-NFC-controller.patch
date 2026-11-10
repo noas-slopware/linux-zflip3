@@ -1,0 +1,157 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] arm64: dts: qcom: sm8350-b2q: add the NFC controller
+
+The NFC controller is an NXP SN100U (stock compatible "qcom,sn-nci" and
+the HAL ships lib nfc_nci_nxpsn), not the PN547 the stock tree also
+carries for other board variants. It sits on i2c15 at 0x28 with VEN on
+GPIO 62, IRQ on 87, firmware download on 201 (NFC_FIRM) and the clock
+request on 63.
+
+The node is disabled for now: the controller never ACKs I2C in this
+tree, probably because its reference clock is not running when U-Boot
+boots instead of Android. The pinctrl states are described so the node
+can be enabled when that is understood; see STATE.md.
+
+PM8350C L13C is stock's nfc_pvdd. The nxp-nci binding and driver have no
+supply, so the rail is marked always-on instead of being referenced from
+the node. L3C, which stock also lists, is described but has no consumer.
+
+The bus runs at stock's 1 MHz.
+
+Unrelated to NFC, this also keeps PM8350C L12C on as stock does: it is
+the DMIC rail, and later the cover touchscreen's VDDIO.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts | 81 +++++++++++++++++++------
+ 1 file changed, 64 insertions(+), 17 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+--- a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+@@ -692,14 +692,13 @@ vreg_l2c_1p8: ldo2 {
+ 			regulator-always-on;
+ 		};
+ 
+-/*
+ 		vreg_l3c_1p8: ldo3 {
+ 			regulator-name = "vreg_l3c_1p8";
+ 			regulator-min-microvolt = <1800000>;
+ 			regulator-max-microvolt = <1800000>;
+ 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+-		};/
+-*/
++		};
++
+ 		vreg_l4c_3p0: ldo4 {
+ 			regulator-name = "vreg_l4c_3p0";
+ 			regulator-min-microvolt = <1704000>;
+@@ -765,16 +764,23 @@ vreg_l12c_1p8: ldo12 {
+ 			regulator-min-microvolt = <1800000>;
+ 			regulator-max-microvolt = <2000000>;
+ 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++
++			/* Stock keeps the DMIC rail on. */
++			regulator-always-on;
+ 		};
+ 
+-/*
+ 		vreg_l13c_1p8: ldo13 {
+ 			regulator-name = "vreg_l13c_1p8";
+ 			regulator-min-microvolt = <1800000>;
+ 			regulator-max-microvolt = <1800000>;
+ 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++
++			/*
++			 * Stock's nfc_pvdd for the SN100U. The nxp-nci binding
++			 * and driver have no supply, so keep it on.
++			 */
++			regulator-always-on;
+ 		};
+-*/
+ 
+ 		vreg_bob: bob {
+ 			regulator-name = "vreg_bob";
+@@ -1315,6 +1321,40 @@ flicker_int_state: flicker-int-state {
+ 		bias-disable;
+ 	};
+ 
++	/* Stock nfc_int_active: the SN100U's interrupt on GPIO 87 */
++	nfc_int_state: nfc-int-state {
++		pins = "gpio87";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-pull-up;
++		input-enable;
++	};
++
++	/* Stock nfc_enable_active: VEN on GPIO 62 */
++	nfc_enable_state: nfc-enable-state {
++		pins = "gpio62";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-pull-up;
++	};
++
++	/* Stock nfc_fwdl_active: firmware download on GPIO 201 (NFC_FIRM) */
++	nfc_fwdl_state: nfc-fwdl-state {
++		pins = "gpio201";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-disable;
++	};
++
++	/* Stock nfc_clk_req_active: the controller's clock request on GPIO 63 */
++	nfc_clkreq_state: nfc-clkreq-state {
++		pins = "gpio63";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-pull-up;
++		input-enable;
++	};
++
+ 	i2c51_scl_state: i2c51-scl-state {
+ 		pins = "gpio79";
+ 		function = "gpio";
+@@ -1690,21 +1730,28 @@ &i2c13 {
+ 
+ &i2c15 {
+ 	status = "okay";
++	/* Stock runs the SN100 bus at 1 MHz. */
++	clock-frequency = <1000000>;
+ 
+-	// nq@28
+-
+-	// pn547@2b
+-	pn547: nfc@2b {
+-		compatible = "nxp,pn547", "nxp,nxp-nci-i2c";
+-		reg = <0x2b>;
++	/*
++	 * The controller is an NXP SN100U (stock compatible "qcom,sn-nci",
++	 * HAL lib nfc_nci_nxpsn), not the PN547 the stock tree also carries
++	 * for other variants. It is NCI 2.0 and the mainline nxp-nci driver
++	 * speaks to it. VEN 62, IRQ 87, FW 201 (NFC_FIRM), CLKREQ 63.
++	 */
++	nfc: nfc@28 {
++		compatible = "nxp,pn553", "nxp,nxp-nci-i2c";
++		reg = <0x28>;
++		/* Disabled until the controller's clock/power is understood. */
++		status = "disabled";
+ 
+-		// IRQ: 87, VEN: 62, CLK_REQ: 63, FW: 201
+-//		interrupts-extended = <&tlmm 87 IRQ_TYPE_EDGE_RISING>;
+-//		enable-gpios = <&tlmm 62 GPIO_ACTIVE_HIGH>;
+-//		firmware-gpios = <&tlmm 201 GPIO_ACTIVE_HIGH>;
++		interrupts-extended = <&tlmm 87 IRQ_TYPE_LEVEL_HIGH>;
++		enable-gpios = <&tlmm 62 GPIO_ACTIVE_HIGH>;
++		firmware-gpios = <&tlmm 201 GPIO_ACTIVE_HIGH>;
+ 
+-//		pinctrl-names = "default";
+-//		pinctrl-0 = <&nfc_default>;
++		pinctrl-names = "default";
++		pinctrl-0 = <&nfc_int_state>, <&nfc_enable_state>,
++			    <&nfc_fwdl_state>, <&nfc_clkreq_state>;
+ 	};
+ 
+ 	// als_rear@29 (ams,tcs3407)

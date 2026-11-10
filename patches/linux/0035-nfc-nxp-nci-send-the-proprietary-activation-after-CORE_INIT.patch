@@ -1,0 +1,83 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] nfc: nxp-nci: send the proprietary activation after CORE_INIT
+
+NXP NCI 2.0 controllers such as the SN100x expect the proprietary
+activation command, GID 0x0f OID 0x02, after CORE_INIT. Without it the
+RF subsystem stays inactive: discovery is answered but no target
+notifications arrive.
+
+Send it from the post_setup hook to controllers that report NCI 2.0 and
+handle its response through the component's prop_ops table. Controllers
+that report NCI 1.x do not get it. A failure is logged but does not fail
+nci_open_device(), so a part that does not know the command keeps
+working as before.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/nfc/nxp-nci/core.c | 48 ++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 48 insertions(+)
+
+diff --git a/drivers/nfc/nxp-nci/core.c b/drivers/nfc/nxp-nci/core.c
+--- a/drivers/nfc/nxp-nci/core.c
++++ b/drivers/nfc/nxp-nci/core.c
+@@ -123,11 +123,59 @@ static const struct nci_driver_ops nxp_nci_core_ops[] = {
+ 	},
+ };
+ 
++/*
++ * NXP proprietary activation (PROP_ACT, OID 0x02). NXP NCI 2.0 controllers
++ * expect it after CORE_INIT; without it the RF subsystem stays inactive and
++ * discovery produces no target notifications.
++ */
++#define NXP_NCI_PROP_ACT_OID	0x02
++#define NXP_NCI_PROP_ACT_CMD	nci_opcode_pack(NCI_GID_PROPRIETARY, \
++						NXP_NCI_PROP_ACT_OID)
++
++static int nxp_nci_prop_act_rsp(struct nci_dev *ndev, struct sk_buff *skb)
++{
++	if (skb->len < 1)
++		return -EINVAL;
++
++	nci_req_complete(ndev, skb->data[0]);
++	return 0;
++}
++
++static const struct nci_driver_ops nxp_nci_prop_ops[] = {
++	{
++		.opcode = NXP_NCI_PROP_ACT_CMD,
++		.rsp = nxp_nci_prop_act_rsp,
++	},
++};
++
++static int nxp_nci_post_setup(struct nci_dev *ndev)
++{
++	int r;
++
++	/* Controllers that report NCI 1.x do not get it, as before. */
++	if (!(ndev->nci_ver & NCI_VER_2_MASK))
++		return 0;
++
++	/*
++	 * A controller that does not know the command must not lose the
++	 * device over it: warn and carry on with the standard init.
++	 */
++	r = nci_prop_cmd(ndev, NXP_NCI_PROP_ACT_OID, 0, NULL);
++	if (r)
++		dev_warn(&ndev->nfc_dev->dev,
++			 "NFC: proprietary activation failed: %d\n", r);
++
++	return 0;
++}
++
+ static const struct nci_ops nxp_nci_ops = {
+ 	.open = nxp_nci_open,
+ 	.close = nxp_nci_close,
+ 	.send = nxp_nci_send,
+ 	.fw_download = nxp_nci_fw_download,
++	.post_setup = nxp_nci_post_setup,
++	.prop_ops = nxp_nci_prop_ops,
++	.n_prop_ops = ARRAY_SIZE(nxp_nci_prop_ops),
+ 	.core_ops = nxp_nci_core_ops,
+ 	.n_core_ops = ARRAY_SIZE(nxp_nci_core_ops),
+ };
