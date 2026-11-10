@@ -1,40 +1,48 @@
-# Maintainer: Noa Himesaka <himesaka@noa.codes>
-# SPDX-License-Identifier: MIT
-#
-# neard is the userspace daemon for the kernel NFC/NCI stack. It is not in the
-# Arch Ports repositories; build it here. nfctool comes with --enable-tools and
-# is the quick way to start polling on /dev/nfc0.
+# Maintainer: Cody Schafer <archlinux@codyps.com>
+# Contributor: Rupus Reinefjord <rupus@kltrst.se>
+# Contributor: Dmytro Bagrii <dimich.dmb@gmail.com>
+# b2q: AUR neard (codyps) as is, plus aarch64 in arch. nfctool comes from --enable-tools.
 
 pkgname=neard
 pkgver=0.20
 pkgrel=1
-pkgdesc="Linux NFC daemon for the kernel NCI stack"
-arch=(aarch64)
+pkgdesc="Intel's Near Field Communication manager"
+arch=('i686' 'x86_64' 'aarch64')
 url="https://github.com/linux-nfc/neard"
-license=(GPL-2.0-only)
-depends=(dbus libnl glib2)
-makedepends=(autoconf automake libtool autoconf-archive)
-source=("https://github.com/linux-nfc/neard/archive/refs/tags/v${pkgver}.tar.gz")
-sha256sums=('2b3c12e7ce77901a649237ea044d9af5b4df54c0cbeed5036b5342dbc89dc3fd')
+license=('GPL2')
+depends=('dbus>=1.2' 'libnl' 'glib2>=2.28' 'glibc')
+makedepends=('automake' 'autoconf>=2.60' 'autoconf-archive' 'libtool')
+backup=(etc/neard/main.conf)
+source=($pkgname-$pkgver.tar.gz::https://github.com/linux-nfc/neard/archive/refs/tags/v$pkgver.tar.gz)
+sha384sums=('898373a97b3534006ef1eb14fe383743fedf710165f17136d0a6cfb07cf8a194e153d8f7703ac477d65871f45f404ac2')
 
 build() {
-  cd "neard-${pkgver}"
-  ./bootstrap
+  cd $pkgname-$pkgver
+  ./bootstrap &&
   ./configure \
     --prefix=/usr \
     --sysconfdir=/etc \
-    --libexecdir=/usr/lib/neard \
+    --libexecdir=/usr/lib/$pkgname \
     --with-systemdsystemunitdir=/usr/lib/systemd/system \
+    --with-systemduserunitdir=/usr/lib/systemd/user \
     --enable-systemd \
-    --enable-tools \
+    --disable-debug \
     --enable-ese \
-    --disable-debug
+    --enable-tools
+
   make
 }
 
 package() {
-  cd "neard-${pkgver}"
-  make DESTDIR="$pkgdir" install
+  cd "$srcdir/$pkgname-$pkgver"
 
-  install -Dm644 src/main.conf "$pkgdir/etc/neard/main.conf"
+  make ${MAKEFLAGS} DESTDIR="$pkgdir/" install
+
+  # This is a nodist header, but it still is installed for some reason
+  # Having it installed breaks some packages that look for a local version.h
+  # include, so remove it
+  rm -f "${pkgdir}/usr/include/version.h"
+
+  install -D -m644 "${srcdir}/$pkgname-$pkgver/src/main.conf" \
+    "${pkgdir}/etc/neard/main.conf"
 }
