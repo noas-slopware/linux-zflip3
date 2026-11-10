@@ -1,0 +1,432 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] power: supply: max77705: UNO regulator for reverse wireless charging
+
+The boost can feed the UNO output instead of CHGIN (mode 0x8), which
+powers the wireless charger chip as a transmitter. Register it as a
+regulator, 5 to 9 V on VBYPSET and 0.2 to 1.5 A on UNOILIM, with stock's
+rules: refused while OTG, a cable or a pad has the charger; switched off
+when a cable comes in, OTG starts or the bypass current limit trips, and
+the consumer is told with REGULATOR_EVENT_FORCE_DISABLE.
+
+The CNFG_00 mode field now has a lock, and charge enable leaves it
+alone while UNO runs: OR-ing the charge bit into 0x8 gives 0x9.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+
+diff --git a/Documentation/devicetree/bindings/power/supply/maxim,max77705.yaml b/Documentation/devicetree/bindings/power/supply/maxim,max77705.yaml
+index 190aa71..8f9173f 100644
+--- a/Documentation/devicetree/bindings/power/supply/maxim,max77705.yaml
++++ b/Documentation/devicetree/bindings/power/supply/maxim,max77705.yaml
+@@ -156,6 +156,15 @@ properties:
+     minItems: 3
+     maxItems: 3
+ 
++  uno:
++    type: object
++    $ref: /schemas/regulator/regulator.yaml#
++    unevaluatedProperties: false
++    description:
++      The boost on the UNO output, 5 to 9 V with a 0.2 to 1.5 A limit. It
++      powers the wireless charger chip for reverse wireless charging, runs
++      only from the battery, and cannot be on together with USB OTG.
++
+   reg:
+     maxItems: 1
+ 
+diff --git a/drivers/power/supply/Kconfig b/drivers/power/supply/Kconfig
+index 6425145..ad6ee8b 100644
+--- a/drivers/power/supply/Kconfig
++++ b/drivers/power/supply/Kconfig
+@@ -639,6 +639,7 @@ config CHARGER_MAX77693
+ config CHARGER_MAX77705
+ 	tristate "Maxim MAX77705 battery charger driver"
+ 	depends on MFD_MAX77705
++	depends on REGULATOR
+ 	help
+ 	  Say Y to enable support for the Maxim MAX77705 battery charger.
+ 
+diff --git a/drivers/power/supply/max77705_charger.c b/drivers/power/supply/max77705_charger.c
+index 3e6352f..d36dd50 100644
+--- a/drivers/power/supply/max77705_charger.c
++++ b/drivers/power/supply/max77705_charger.c
+@@ -21,6 +21,7 @@
+ #include <linux/unaligned.h>
+ #include <linux/property.h>
+ #include <linux/regmap.h>
++#include <linux/regulator/driver.h>
+ #include <linux/thermal.h>
+ #include <linux/usb/role.h>
+ 
+@@ -30,6 +31,8 @@ static const char *max77705_charger_manufacturer	= "Maxim Integrated";
+ static int max77705_charger_set_otg(struct max77705_charger_data *chg, bool enable);
+ static void max77705_otg_work(struct work_struct *work);
+ static void max77705_cold_check(struct max77705_charger_data *chg);
++static void max77705_uno_force_off(struct max77705_charger_data *chg,
++				   unsigned long event, const char *why);
+ 
+ /*
+  * How long a pin-only attach (CCPinStat set, CCStat still no connection,
+@@ -193,6 +196,8 @@ static void max77705_charger_disable(void *data)
+ 	if (chg->otg_on)
+ 		max77705_charger_set_otg(chg, false);
+ 
++	max77705_uno_force_off(chg, 0, "charger going away");
++
+ 	rv = regmap_field_write(chg->rfield[MAX77705_CHG_EN], MAX77705_CHG_DISABLE);
+ 	if (rv)
+ 		dev_err(chg->dev, "unable to disable the charger: %d\n", rv);
+@@ -569,7 +574,7 @@ static int max77705_get_float_voltage(struct max77705_charger_data *chg,
+  * mode 4, buck only). Only the CHG bit of the mode field changes.
+  */
+ /* charging runs unless the user inhibits it or the input in use is too hot */
+-static int max77705_update_charge_enable(struct max77705_charger_data *chg)
++static int __max77705_update_charge_enable(struct max77705_charger_data *chg)
+ {
+ 	struct max77705_cooling *cool = max77705_cooling_now(chg);
+ 	bool off = READ_ONCE(cool->level) >= MAX77705_THERMAL_LEVELS - 1 ||
+@@ -577,6 +582,12 @@ static int max77705_update_charge_enable(struct max77705_charger_data *chg)
+ 	unsigned int mode;
+ 	int err;
+ 
++	lockdep_assert_held(&chg->mode_lock);
++
++	/* the boost feeds UNO from the battery: there is nothing to charge from */
++	if (chg->uno_on)
++		return 0;
++
+ 	err = regmap_field_read(chg->rfield[MAX77705_MODE], &mode);
+ 	if (err)
+ 		return err;
+@@ -589,6 +600,198 @@ static int max77705_update_charge_enable(struct max77705_charger_data *chg)
+ 	return regmap_field_write(chg->rfield[MAX77705_MODE], mode);
+ }
+ 
++static int max77705_update_charge_enable(struct max77705_charger_data *chg)
++{
++	int err;
++
++	mutex_lock(&chg->mode_lock);
++	err = __max77705_update_charge_enable(chg);
++	mutex_unlock(&chg->mode_lock);
++
++	return err;
++}
++
++/*
++ * UNO: the boost on the UNO output, which powers the wireless charger chip
++ * for reverse wireless charging (stock max77705_set_uno(), mode 0x8: boost
++ * only, buck and charger off). It shares the boost with OTG and runs only
++ * from the battery: stock refuses it while OTG is on or a pad feeds WCIN,
++ * and turns it off when a cable comes in (battery,tx_5v_disable).
++ */
++static int max77705_uno_enable(struct regulator_dev *rdev)
++{
++	struct max77705_charger_data *chg = rdev_get_drvdata(rdev);
++	unsigned int ok, mode;
++	int err;
++
++	mutex_lock(&chg->mode_lock);
++
++	err = -EBUSY;
++	if (chg->otg_on || READ_ONCE(chg->otg_requested))
++		goto out;
++
++	err = regmap_read(chg->regmap, MAX77705_CHG_REG_INT_OK, &ok);
++	if (err)
++		goto out;
++	err = -EBUSY;
++	if (ok & (MAX77705_CHGIN_OK | MAX77705_WCIN_OK))
++		goto out;
++
++	err = regmap_field_read(chg->rfield[MAX77705_MODE], &mode);
++	if (err)
++		goto out;
++	chg->uno_prev_mode = mode & ~(MAX77705_BOOST_MASK | MAX77705_OTG_MASK);
++
++	err = regmap_field_write(chg->rfield[MAX77705_MODE], MAX77705_BOOST_MASK);
++	if (err)
++		goto out;
++
++	chg->uno_on = true;
++	dev_info(chg->dev, "UNO on\n");
++out:
++	mutex_unlock(&chg->mode_lock);
++	return err;
++}
++
++static void __max77705_uno_off(struct max77705_charger_data *chg)
++{
++	lockdep_assert_held(&chg->mode_lock);
++
++	regmap_field_write(chg->rfield[MAX77705_MODE], chg->uno_prev_mode);
++	/* stock sets VBYPSET back to 5 V after UNO */
++	regmap_field_write(chg->rfield[MAX77705_VBYPSET], 0);
++	chg->uno_on = false;
++	__max77705_update_charge_enable(chg);
++	dev_info(chg->dev, "UNO off\n");
++}
++
++static int max77705_uno_disable(struct regulator_dev *rdev)
++{
++	struct max77705_charger_data *chg = rdev_get_drvdata(rdev);
++	bool was_on;
++
++	mutex_lock(&chg->mode_lock);
++	was_on = chg->uno_on;
++	if (was_on)
++		__max77705_uno_off(chg);
++	mutex_unlock(&chg->mode_lock);
++
++	/* stock waits 50 ms after the boost goes off */
++	if (was_on)
++		msleep(50);
++
++	return 0;
++}
++
++static int max77705_uno_is_enabled(struct regulator_dev *rdev)
++{
++	struct max77705_charger_data *chg = rdev_get_drvdata(rdev);
++
++	return READ_ONCE(chg->uno_on);
++}
++
++/*
++ * Something else needs the boost, or it is in trouble: switch UNO off and
++ * tell the consumer, which then disables the regulator to match.
++ */
++static void max77705_uno_force_off(struct max77705_charger_data *chg,
++				   unsigned long event, const char *why)
++{
++	bool was_on;
++
++	mutex_lock(&chg->mode_lock);
++	was_on = chg->uno_on;
++	if (was_on)
++		__max77705_uno_off(chg);
++	mutex_unlock(&chg->mode_lock);
++
++	if (!was_on || !chg->uno_rdev)
++		return;
++
++	dev_info(chg->dev, "UNO off: %s\n", why);
++	msleep(50);
++	regulator_notifier_call_chain(chg->uno_rdev,
++				      event | REGULATOR_EVENT_FORCE_DISABLE, NULL);
++}
++
++static const unsigned int max77705_uno_ilim[] = {
++	/* selector 0 is not documented in stock; never chosen */
++	0, 200000, 300000, 400000, 600000, 800000, 1000000, 1500000,
++};
++
++static const struct regulator_ops max77705_uno_ops = {
++	.enable			= max77705_uno_enable,
++	.disable		= max77705_uno_disable,
++	.is_enabled		= max77705_uno_is_enabled,
++	.list_voltage		= regulator_list_voltage_linear,
++	.set_voltage_sel	= regulator_set_voltage_sel_regmap,
++	.get_voltage_sel	= regulator_get_voltage_sel_regmap,
++	.set_current_limit	= regulator_set_current_limit_regmap,
++	.get_current_limit	= regulator_get_current_limit_regmap,
++};
++
++/* VBYPSET: 5 V + 100 mV a step, stock uses up to 9 V */
++static const struct regulator_desc max77705_uno_desc = {
++	.name			= "uno",
++	.of_match		= "uno",
++	.type			= REGULATOR_VOLTAGE,
++	.owner			= THIS_MODULE,
++	.ops			= &max77705_uno_ops,
++	.min_uV			= 5000000,
++	.uV_step		= 100000,
++	.n_voltages		= 41,
++	.vsel_reg		= MAX77705_CHG_REG_CNFG_11,
++	.vsel_mask		= MAX77705_VBYPSET_MASK,
++	.curr_table		= max77705_uno_ilim,
++	.n_current_limits	= ARRAY_SIZE(max77705_uno_ilim),
++	.csel_reg		= MAX77705_CHG_REG_CNFG_05,
++	.csel_mask		= MAX77705_UNOILIM_MASK,
++	/* stock lets the wireless chip boot on UNO for 200 ms */
++	.enable_time		= 200000,
++};
++
++static int max77705_charger_register_uno(struct max77705_charger_data *chg)
++{
++	struct regulator_config cfg = {
++		.dev = chg->dev,
++		.driver_data = chg,
++		.regmap = chg->regmap,
++	};
++	struct fwnode_handle *node;
++	struct regulator_dev *rdev;
++
++	/* without a uno node there is no reverse wireless charging */
++	node = device_get_named_child_node(chg->dev, "uno");
++	if (!node)
++		return 0;
++	fwnode_handle_put(node);
++
++	rdev = devm_regulator_register(chg->dev, &max77705_uno_desc, &cfg);
++	if (IS_ERR(rdev))
++		return dev_err_probe(chg->dev, PTR_ERR(rdev),
++				     "cannot register the UNO regulator\n");
++
++	chg->uno_rdev = rdev;
++	return 0;
++}
++
++/* BYP_I: DETAILS_02 BYP_DTLS bit 0 is the bypass (OTG/UNO) current limit */
++static irqreturn_t max77705_byp_irq(int irq, void *irq_drv_data)
++{
++	struct max77705_charger_data *chg = irq_drv_data;
++	unsigned int dtls;
++
++	if (!READ_ONCE(chg->uno_on) ||
++	    regmap_read(chg->regmap, MAX77705_CHG_REG_DETAILS_02, &dtls))
++		return IRQ_HANDLED;
++
++	if (dtls & BIT(0))
++		max77705_uno_force_off(chg, REGULATOR_EVENT_OVER_CURRENT,
++				       "bypass overcurrent");
++
++	return IRQ_HANDLED;
++}
++
+ static int max77705_set_charge_behaviour(struct max77705_charger_data *chg,
+ 					 int behaviour)
+ {
+@@ -714,6 +917,13 @@ static void max77705_chgin_isr_work(struct work_struct *work)
+ {
+ 	struct max77705_charger_data *chg =
+ 		container_of(work, struct max77705_charger_data, chgin_work);
++	unsigned int ok;
++
++	if (READ_ONCE(chg->uno_on) &&
++	    !regmap_read(chg->regmap, MAX77705_CHG_REG_INT_OK, &ok) &&
++	    (ok & MAX77705_CHGIN_OK))
++		max77705_uno_force_off(chg, 0,
++				       "a cable came in");
+ 
+ 	power_supply_changed(chg->psy_chg);
+ }
+@@ -809,7 +1019,7 @@ static void max77705_wcin_work(struct work_struct *work)
+ 	 * change ("shutdown problem"), which is not done here.
+ 	 */
+ 	active = (ok & MAX77705_WCIN_OK) && !(ok & MAX77705_CHGIN_OK) &&
+-		 !chg->otg_on;
++		 !chg->otg_on && !READ_ONCE(chg->uno_on);
+ 
+ 	if (!active) {
+ 		cancel_delayed_work(&chg->wcin_ramp_work);
+@@ -1509,7 +1719,12 @@ static int max77705_charger_set_otg(struct max77705_charger_data *chg, bool enab
+ 	dev_info(chg->dev, "setting USB OTG / host mode: %d\n", enable);
+ 
+ 	if (enable) {
++		/* OTG takes the boost: UNO goes, and is not saved as a mode */
++		max77705_uno_force_off(chg, 0, "USB OTG");
++
++		mutex_lock(&chg->mode_lock);
+ 		ret = regmap_field_read(chg->rfield[MAX77705_MODE], &mode);
++		mutex_unlock(&chg->mode_lock);
+ 		if (ret)
+ 			return ret;
+ 
+@@ -1541,7 +1756,11 @@ static int max77705_charger_set_otg(struct max77705_charger_data *chg, bool enab
+ 		if (ret)
+ 			dev_warn(chg->dev, "failed to route USB data lines: %d\n", ret);
+ 
++		mutex_lock(&chg->mode_lock);
+ 		ret = regmap_field_write(chg->rfield[MAX77705_MODE], target);
++		if (!ret)
++			chg->otg_on = true;
++		mutex_unlock(&chg->mode_lock);
+ 		if (ret) {
+ 			dev_err(chg->dev, "failed to set OTG_CTRL mode: %d\n", ret);
+ 			return ret;
+@@ -1551,16 +1770,21 @@ static int max77705_charger_set_otg(struct max77705_charger_data *chg, bool enab
+ 			ret = usb_role_switch_set_role(chg->role_sw, USB_ROLE_HOST);
+ 			if (ret) {
+ 				dev_err(chg->dev, "failed to switch to host: %d\n", ret);
++				mutex_lock(&chg->mode_lock);
+ 				regmap_field_write(chg->rfield[MAX77705_MODE],
+ 						   chg->otg_prev_mode);
++				chg->otg_on = false;
++				mutex_unlock(&chg->mode_lock);
+ 				return ret;
+ 			}
+ 		}
+ 
+ 		chg->otg_on = true;
+ 	} else {
++		mutex_lock(&chg->mode_lock);
+ 		ret = regmap_field_write(chg->rfield[MAX77705_MODE],
+ 					 chg->otg_prev_mode);
++		mutex_unlock(&chg->mode_lock);
+ 		if (ret)
+ 			dev_err(chg->dev, "failed to restore charger mode: %d\n", ret);
+ 
+@@ -2190,6 +2414,9 @@ static int max77705_charger_probe(struct i2c_client *i2c)
+ 		return -ENOMEM;
+ 
+ 	ret = devm_mutex_init(dev, &chg->port_lock);
++	if (ret)
++		return ret;
++	ret = devm_mutex_init(dev, &chg->mode_lock);
+ 	if (ret)
+ 		return ret;
+ 
+@@ -2292,6 +2519,17 @@ static int max77705_charger_probe(struct i2c_client *i2c)
+ 	if (ret)
+ 		return ret;
+ 
++	ret = max77705_charger_register_uno(chg);
++	if (ret)
++		return ret;
++
++	ret = devm_request_threaded_irq(dev, regmap_irq_get_virq(irq_data, MAX77705_BYP_I),
++					NULL, max77705_byp_irq,
++					IRQF_TRIGGER_NONE,
++					"byp-irq", chg);
++	if (ret)
++		return ret;
++
+ 	ret = max77705_charger_enable(chg);
+ 	if (ret)
+ 		return dev_err_probe(dev, ret, "failed to enable charge\n");
+diff --git a/include/linux/power/max77705_charger.h b/include/linux/power/max77705_charger.h
+index 7a148c6..7ecc4ed 100644
+--- a/include/linux/power/max77705_charger.h
++++ b/include/linux/power/max77705_charger.h
+@@ -94,6 +94,7 @@
+ #define MAX77705_CHG_MINVSYS_MASK	GENMASK(7, 6)
+ 
+ /* MAX77705_CHG_REG_CNFG_05 */
++#define MAX77705_UNOILIM_MASK	GENMASK(6, 4)
+ #define MAX77705_UNOILIM_1000		6
+ #define MAX77705_B2SOVRC_DISABLE	0
+ #define MAX77705_B2SOVRC_4_5A		6
+@@ -101,6 +102,9 @@
+ #define MAX77705_B2SOVRC_4_8A		8
+ #define MAX77705_B2SOVRC_5_0A		9
+ 
++/* MAX77705_CHG_REG_CNFG_11 */
++#define MAX77705_VBYPSET_MASK	GENMASK(6, 0)
++
+ /* MAX77705_CHG_CNFG_06 */
+ #define MAX77705_WDTCLR_SHIFT		0
+ #define MAX77705_WDTCLR_MASK		GENMASK(1, 0)
+@@ -297,6 +301,11 @@ struct max77705_charger_data {
+ 	u8			otg_attach_cc0;		/* CC_STATUS0 it is timing */
+ 	u8			otg_prev_mode;
+ 	struct mutex		port_lock;	/* update_port() and the OTG request */
++	/* the CNFG_00 mode field: charge enable, OTG and UNO */
++	struct mutex		mode_lock;
++	struct regulator_dev	*uno_rdev;
++	bool			uno_on;
++	u8			uno_prev_mode;
+ 	struct work_struct	otg_work;
+ 	struct delayed_work	otg_delay_work;
+ 	struct delayed_work	otg_attach_work;

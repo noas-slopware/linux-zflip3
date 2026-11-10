@@ -1,0 +1,44 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] arm64: dts: qcom: sm8350-b2q: reverse wireless charging
+
+The charger's UNO boost at stock's starting values, 5 V and 1.5 A, as
+the receiver's uno-supply.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+index 42fc11c..1f06a0b 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+@@ -409,6 +409,9 @@
+ 					    0x96 0x31 0xaa 0x03 0x9c 0x42>;
+ 			/* cable-info WIRELESS (Qi BPP, PMA, stands): 800 mA in */
+ 			idt,bpp-input-current-microamp = <800000>;
++
++			/* the charger's UNO boost powers it to transmit */
++			uno-supply = <&max77705_uno>;
+ 		};
+ 	};
+ 
+@@ -2334,6 +2337,19 @@
+ 		maxim,pd-max-charge-current-microamp = <2850000>;
+ 		maxim,pd-sink-caps = /bits/ 8 <0x03 0x2c 0x91 0x01 0x36 0xc8 0xd0 0x02
+ 						0x00 0xc8 0x90 0x41 0x8b>;
++
++		/*
++		 * Reverse wireless charging: stock's transmitter starts at
++		 * 5 V with a 1.5 A limit (tx_uno_iout) when nothing is
++		 * identified on the coil.
++		 */
++		max77705_uno: uno {
++			regulator-name = "max77705-uno";
++			regulator-min-microvolt = <5000000>;
++			regulator-max-microvolt = <5000000>;
++			regulator-min-microamp = <1500000>;
++			regulator-max-microamp = <1500000>;
++		};
+ 	};
+ };
+ 

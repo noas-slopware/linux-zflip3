@@ -1,0 +1,659 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] power: supply: p9320: transmit (reverse wireless charging)
+
+With the charger's UNO boost as uno-supply the P9320 can also transmit.
+tx_enable on the power supply starts it: UNO on, stock's 30 % minimum
+duty for 5 s, a 1.5 A limit, and on AC_MISSING the chip is switched to
+TX. The interrupts stop it as stock does (chip or receiver too hot, a
+foreign object, another transmitter or field, the receiver full), and
+the IEC power-loss check throttles or stops it. Stock's battery limits
+apply (30 %, 0 to 50 C), checked when the battery changes. Unlike stock
+the no-receiver timer is always on, so nothing drains the battery
+transmitting to an empty coil. tx_state says what it is doing or why it
+stopped.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+
+diff --git a/Documentation/devicetree/bindings/power/supply/idt,p9320.yaml b/Documentation/devicetree/bindings/power/supply/idt,p9320.yaml
+index 249bc14..c37016e 100644
+--- a/Documentation/devicetree/bindings/power/supply/idt,p9320.yaml
++++ b/Documentation/devicetree/bindings/power/supply/idt,p9320.yaml
+@@ -13,7 +13,8 @@ description:
+   The P9320 receives power from a Qi or PMA pad and runs the wireless power
+   protocol in its own firmware. Its VOUT feeds the wireless input of a
+   battery charger. The chip is powered from the pad and only answers on I2C
+-  while the phone lies on one.
++  while the phone lies on one, or while the charger powers it to transmit
++  (reverse wireless charging).
+ 
+ allOf:
+   - $ref: power-supply.yaml#
+@@ -58,6 +59,11 @@ properties:
+       Input current the charger may draw from the receiver on a basic
+       power profile pad.
+ 
++  uno-supply:
++    description:
++      The charger's boost output that powers the chip as a transmitter, for
++      reverse wireless charging. Without it the chip only receives.
++
+ required:
+   - compatible
+   - reg
+diff --git a/drivers/power/supply/p9320_charger.c b/drivers/power/supply/p9320_charger.c
+index 007a9bf..d056ade 100644
+--- a/drivers/power/supply/p9320_charger.c
++++ b/drivers/power/supply/p9320_charger.c
+@@ -11,6 +11,11 @@
+  *
+  * Register addresses are 16 bit, data 8 bit. The chip runs from the
+  * rectified pad power and does not answer on I2C without a pad.
++ *
++ * It also transmits (reverse wireless charging, stock's "Wireless
++ * PowerShare"): the charger's UNO boost powers it from the battery, its
++ * firmware starts pinging by itself, and the host only trims a few TX
++ * registers, services its interrupts and switches UNO off to stop.
+  */
+ 
+ #include <linux/bits.h>
+@@ -26,6 +31,7 @@
+ #include <linux/power_supply.h>
+ #include <linux/property.h>
+ #include <linux/regmap.h>
++#include <linux/regulator/consumer.h>
+ #include <linux/workqueue.h>
+ 
+ #define P9320_CHIP_ID			0x00
+@@ -37,6 +43,7 @@
+ #define P9320_INT_L			0x22
+ #define P9320_INT_H			0x23
+ #define P9320_INT_ENABLE_L		0x24
++#define P9320_INT_ENABLE_H		0x25
+ #define P9320_INT_CLEAR_L		0x26
+ #define P9320_INT_CLEAR_H		0x27
+ #define P9320_SYS_OP_MODE		0x2b
+@@ -44,23 +51,47 @@
+ #define P9320_ADC_VOUT			0x3c	/* mV */
+ #define P9320_VOUT_SET			0x3e
+ #define P9320_ADC_VRECT			0x40	/* mV */
++#define P9320_TX_IUNO_LIMIT		0x42	/* 16 bit, mA */
+ #define P9320_ADC_IOUT			0x44	/* mA */
+ #define P9320_ADC_DIE_TEMP		0x46	/* 12 bit, see p9320_get_property() */
+ #define P9320_OP_FREQ			0x48	/* kHz */
+ #define P9320_ILIM_SET			0x4c
+ #define P9320_CMD_L			0x4e
++#define P9320_TRX_DATA_COM		0x58	/* a packet from the receiver */
++#define P9320_TRX_DATA_VALUE1		0x59
++#define P9320_TRX_DATA_VALUE2		0x5a
++#define P9320_TX_IUNO_OFFSET		0x62	/* 16 bit, mA */
++#define P9320_MST_MODE_SEL		0x69
+ #define P9320_RX_OV_CLAMP		0x6a
+ #define P9320_RX_COMM_MOD_FET		0x6b
+ #define P9320_FOD_BASE			0x70
++#define P9320_TX_MIN_DUTY		0xd3	/* 256ths */
+ #define P9320_RPP_SCALE			0xf0
++#define P9320_TX_IEC_DATA2		0x0480	/* s16, power loss */
++#define P9320_TX_IEC_FOD_ENABLE		0x049d
+ 
+ #define P9320_CHIP_ID_P9320		0x20
+ #define P9320_CHIP_ID_S2MIW04		0x04	/* LSI part, other register map */
+ 
++#define P9320_STAT_TXCONFLICT		BIT(1)
+ #define P9320_STAT_OVER_TEMP		BIT(2)
+ #define P9320_STAT_OVER_CURR		BIT(3)
+ #define P9320_STAT_OVER_VOL		BIT(4)
+ #define P9320_STAT_OP_MODE		BIT(5)
++#define P9320_STAT_VRECT		BIT(6)
++/* high byte, as transmitter */
++#define P9320_STAT_AC_MISSING		BIT(10)
++#define P9320_STAT_TX_CON_DISCON	BIT(11)
++#define P9320_STAT_TX_FOD		BIT(12)
++#define P9320_STAT_TX_RX_NOT_DET	BIT(13)	/* interrupt only */
++#define P9320_STAT_TX_IEC_FOD		BIT(14)
++#define P9320_STAT_TRX_DATA		BIT(15)
++
++#define P9320_TX_INTS		(P9320_STAT_TXCONFLICT | P9320_STAT_OVER_TEMP | \
++				 P9320_STAT_VRECT | P9320_STAT_AC_MISSING | \
++				 P9320_STAT_TX_CON_DISCON | P9320_STAT_TX_FOD | \
++				 P9320_STAT_TX_RX_NOT_DET | P9320_STAT_TX_IEC_FOD | \
++				 P9320_STAT_TRX_DATA)
+ 
+ #define P9320_CMD_CLEAR_INT		BIT(5)
+ 
+@@ -79,6 +110,39 @@
+ /* comm modulation: CMA only */
+ #define P9320_COMM_CMA			0x30
+ 
++/* MST_MODE_SEL: MST off, TX on */
++#define P9320_MST_OFF_TX_ON		0x03
++/* stock's minimum duty: 30 % for the first 5 s, then 20 % (the default) */
++#define P9320_TX_DUTY_START		0x4c
++#define P9320_TX_DUTY_RUN		0x33
++#define P9320_TX_DUTY_START_MS		5000
++/* stock's TX limits with nothing identified on the coil: 1.5 A, offset 150 */
++#define P9320_TX_IUNO_MA		1500
++#define P9320_TX_IUNO_OFFSET_MA		150
++#define P9320_TX_IUNO_THROTTLE_MA	500
++
++/* packets a receiver sends (Qi headers) */
++#define P9320_HDR_END_POWER_TRANSFER	0x02
++#define P9320_HDR_END_CHARGE_STATUS	0x05
++#define P9320_EPT_OVER_TEMPERATURE	0x03
++#define P9320_ECS_CS100			0x64
++
++/*
++ * IEC power-loss foreign object check, stock's iec_data: 10 s after the
++ * interrupt, three readings a second apart that agree; up to 700 is fine,
++ * up to 1600 throttles to 500 mA, above that is a foreign object.
++ */
++#define P9320_IEC_DELAY_MS		10000
++#define P9320_IEC_PERIOD_MS		1000
++#define P9320_IEC_SAMPLES		3
++#define P9320_IEC_THROTTLE		700
++#define P9320_IEC_FOD			1600
++
++/* stock's tx_stop_capacity and tx_high/low_threshold */
++#define P9320_TX_MIN_CAPACITY		30	/* % */
++#define P9320_TX_MAX_TEMP		500	/* 0.1 C */
++#define P9320_TX_MIN_TEMP		0	/* 0.1 C */
++
+ #define P9320_FOD_LEN			12
+ #define P9320_INT_LOOPS			10
+ #define P9320_ATTACH_RETRIES		5
+@@ -101,6 +165,20 @@ struct p9320 {
+ 	u32 rpp_scale;
+ 	u8 fod[P9320_FOD_LEN];
+ 	bool have_fod;
++
++	/* transmitter */
++	struct regulator *uno;
++	struct notifier_block uno_nb;
++	struct notifier_block psy_nb;
++	struct delayed_work tx_duty_work;
++	struct delayed_work tx_iec_work;
++	struct work_struct tx_stop_work;
++	bool tx_on;
++	bool tx_rx_present;
++	const char *tx_stopped;		/* why TX last stopped, or NULL */
++	const char *tx_stop_pending;	/* set by notifiers for tx_stop_work */
++	unsigned int tx_iec_samples;
++	int tx_iec_state;		/* 0 normal, 1 throttle, 2 foreign object */
+ };
+ 
+ static const struct regmap_config p9320_regmap_config = {
+@@ -221,6 +299,10 @@ static void p9320_update(struct p9320 *chip)
+ 
+ 	mutex_lock(&chip->lock);
+ 
++	/* the chip runs from UNO now; what the detect pin says is not a pad */
++	if (chip->tx_on)
++		goto out;
++
+ 	if (!present) {
+ 		cancel_delayed_work(&chip->attach_work);
+ 		if (chip->online) {
+@@ -279,10 +361,298 @@ static irqreturn_t p9320_det_irq(int irq, void *data)
+ 	return IRQ_HANDLED;
+ }
+ 
++static int p9320_write16(struct p9320 *chip, unsigned int reg, unsigned int val)
++{
++	int ret;
++
++	ret = regmap_write(chip->regmap, reg, val & 0xff);
++	if (ret)
++		return ret;
++
++	return regmap_write(chip->regmap, reg + 1, val >> 8);
++}
++
++/* Removing UNO power is what ends TX; no register stops it. */
++static void __p9320_tx_stop(struct p9320 *chip, const char *why)
++{
++	lockdep_assert_held(&chip->lock);
++
++	if (!chip->tx_on)
++		return;
++
++	cancel_delayed_work(&chip->tx_duty_work);
++	cancel_delayed_work(&chip->tx_iec_work);
++	regulator_disable(chip->uno);
++	chip->tx_on = false;
++	chip->tx_rx_present = false;
++	chip->tx_stopped = why;
++	dev_info(chip->dev, "transmitter off: %s\n", why);
++
++	/* a pad that came while transmitting is picked up now */
++	schedule_delayed_work(&chip->attach_work, 0);
++	power_supply_changed(chip->psy);
++}
++
++struct p9320_battery_check {
++	const char *why;
++};
++
++static int p9320_check_battery(struct power_supply *psy, void *data)
++{
++	struct p9320_battery_check *check = data;
++	union power_supply_propval val;
++
++	if (psy->desc->type != POWER_SUPPLY_TYPE_BATTERY)
++		return 0;
++	if (!power_supply_get_property(psy, POWER_SUPPLY_PROP_SCOPE, &val) &&
++	    val.intval == POWER_SUPPLY_SCOPE_DEVICE)
++		return 0;
++
++	if (!power_supply_get_property(psy, POWER_SUPPLY_PROP_CAPACITY, &val) &&
++	    val.intval <= P9320_TX_MIN_CAPACITY)
++		check->why = "battery low";
++	else if (!power_supply_get_property(psy, POWER_SUPPLY_PROP_TEMP, &val) &&
++		 val.intval >= P9320_TX_MAX_TEMP)
++		check->why = "battery hot";
++	else if (!power_supply_get_property(psy, POWER_SUPPLY_PROP_TEMP, &val) &&
++		 val.intval <= P9320_TX_MIN_TEMP)
++		check->why = "battery cold";
++
++	return check->why ? 1 : 0;
++}
++
++static int p9320_tx_start(struct p9320 *chip)
++{
++	struct p9320_battery_check check = {};
++	int ret;
++
++	power_supply_for_each_psy(&check, p9320_check_battery);
++	if (check.why) {
++		dev_info(chip->dev, "not transmitting: %s\n", check.why);
++		return -EBUSY;
++	}
++
++	mutex_lock(&chip->lock);
++
++	ret = 0;
++	if (chip->tx_on)
++		goto out;
++	/* on a pad: the chip receives */
++	ret = -EBUSY;
++	if (chip->online)
++		goto out;
++
++	chip->tx_on = true;
++	chip->tx_rx_present = false;
++	chip->tx_stopped = NULL;
++	chip->tx_iec_samples = 0;
++	cancel_delayed_work(&chip->attach_work);
++
++	/* refused while a cable, a pad or OTG has the charger */
++	ret = regulator_enable(chip->uno);
++	if (ret) {
++		chip->tx_on = false;
++		goto out;
++	}
++
++	ret = regmap_write(chip->regmap, P9320_TX_MIN_DUTY, P9320_TX_DUTY_START);
++	if (!ret)
++		ret = p9320_write16(chip, P9320_TX_IUNO_LIMIT, P9320_TX_IUNO_MA);
++	if (!ret)
++		ret = p9320_write16(chip, P9320_TX_IUNO_OFFSET,
++				    P9320_TX_IUNO_OFFSET_MA);
++	/*
++	 * Stock never writes the enables and leaves the no-receiver timer
++	 * off unless asked; here it is on, so a transmitter with nothing on
++	 * it switches itself off instead of draining the battery.
++	 */
++	if (!ret)
++		ret = regmap_set_bits(chip->regmap, P9320_INT_ENABLE_L,
++				      P9320_TX_INTS & 0xff);
++	if (!ret)
++		ret = regmap_set_bits(chip->regmap, P9320_INT_ENABLE_H,
++				      P9320_TX_INTS >> 8);
++	if (ret) {
++		dev_err(chip->dev, "cannot set up the transmitter: %d\n", ret);
++		__p9320_tx_stop(chip, "chip not answering");
++		goto out;
++	}
++
++	dev_info(chip->dev, "transmitter on\n");
++	schedule_delayed_work(&chip->tx_duty_work,
++			      msecs_to_jiffies(P9320_TX_DUTY_START_MS));
++	/* the chip raises AC_MISSING as it comes up on UNO */
++	p9320_service_int(chip);
++	power_supply_changed(chip->psy);
++out:
++	mutex_unlock(&chip->lock);
++	return ret;
++}
++
++static void p9320_tx_duty_work(struct work_struct *work)
++{
++	struct p9320 *chip = container_of(work, struct p9320, tx_duty_work.work);
++
++	mutex_lock(&chip->lock);
++	if (chip->tx_on)
++		regmap_write(chip->regmap, P9320_TX_MIN_DUTY, P9320_TX_DUTY_RUN);
++	mutex_unlock(&chip->lock);
++}
++
++static void p9320_tx_iec_work(struct work_struct *work)
++{
++	struct p9320 *chip = container_of(work, struct p9320, tx_iec_work.work);
++	unsigned int raw;
++	int loss, state;
++
++	mutex_lock(&chip->lock);
++
++	if (!chip->tx_on || p9320_read16(chip, P9320_TX_IEC_DATA2, &raw))
++		goto done;
++
++	loss = (s16)raw;
++	state = loss <= P9320_IEC_THROTTLE ? 0 : loss <= P9320_IEC_FOD ? 1 : 2;
++	dev_dbg(chip->dev, "IEC power loss %d\n", loss);
++
++	if (chip->tx_iec_samples && state != chip->tx_iec_state)
++		goto done;	/* readings disagree: nothing is decided */
++
++	chip->tx_iec_state = state;
++	if (++chip->tx_iec_samples < P9320_IEC_SAMPLES) {
++		schedule_delayed_work(&chip->tx_iec_work,
++				      msecs_to_jiffies(P9320_IEC_PERIOD_MS));
++		mutex_unlock(&chip->lock);
++		return;
++	}
++
++	if (state == 2) {
++		__p9320_tx_stop(chip, "foreign object");
++	} else if (state == 1) {
++		dev_info(chip->dev, "power loss %d: transmitting at %u mA\n",
++			 loss, P9320_TX_IUNO_THROTTLE_MA);
++		p9320_write16(chip, P9320_TX_IUNO_LIMIT,
++			      P9320_TX_IUNO_THROTTLE_MA);
++	}
++done:
++	chip->tx_iec_samples = 0;
++	mutex_unlock(&chip->lock);
++}
++
++static void p9320_tx_stop_work(struct work_struct *work)
++{
++	struct p9320 *chip = container_of(work, struct p9320, tx_stop_work);
++
++	mutex_lock(&chip->lock);
++	if (chip->tx_stop_pending)
++		__p9320_tx_stop(chip, chip->tx_stop_pending);
++	chip->tx_stop_pending = NULL;
++	mutex_unlock(&chip->lock);
++}
++
++/* the charger switched UNO off by itself: a cable, OTG or overcurrent */
++static int p9320_uno_notify(struct notifier_block *nb, unsigned long event,
++			    void *data)
++{
++	struct p9320 *chip = container_of(nb, struct p9320, uno_nb);
++
++	if (!(event & REGULATOR_EVENT_FORCE_DISABLE))
++		return NOTIFY_DONE;
++
++	WRITE_ONCE(chip->tx_stop_pending,
++		   event & REGULATOR_EVENT_OVER_CURRENT ? "UNO overcurrent" :
++		   "the charger needs the boost");
++	schedule_work(&chip->tx_stop_work);
++
++	return NOTIFY_OK;
++}
++
++/* stock checks the battery every 10 s while transmitting; here on change */
++static int p9320_psy_notify(struct notifier_block *nb, unsigned long event,
++			    void *data)
++{
++	struct p9320 *chip = container_of(nb, struct p9320, psy_nb);
++	struct p9320_battery_check check = {};
++
++	if (event != PSY_EVENT_PROP_CHANGED || !READ_ONCE(chip->tx_on))
++		return NOTIFY_DONE;
++
++	p9320_check_battery(data, &check);
++	if (check.why) {
++		WRITE_ONCE(chip->tx_stop_pending, check.why);
++		schedule_work(&chip->tx_stop_work);
++	}
++
++	return NOTIFY_OK;
++}
++
++/*
++ * Transmitter interrupts, as stock's mfc_wpc_irq_thread() handles them with
++ * wc_tx_enable set. Returns why TX has to stop, or NULL.
++ */
++static const char *p9320_tx_int(struct p9320 *chip, unsigned int src,
++				unsigned int status)
++{
++	unsigned int com, val;
++
++	if (src & P9320_STAT_AC_MISSING) {
++		/* stock lets it settle 100 ms, then turns TX on */
++		msleep(100);
++		if (!p9320_read16(chip, P9320_STATUS_L, &status) &&
++		    (status & P9320_STAT_AC_MISSING)) {
++			regmap_write(chip->regmap, P9320_MST_MODE_SEL,
++				     P9320_MST_OFF_TX_ON);
++			regmap_write(chip->regmap, P9320_TX_IEC_FOD_ENABLE, 1);
++			chip->tx_rx_present = false;
++		}
++	}
++
++	if (src & P9320_STAT_OVER_TEMP)
++		return "chip too hot";
++	if (src & P9320_STAT_VRECT)
++		return "another field on the coil";
++	if ((src & P9320_STAT_TXCONFLICT) && (status & P9320_STAT_TXCONFLICT))
++		return "another transmitter";
++	if ((src & P9320_STAT_TX_FOD) && (status & P9320_STAT_TX_FOD))
++		return "foreign object";
++	if (src & P9320_STAT_TX_RX_NOT_DET)
++		return "no receiver";
++
++	if (src & P9320_STAT_TX_CON_DISCON) {
++		bool present = status & P9320_STAT_TX_CON_DISCON;
++
++		if (present != chip->tx_rx_present) {
++			chip->tx_rx_present = present;
++			dev_info(chip->dev, "receiver %s\n",
++				 present ? "on the coil" : "gone");
++			power_supply_changed(chip->psy);
++		}
++	}
++
++	if (src & P9320_STAT_TRX_DATA &&
++	    !regmap_read(chip->regmap, P9320_TRX_DATA_COM, &com) &&
++	    !regmap_read(chip->regmap, P9320_TRX_DATA_VALUE1, &val)) {
++		dev_dbg(chip->dev, "receiver packet 0x%02x 0x%02x\n", com, val);
++		if (com == P9320_HDR_END_CHARGE_STATUS && val == P9320_ECS_CS100)
++			return "receiver full";
++		if (com == P9320_HDR_END_POWER_TRANSFER &&
++		    val == P9320_EPT_OVER_TEMPERATURE)
++			return "receiver too hot";
++	}
++
++	if ((src & P9320_STAT_TX_IEC_FOD) &&
++	    !delayed_work_pending(&chip->tx_iec_work)) {
++		chip->tx_iec_samples = 0;
++		schedule_delayed_work(&chip->tx_iec_work,
++				      msecs_to_jiffies(P9320_IEC_DELAY_MS));
++	}
++
++	return NULL;
++}
++
+ /*
+  * The INT line stays asserted until the host clears INT_A and sends
+  * CLEAR_INT (stock mfc_wpc_irq_thread()). Only a powered chip can assert it,
+- * so nothing is done without a pad.
++ * so nothing is done without a pad or UNO.
+  */
+ static void p9320_service_int(struct p9320 *chip)
+ {
+@@ -292,13 +662,29 @@ static void p9320_service_int(struct p9320 *chip)
+ 	lockdep_assert_held(&chip->lock);
+ 
+ 	for (loops = 0; loops < P9320_INT_LOOPS; loops++) {
+-		if (!chip->online || gpiod_get_value_cansleep(chip->int_gpio) <= 0)
++		const char *stop = NULL;
++
++		if ((!chip->online && !chip->tx_on) ||
++		    gpiod_get_value_cansleep(chip->int_gpio) <= 0)
+ 			break;
+ 
+ 		if (p9320_read16(chip, P9320_INT_L, &src) ||
+ 		    p9320_read16(chip, P9320_STATUS_L, &status))
+ 			break;
+ 
++		if (chip->tx_on) {
++			stop = p9320_tx_int(chip, src, status);
++			if (!regmap_write(chip->regmap, P9320_INT_CLEAR_L, src & 0xff) &&
++			    !regmap_write(chip->regmap, P9320_INT_CLEAR_H, src >> 8))
++				regmap_set_bits(chip->regmap, P9320_CMD_L,
++						P9320_CMD_CLEAR_INT);
++			if (stop) {
++				__p9320_tx_stop(chip, stop);
++				break;
++			}
++			continue;
++		}
++
+ 		if (src & P9320_STAT_OP_MODE)
+ 			dev_dbg(chip->dev, "op mode 0x%02x\n", status);
+ 		if (src & (P9320_STAT_OVER_TEMP | P9320_STAT_OVER_CURR |
+@@ -398,6 +784,83 @@ static int p9320_get_property(struct power_supply *psy,
+ 	return ret;
+ }
+ 
++/*
++ * tx_enable: 1 starts transmitting, 0 stops. tx_state: "transmitting" with
++ * a receiver on the coil, "waiting" without one, "off", or "off: <why>"
++ * when it stopped by itself.
++ */
++static ssize_t tx_enable_show(struct device *dev, struct device_attribute *attr,
++			      char *buf)
++{
++	struct p9320 *chip = power_supply_get_drvdata(dev_to_psy(dev));
++
++	return sysfs_emit(buf, "%d\n", READ_ONCE(chip->tx_on));
++}
++
++static ssize_t tx_enable_store(struct device *dev, struct device_attribute *attr,
++			       const char *buf, size_t count)
++{
++	struct p9320 *chip = power_supply_get_drvdata(dev_to_psy(dev));
++	bool enable;
++	int ret;
++
++	ret = kstrtobool(buf, &enable);
++	if (ret)
++		return ret;
++
++	if (enable) {
++		ret = p9320_tx_start(chip);
++	} else {
++		mutex_lock(&chip->lock);
++		__p9320_tx_stop(chip, "turned off");
++		chip->tx_stopped = NULL;
++		mutex_unlock(&chip->lock);
++	}
++
++	return ret ?: count;
++}
++static DEVICE_ATTR_RW(tx_enable);
++
++static ssize_t tx_state_show(struct device *dev, struct device_attribute *attr,
++			     char *buf)
++{
++	struct p9320 *chip = power_supply_get_drvdata(dev_to_psy(dev));
++	ssize_t len;
++
++	mutex_lock(&chip->lock);
++	if (chip->tx_on)
++		len = sysfs_emit(buf, "%s\n", chip->tx_rx_present ?
++				 "transmitting" : "waiting");
++	else if (chip->tx_stopped)
++		len = sysfs_emit(buf, "off: %s\n", chip->tx_stopped);
++	else
++		len = sysfs_emit(buf, "off\n");
++	mutex_unlock(&chip->lock);
++
++	return len;
++}
++static DEVICE_ATTR_RO(tx_state);
++
++static struct attribute *p9320_tx_attrs[] = {
++	&dev_attr_tx_enable.attr,
++	&dev_attr_tx_state.attr,
++	NULL
++};
++ATTRIBUTE_GROUPS(p9320_tx);
++
++static void p9320_tx_remove(void *data)
++{
++	struct p9320 *chip = data;
++
++	power_supply_unreg_notifier(&chip->psy_nb);
++	cancel_work_sync(&chip->tx_stop_work);
++	mutex_lock(&chip->lock);
++	__p9320_tx_stop(chip, "driver going away");
++	mutex_unlock(&chip->lock);
++	cancel_delayed_work_sync(&chip->tx_duty_work);
++	cancel_delayed_work_sync(&chip->tx_iec_work);
++}
++
+ static const struct power_supply_desc p9320_psy_desc = {
+ 	.name = "p9320-wireless",
+ 	.type = POWER_SUPPLY_TYPE_WIRELESS,
+@@ -455,8 +918,19 @@ static int p9320_probe(struct i2c_client *client)
+ 	else if (ret != -EINVAL)
+ 		dev_warn(dev, "idt,fod needs %d bytes, ignored\n", P9320_FOD_LEN);
+ 
++	/* the transmitter needs the charger's UNO boost */
++	chip->uno = devm_regulator_get_optional(dev, "uno");
++	if (IS_ERR(chip->uno)) {
++		if (PTR_ERR(chip->uno) != -ENODEV)
++			return dev_err_probe(dev, PTR_ERR(chip->uno),
++					     "cannot get the UNO supply\n");
++		chip->uno = NULL;
++	}
++
+ 	cfg.drv_data = chip;
+ 	cfg.fwnode = dev_fwnode(dev);
++	if (chip->uno)
++		cfg.attr_grp = p9320_tx_groups;
+ 	chip->psy = devm_power_supply_register(dev, &p9320_psy_desc, &cfg);
+ 	if (IS_ERR(chip->psy))
+ 		return dev_err_probe(dev, PTR_ERR(chip->psy),
+@@ -468,6 +942,27 @@ static int p9320_probe(struct i2c_client *client)
+ 	if (ret)
+ 		return ret;
+ 
++	if (chip->uno) {
++		INIT_DELAYED_WORK(&chip->tx_duty_work, p9320_tx_duty_work);
++		INIT_DELAYED_WORK(&chip->tx_iec_work, p9320_tx_iec_work);
++		INIT_WORK(&chip->tx_stop_work, p9320_tx_stop_work);
++
++		chip->uno_nb.notifier_call = p9320_uno_notify;
++		ret = devm_regulator_register_notifier(chip->uno, &chip->uno_nb);
++		if (ret)
++			return ret;
++
++		chip->psy_nb.notifier_call = p9320_psy_notify;
++		ret = power_supply_reg_notifier(&chip->psy_nb);
++		if (ret)
++			return ret;
++
++		/* runs after the interrupts below are freed */
++		ret = devm_add_action_or_reset(dev, p9320_tx_remove, chip);
++		if (ret)
++			return ret;
++	}
++
+ 	irq = gpiod_to_irq(chip->int_gpio);
+ 	if (irq < 0)
+ 		return dev_err_probe(dev, irq, "no interrupt for the INT GPIO\n");
