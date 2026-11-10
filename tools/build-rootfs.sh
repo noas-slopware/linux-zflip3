@@ -31,7 +31,8 @@ usage: sudo build-rootfs.sh --authorized-keys FILE [options]
   --tarball NAME          bootstrap tarball name (default: ARCH_TARBALL from sources.lock)
   --keep-tarball          do not delete the downloaded tarball
 
-Packages: base from the bootstrap, plus $ROOTFS_PACKAGES from sources.lock.
+Packages: base from the bootstrap, $ROOTFS_PACKAGES from sources.lock, the phone's repo
+packages from userspace/rootfs-packages.txt, then --packages.
 EOF
 }
 
@@ -129,6 +130,10 @@ log "installing archports-keyring $ROOTFS_PACKAGES"
 # shellcheck disable=SC2086
 chroot_run pacman -Sy --noconfirm --needed archports-keyring $ROOTFS_PACKAGES
 chroot_run pacman-key --populate archports
+
+mapfile -t phone_pkgs < <(grep -v '^#' "$REPO_ROOT/userspace/rootfs-packages.txt")
+log "installing the phone's ${#phone_pkgs[@]} repo packages (userspace/rootfs-packages.txt)"
+chroot_run pacman -S --noconfirm --needed "${phone_pkgs[@]}"
 
 if [ -n "$PACKAGES" ]; then
   mapfile -t pkgs < <(find "$PACKAGES" -maxdepth 1 -name '*.pkg.tar*' ! -name '*.sig' \
