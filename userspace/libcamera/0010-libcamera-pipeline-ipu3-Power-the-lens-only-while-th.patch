@@ -15,3 +15,52 @@ is idle, are resumed when it starts, autofocus moves the lens as before,
 and both are suspended again about one second after the camera stops.
 
 Signed-off-by: Marco Ziliani <rylos78@gmail.com>
+---
+ src/libcamera/pipeline/ipu3/ipu3.cpp | 17 ++++++++++++++++-
+ 1 file changed, 16 insertions(+), 1 deletion(-)
+
+diff --git a/src/libcamera/pipeline/ipu3/ipu3.cpp b/src/libcamera/pipeline/ipu3/ipu3.cpp
+index 0f3e169d..149d111f 100644
+--- a/src/libcamera/pipeline/ipu3/ipu3.cpp
++++ b/src/libcamera/pipeline/ipu3/ipu3.cpp
+@@ -731,10 +731,18 @@ int PipelineHandlerIPU3::start(Camera *camera, [[maybe_unused]] const ControlLis
+ 	if (ret)
+ 		return ret;
+ 
++	/* Power the lens, if any, for the duration of the capture session. */
++	CameraLens *lens = cio2->sensor()->focusLens();
++	if (lens) {
++		ret = lens->open();
++		if (ret)
++			return ret;
++	}
++
+ 	/* Allocate buffers for internal pipeline usage. */
+ 	ret = allocateBuffers(camera);
+ 	if (ret)
+-		return ret;
++		goto error_lens;
+ 
+ 	ret = data->ipa_->start();
+ 	if (ret)
+@@ -761,6 +769,9 @@ error:
+ 	cio2->stop();
+ 	data->ipa_->stop();
+ 	freeBuffers(camera);
++error_lens:
++	if (lens)
++		lens->close();
+ 	LOG(IPU3, Error) << "Failed to start camera " << camera->id();
+ 
+ 	return ret;
+@@ -781,6 +792,10 @@ void PipelineHandlerIPU3::stopDevice(Camera *camera)
+ 		LOG(IPU3, Warning) << "Failed to stop camera " << camera->id();
+ 
+ 	freeBuffers(camera);
++
++	CameraLens *lens = data->cio2_.sensor()->focusLens();
++	if (lens)
++		lens->close();
+ }
+ 
+ void IPU3CameraData::cancelPendingRequests()
