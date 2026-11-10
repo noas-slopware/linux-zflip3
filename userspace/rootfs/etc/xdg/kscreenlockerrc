@@ -1,2 +1,7 @@
 [Daemon]
 LockOnStart=true
+
+# Offer fingerprint unlock (kscreenlocker greeter, PAM service kde-fingerprint ->
+# pam_fprintd). Nothing in Plasma 6.8 writes this key; it has to be a default.
+[Authenticators]
+Fingerprint=true
