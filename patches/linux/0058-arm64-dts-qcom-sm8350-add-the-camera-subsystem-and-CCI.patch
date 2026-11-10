@@ -1,0 +1,431 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] arm64: dts: qcom: sm8350: add the camera subsystem and CCI
+
+Add the two CCI controllers and the CAMSS node to sm8350.dtsi, disabled,
+as sm8250.dtsi does. Addresses, interrupts and clocks come from the stock
+devicetree of the Galaxy Z Flip3. Compared with SM8250 there is a third
+full IFE at 0xacef000 (CSID interrupt 640, IFE interrupt 641), all six
+CSIPHY regions are 0x2000 long, and CSIPHY4 uses interrupt 122.
+
+CCI0 drives gpio107 to gpio110 and CCI1 gpio111 to gpio114, with pull-up
+when active and pull-down when suspended, as in the stock pin states.
+Stock runs both controllers at 37.5 MHz, which is the source rate the
+driver timing table for CCI v2 is written for, so assign that rate the
+way sm8650.dtsi does.
+
+The IFE stream IDs (0x800, 0x840, 0xc00 and 0xc40, mask 0x440) are
+copied from the stock camera SMMU context bank. SM8250 lists eight IDs
+with mask 0x400; whether SM8350 needs more than the stock set under
+mainline has not been checked on hardware yet.
+
+The CCI blocks are the same v2 controller as on SM8250, so document
+qcom,sm8350-cci with the qcom,msm8996-cci fallback and the five SM8250
+clocks.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../devicetree/bindings/i2c/qcom,i2c-cci.yaml |   2 +
+ arch/arm64/boot/dts/qcom/sm8350.dtsi          | 362 ++++++++++++++++++
+ 2 files changed, 364 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/i2c/qcom,i2c-cci.yaml b/Documentation/devicetree/bindings/i2c/qcom,i2c-cci.yaml
+index 1e8def2..63083e0 100644
+--- a/Documentation/devicetree/bindings/i2c/qcom,i2c-cci.yaml
++++ b/Documentation/devicetree/bindings/i2c/qcom,i2c-cci.yaml
+@@ -40,6 +40,7 @@ properties:
+               - qcom,sm6150-cci
+               - qcom,sm6350-cci
+               - qcom,sm8250-cci
++              - qcom,sm8350-cci
+               - qcom,sm8450-cci
+               - qcom,sm8550-cci
+               - qcom,sm8650-cci
+@@ -219,6 +220,7 @@ allOf:
+             enum:
+               - qcom,sc7280-cci
+               - qcom,sm8250-cci
++              - qcom,sm8350-cci
+               - qcom,sm8450-cci
+     then:
+       properties:
+diff --git a/arch/arm64/boot/dts/qcom/sm8350.dtsi b/arch/arm64/boot/dts/qcom/sm8350.dtsi
+index e3a0a0a..0d8d447 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm8350.dtsi
+@@ -2867,6 +2867,296 @@
+ 			#power-domain-cells = <1>;
+ 		};
+ 
++		cci0: cci@ac4f000 {
++			compatible = "qcom,sm8350-cci", "qcom,msm8996-cci";
++			#address-cells = <1>;
++			#size-cells = <0>;
++
++			reg = <0 0x0ac4f000 0 0x1000>;
++			interrupts = <GIC_SPI 460 IRQ_TYPE_EDGE_RISING>;
++			power-domains = <&camcc TITAN_TOP_GDSC>;
++
++			clocks = <&camcc CAM_CC_CAMNOC_AXI_CLK>,
++				 <&camcc CAM_CC_SLOW_AHB_CLK_SRC>,
++				 <&camcc CAM_CC_CPAS_AHB_CLK>,
++				 <&camcc CAM_CC_CCI_0_CLK>,
++				 <&camcc CAM_CC_CCI_0_CLK_SRC>;
++			clock-names = "camnoc_axi",
++				      "slow_ahb_src",
++				      "cpas_ahb",
++				      "cci",
++				      "cci_src";
++
++			assigned-clocks = <&camcc CAM_CC_CCI_0_CLK>;
++			assigned-clock-rates = <37500000>;
++
++			pinctrl-0 = <&cci0_default>;
++			pinctrl-1 = <&cci0_sleep>;
++			pinctrl-names = "default", "sleep";
++
++			status = "disabled";
++
++			cci0_i2c0: i2c-bus@0 {
++				reg = <0>;
++				clock-frequency = <1000000>;
++				#address-cells = <1>;
++				#size-cells = <0>;
++			};
++
++			cci0_i2c1: i2c-bus@1 {
++				reg = <1>;
++				clock-frequency = <1000000>;
++				#address-cells = <1>;
++				#size-cells = <0>;
++			};
++		};
++
++		cci1: cci@ac50000 {
++			compatible = "qcom,sm8350-cci", "qcom,msm8996-cci";
++			#address-cells = <1>;
++			#size-cells = <0>;
++
++			reg = <0 0x0ac50000 0 0x1000>;
++			interrupts = <GIC_SPI 271 IRQ_TYPE_EDGE_RISING>;
++			power-domains = <&camcc TITAN_TOP_GDSC>;
++
++			clocks = <&camcc CAM_CC_CAMNOC_AXI_CLK>,
++				 <&camcc CAM_CC_SLOW_AHB_CLK_SRC>,
++				 <&camcc CAM_CC_CPAS_AHB_CLK>,
++				 <&camcc CAM_CC_CCI_1_CLK>,
++				 <&camcc CAM_CC_CCI_1_CLK_SRC>;
++			clock-names = "camnoc_axi",
++				      "slow_ahb_src",
++				      "cpas_ahb",
++				      "cci",
++				      "cci_src";
++
++			assigned-clocks = <&camcc CAM_CC_CCI_1_CLK>;
++			assigned-clock-rates = <37500000>;
++
++			pinctrl-0 = <&cci1_default>;
++			pinctrl-1 = <&cci1_sleep>;
++			pinctrl-names = "default", "sleep";
++
++			status = "disabled";
++
++			cci1_i2c0: i2c-bus@0 {
++				reg = <0>;
++				clock-frequency = <1000000>;
++				#address-cells = <1>;
++				#size-cells = <0>;
++			};
++
++			cci1_i2c1: i2c-bus@1 {
++				reg = <1>;
++				clock-frequency = <1000000>;
++				#address-cells = <1>;
++				#size-cells = <0>;
++			};
++		};
++
++		camss: camss@ac6a000 {
++			compatible = "qcom,sm8350-camss";
++			status = "disabled";
++
++			reg = <0 0x0ac6a000 0 0x2000>,
++			      <0 0x0ac6c000 0 0x2000>,
++			      <0 0x0ac6e000 0 0x2000>,
++			      <0 0x0ac70000 0 0x2000>,
++			      <0 0x0ac72000 0 0x2000>,
++			      <0 0x0ac74000 0 0x2000>,
++			      <0 0x0acb4000 0 0xd000>,
++			      <0 0x0acc3000 0 0xd000>,
++			      <0 0x0acef000 0 0xd000>,
++			      <0 0x0acd9000 0 0x2200>,
++			      <0 0x0acdb200 0 0x2200>;
++			reg-names = "csiphy0",
++				    "csiphy1",
++				    "csiphy2",
++				    "csiphy3",
++				    "csiphy4",
++				    "csiphy5",
++				    "vfe0",
++				    "vfe1",
++				    "vfe2",
++				    "vfe_lite0",
++				    "vfe_lite1";
++
++			interrupts = <GIC_SPI 477 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 478 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 479 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 448 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 122 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 89 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 464 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 466 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 640 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 468 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 359 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 465 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 467 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 641 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 469 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 360 IRQ_TYPE_EDGE_RISING>;
++			interrupt-names = "csiphy0",
++					  "csiphy1",
++					  "csiphy2",
++					  "csiphy3",
++					  "csiphy4",
++					  "csiphy5",
++					  "csid0",
++					  "csid1",
++					  "csid2",
++					  "csid3",
++					  "csid4",
++					  "vfe0",
++					  "vfe1",
++					  "vfe2",
++					  "vfe_lite0",
++					  "vfe_lite1";
++
++			power-domains = <&camcc IFE_0_GDSC>,
++					<&camcc IFE_1_GDSC>,
++					<&camcc IFE_2_GDSC>,
++					<&camcc TITAN_TOP_GDSC>;
++			power-domain-names = "ife0",
++					     "ife1",
++					     "ife2",
++					     "top";
++
++			clocks = <&gcc GCC_CAMERA_HF_AXI_CLK>,
++				 <&gcc GCC_CAMERA_SF_AXI_CLK>,
++				 <&camcc CAM_CC_CAMNOC_AXI_CLK>,
++				 <&camcc CAM_CC_CAMNOC_AXI_CLK_SRC>,
++				 <&camcc CAM_CC_CORE_AHB_CLK>,
++				 <&camcc CAM_CC_CPAS_AHB_CLK>,
++				 <&camcc CAM_CC_CSIPHY0_CLK>,
++				 <&camcc CAM_CC_CSI0PHYTIMER_CLK>,
++				 <&camcc CAM_CC_CSIPHY1_CLK>,
++				 <&camcc CAM_CC_CSI1PHYTIMER_CLK>,
++				 <&camcc CAM_CC_CSIPHY2_CLK>,
++				 <&camcc CAM_CC_CSI2PHYTIMER_CLK>,
++				 <&camcc CAM_CC_CSIPHY3_CLK>,
++				 <&camcc CAM_CC_CSI3PHYTIMER_CLK>,
++				 <&camcc CAM_CC_CSIPHY4_CLK>,
++				 <&camcc CAM_CC_CSI4PHYTIMER_CLK>,
++				 <&camcc CAM_CC_CSIPHY5_CLK>,
++				 <&camcc CAM_CC_CSI5PHYTIMER_CLK>,
++				 <&camcc CAM_CC_SLOW_AHB_CLK_SRC>,
++				 <&camcc CAM_CC_IFE_0_AHB_CLK>,
++				 <&camcc CAM_CC_IFE_0_AXI_CLK>,
++				 <&camcc CAM_CC_IFE_0_CLK>,
++				 <&camcc CAM_CC_IFE_0_CPHY_RX_CLK>,
++				 <&camcc CAM_CC_IFE_0_CSID_CLK>,
++				 <&camcc CAM_CC_IFE_0_AREG_CLK>,
++				 <&camcc CAM_CC_IFE_1_AHB_CLK>,
++				 <&camcc CAM_CC_IFE_1_AXI_CLK>,
++				 <&camcc CAM_CC_IFE_1_CLK>,
++				 <&camcc CAM_CC_IFE_1_CPHY_RX_CLK>,
++				 <&camcc CAM_CC_IFE_1_CSID_CLK>,
++				 <&camcc CAM_CC_IFE_1_AREG_CLK>,
++				 <&camcc CAM_CC_IFE_2_AHB_CLK>,
++				 <&camcc CAM_CC_IFE_2_AXI_CLK>,
++				 <&camcc CAM_CC_IFE_2_CLK>,
++				 <&camcc CAM_CC_IFE_2_CPHY_RX_CLK>,
++				 <&camcc CAM_CC_IFE_2_CSID_CLK>,
++				 <&camcc CAM_CC_IFE_2_AREG_CLK>,
++				 <&camcc CAM_CC_IFE_LITE_AHB_CLK>,
++				 <&camcc CAM_CC_IFE_LITE_AXI_CLK>,
++				 <&camcc CAM_CC_IFE_LITE_CLK>,
++				 <&camcc CAM_CC_IFE_LITE_CPHY_RX_CLK>,
++				 <&camcc CAM_CC_IFE_LITE_CSID_CLK>;
++			clock-names = "cam_hf_axi",
++				      "cam_sf_axi",
++				      "camnoc_axi",
++				      "camnoc_axi_src",
++				      "core_ahb",
++				      "cpas_ahb",
++				      "csiphy0",
++				      "csiphy0_timer",
++				      "csiphy1",
++				      "csiphy1_timer",
++				      "csiphy2",
++				      "csiphy2_timer",
++				      "csiphy3",
++				      "csiphy3_timer",
++				      "csiphy4",
++				      "csiphy4_timer",
++				      "csiphy5",
++				      "csiphy5_timer",
++				      "slow_ahb_src",
++				      "vfe0_ahb",
++				      "vfe0_axi",
++				      "vfe0",
++				      "vfe0_cphy_rx",
++				      "vfe0_csid",
++				      "vfe0_areg",
++				      "vfe1_ahb",
++				      "vfe1_axi",
++				      "vfe1",
++				      "vfe1_cphy_rx",
++				      "vfe1_csid",
++				      "vfe1_areg",
++				      "vfe2_ahb",
++				      "vfe2_axi",
++				      "vfe2",
++				      "vfe2_cphy_rx",
++				      "vfe2_csid",
++				      "vfe2_areg",
++				      "vfe_lite_ahb",
++				      "vfe_lite_axi",
++				      "vfe_lite",
++				      "vfe_lite_cphy_rx",
++				      "vfe_lite_csid";
++
++			iommus = <&apps_smmu 0x800 0x440>,
++				 <&apps_smmu 0x840 0x440>,
++				 <&apps_smmu 0xc00 0x440>,
++				 <&apps_smmu 0xc40 0x440>;
++
++			interconnects = <&gem_noc MASTER_APPSS_PROC QCOM_ICC_TAG_ACTIVE_ONLY
++					 &config_noc SLAVE_CAMERA_CFG QCOM_ICC_TAG_ACTIVE_ONLY>,
++					<&mmss_noc MASTER_CAMNOC_HF QCOM_ICC_TAG_ALWAYS
++					 &mc_virt SLAVE_EBI1 QCOM_ICC_TAG_ALWAYS>,
++					<&mmss_noc MASTER_CAMNOC_SF QCOM_ICC_TAG_ALWAYS
++					 &mc_virt SLAVE_EBI1 QCOM_ICC_TAG_ALWAYS>,
++					<&mmss_noc MASTER_CAMNOC_ICP QCOM_ICC_TAG_ALWAYS
++					 &mc_virt SLAVE_EBI1 QCOM_ICC_TAG_ALWAYS>;
++			interconnect-names = "cam_ahb",
++					     "cam_hf_0_mnoc",
++					     "cam_sf_0_mnoc",
++					     "cam_sf_icp_mnoc";
++
++			ports {
++				#address-cells = <1>;
++				#size-cells = <0>;
++
++				port@0 {
++					reg = <0>;
++				};
++
++				port@1 {
++					reg = <1>;
++				};
++
++				port@2 {
++					reg = <2>;
++				};
++
++				port@3 {
++					reg = <3>;
++				};
++
++				port@4 {
++					reg = <4>;
++				};
++
++				port@5 {
++					reg = <5>;
++				};
++			};
++		};
++
+ 		camcc: clock-controller@ad00000 {
+ 			compatible = "qcom,sm8350-camcc";
+ 			reg = <0 0x0ad00000 0 0x10000>;
+@@ -3383,6 +3673,78 @@
+ 			gpio-ranges = <&tlmm 0 0 204>;
+ 			wakeup-parent = <&pdc>;
+ 
++			cci0_default: cci0-default-state {
++				cci0_i2c0_default: cci0-i2c0-default-pins {
++					/* SDA, SCL */
++					pins = "gpio107", "gpio108";
++					function = "cci_i2c";
++					drive-strength = <2>;
++					bias-pull-up;
++				};
++
++				cci0_i2c1_default: cci0-i2c1-default-pins {
++					/* SDA, SCL */
++					pins = "gpio109", "gpio110";
++					function = "cci_i2c";
++					drive-strength = <2>;
++					bias-pull-up;
++				};
++			};
++
++			cci0_sleep: cci0-sleep-state {
++				cci0_i2c0_sleep: cci0-i2c0-sleep-pins {
++					/* SDA, SCL */
++					pins = "gpio107", "gpio108";
++					function = "cci_i2c";
++					drive-strength = <2>;
++					bias-pull-down;
++				};
++
++				cci0_i2c1_sleep: cci0-i2c1-sleep-pins {
++					/* SDA, SCL */
++					pins = "gpio109", "gpio110";
++					function = "cci_i2c";
++					drive-strength = <2>;
++					bias-pull-down;
++				};
++			};
++
++			cci1_default: cci1-default-state {
++				cci1_i2c0_default: cci1-i2c0-default-pins {
++					/* SDA, SCL */
++					pins = "gpio111", "gpio112";
++					function = "cci_i2c";
++					drive-strength = <2>;
++					bias-pull-up;
++				};
++
++				cci1_i2c1_default: cci1-i2c1-default-pins {
++					/* SDA, SCL */
++					pins = "gpio113", "gpio114";
++					function = "cci_i2c";
++					drive-strength = <2>;
++					bias-pull-up;
++				};
++			};
++
++			cci1_sleep: cci1-sleep-state {
++				cci1_i2c0_sleep: cci1-i2c0-sleep-pins {
++					/* SDA, SCL */
++					pins = "gpio111", "gpio112";
++					function = "cci_i2c";
++					drive-strength = <2>;
++					bias-pull-down;
++				};
++
++				cci1_i2c1_sleep: cci1-i2c1-sleep-pins {
++					/* SDA, SCL */
++					pins = "gpio113", "gpio114";
++					function = "cci_i2c";
++					drive-strength = <2>;
++					bias-pull-down;
++				};
++			};
++
+ 			sdc2_default_state: sdc2-default-state {
+ 				clk-pins {
+ 					pins = "sdc2_clk";
