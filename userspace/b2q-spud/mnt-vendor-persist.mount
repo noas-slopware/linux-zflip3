@@ -1,0 +1,9 @@
+[Unit]
+Description=Samsung persist partition (secnvm, the SPSS's NVM copies)
+Documentation=file:///usr/share/doc/b2q-spud/README.md
+
+[Mount]
+What=/dev/disk/by-partlabel/persist
+Where=/mnt/vendor/persist
+Type=ext4
+Options=noatime,nosuid,nodev,noexec,noauto_da_alloc,data=ordered

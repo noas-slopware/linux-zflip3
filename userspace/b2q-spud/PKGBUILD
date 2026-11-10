@@ -1,0 +1,27 @@
+# Maintainer: Noa Himesaka <himesaka@noa.codes>
+# b2q: our own daemon (no Arch or AUR package exists); built from this directory.
+
+pkgname=b2q-spud
+pkgver=0.1.0
+pkgrel=6
+pkgdesc="Galaxy Z Flip3: secure-world services the fingerprint TA needs (sec_nvm, keymaster64 SPU init, hwvault)"
+arch=(aarch64)
+url="https://github.com/NoaHimesaka1873"
+license=(MIT)
+depends=(systemd-libs)
+makedepends=(gcc)
+_src=${B2Q_SPUD_SRC:-$PWD}
+
+build() {
+	cc ${CPPFLAGS} ${CFLAGS} -O2 -Wall -Wextra -o b2q-spud "$_src/src/spud.c" "$_src/src/nvm.c" ${LDFLAGS} -lsystemd -lpthread
+}
+
+package() {
+	install -Dm755 b2q-spud "$pkgdir/usr/lib/b2q-spud/b2q-spud"
+	install -Dm644 "$_src/b2q-spud.service" "$pkgdir/usr/lib/systemd/system/b2q-spud.service"
+	install -Dm644 "$_src/70-qsee-app.rules" "$pkgdir/usr/lib/udev/rules.d/70-qsee-app.rules"
+	install -Dm644 "$_src/mnt-vendor-persist.mount" "$pkgdir/usr/lib/systemd/system/mnt-vendor-persist.mount"
+	install -Dm644 "$_src/b2q-spud-modules.conf" "$pkgdir/usr/lib/modules-load.d/b2q-spud.conf"
+	install -Dm644 "$_src/fprintd-b2q-spud.conf" "$pkgdir/usr/lib/systemd/system/fprintd.service.d/b2q-spud.conf"
+	install -Dm644 "$_src/README.md" "$pkgdir/usr/share/doc/b2q-spud/README.md"
+}

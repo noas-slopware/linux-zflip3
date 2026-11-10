@@ -1,0 +1,20 @@
+[Unit]
+Description=Secure-world services for the fingerprint sensor (sec_nvm, keymaster64, hwvault)
+Documentation=file:///usr/share/doc/b2q-spud/README.md
+# /dev/qsee-app (qcom_qsee_app) and QSEE listener 0xb000 (qcom_spss_listener)
+Requires=dev-qsee\x2dapp.device
+After=dev-qsee\x2dapp.device systemd-modules-load.service
+# sec_nvm keeps the SPSS NVM copies there, as on stock
+RequiresMountsFor=/mnt/vendor/persist
+Before=fprintd.service
+
+[Service]
+Type=notify
+ExecStart=/usr/lib/b2q-spud/b2q-spud
+StateDirectory=b2q-spud
+StateDirectoryMode=0700
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
