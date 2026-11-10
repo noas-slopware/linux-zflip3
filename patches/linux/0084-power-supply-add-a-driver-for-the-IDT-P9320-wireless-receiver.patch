@@ -22,8 +22,8 @@ Assisted-by: Claude:claude-opus-5-5
  .../bindings/power/supply/idt,p9320.yaml           |   86 +++
  drivers/power/supply/Kconfig                       |   10 
  drivers/power/supply/Makefile                      |    1 
- drivers/power/supply/p9320_charger.c               |  507 ++++++++++++++++++++
- 4 files changed, 604 insertions(+)
+ drivers/power/supply/p9320_charger.c               |  517 ++++++++++++++++++++
+ 4 files changed, 614 insertions(+)
 
 
 diff --git a/Documentation/devicetree/bindings/power/supply/idt,p9320.yaml b/Documentation/devicetree/bindings/power/supply/idt,p9320.yaml
@@ -153,10 +153,10 @@ index 04ee35e..b56238e 100644
  obj-$(CONFIG_CHARGER_MAX8997)	+= max8997_charger.o
 diff --git a/drivers/power/supply/p9320_charger.c b/drivers/power/supply/p9320_charger.c
 new file mode 100644
-index 0000000..fecd47d
+index 0000000..2885b3c
 --- /dev/null
 +++ b/drivers/power/supply/p9320_charger.c
-@@ -0,0 +1,507 @@
+@@ -0,0 +1,517 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * IDT (Renesas) P9320 Qi wireless power receiver
@@ -370,6 +370,8 @@ index 0000000..fecd47d
 +	return regmap_write(chip->regmap, P9320_RPP_SCALE, chip->rpp_scale);
 +}
 +
++static void p9320_service_int(struct p9320 *chip);
++
 +static void p9320_update(struct p9320 *chip)
 +{
 +	bool present = gpiod_get_value_cansleep(chip->det_gpio) > 0;
@@ -405,6 +407,8 @@ index 0000000..fecd47d
 +	if (!ret) {
 +		chip->configured = true;
 +		changed = true;
++		/* an interrupt raised before this, while unserviced, holds INT low */
++		p9320_service_int(chip);
 +	} else if (ret != -ENODEV &&
 +		   ++chip->attach_tries < P9320_ATTACH_RETRIES) {
 +		/* VRECT may only just be up: the chip is not talking yet */
@@ -439,13 +443,12 @@ index 0000000..fecd47d
 + * CLEAR_INT (stock mfc_wpc_irq_thread()). Only a powered chip can assert it,
 + * so nothing is done without a pad.
 + */
-+static irqreturn_t p9320_int_irq(int irq, void *data)
++static void p9320_service_int(struct p9320 *chip)
 +{
-+	struct p9320 *chip = data;
 +	unsigned int src, status;
 +	int loops;
 +
-+	mutex_lock(&chip->lock);
++	lockdep_assert_held(&chip->lock);
 +
 +	for (loops = 0; loops < P9320_INT_LOOPS; loops++) {
 +		if (!chip->online || gpiod_get_value_cansleep(chip->int_gpio) <= 0)
@@ -468,7 +471,14 @@ index 0000000..fecd47d
 +				    P9320_CMD_CLEAR_INT))
 +			break;
 +	}
++}
 +
++static irqreturn_t p9320_int_irq(int irq, void *data)
++{
++	struct p9320 *chip = data;
++
++	mutex_lock(&chip->lock);
++	p9320_service_int(chip);
 +	mutex_unlock(&chip->lock);
 +
 +	return IRQ_HANDLED;
