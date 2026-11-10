@@ -1,0 +1,20 @@
+diff --git a/src/decoder.cpp b/src/decoder.cpp
+index 1b13105..5d39b29 100644
+--- a/src/decoder.cpp
++++ b/src/decoder.cpp
+@@ -128,11 +128,12 @@ Decoder::Decoder(const std::string &device, unsigned width, unsigned height, uns
+         v4l2_control delay{};
+         delay.id = V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY;
+         delay.value = 0;
+-        checked(fd_, VIDIOC_S_CTRL, &delay,
+-                "S_CTRL DISPLAY_DELAY (Iris decode-order patch required)");
++        if (ioctl(fd_, VIDIOC_S_CTRL, &delay) < 0)
++            trace("DISPLAY_DELAY unsupported; staying in decode order");
+         delay.id = V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY_ENABLE;
+         delay.value = 1;
+-        checked(fd_, VIDIOC_S_CTRL, &delay, "S_CTRL DISPLAY_DELAY_ENABLE");
++        if (ioctl(fd_, VIDIOC_S_CTRL, &delay) < 0)
++            trace("DISPLAY_DELAY_ENABLE unsupported");
+         allocate(OUTPUT, 4, output_);
+         unsigned type = OUTPUT;
+         checked(fd_, VIDIOC_STREAMON, &type, "STREAMON OUTPUT");
