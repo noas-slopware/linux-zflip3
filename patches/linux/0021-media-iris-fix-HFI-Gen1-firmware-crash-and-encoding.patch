@@ -1,0 +1,529 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] media: iris: fix HFI Gen1 firmware crash and skip the SM8350 encoder
+
+Fix several bugs in the Qualcomm Iris video driver for HFI Gen1
+(SM8250/SM8350):
+1. iris_hfi_gen1_queue_input_buffer() built the compressed and
+   uncompressed empty-buffer packets on the stack without zeroing them,
+   so the uncompressed packet sent uninitialized extradata_buffer and
+   data IOVAs to the firmware, which crashed it (0xdeadbead).
+2. Do not register the encoder video node on SM8350. The SM8350 VPU
+   firmware (vpu20_4v on the Galaxy Z Flip3) crashes when /dev/video1 is
+   opened, and the cause has not been found yet. SM8250 uses the same
+   HFI Gen1 encoder path upstream and keeps it; so do the other
+   platforms.
+3. iris_set_profile_level_gen1() sent V4L2 profile and level values
+   where the firmware expects HFI bitmasks, and passed sizeof(u32)
+   instead of sizeof(struct hfi_profile_level). Map them (the bit values
+   match the venus driver's hfi_helper.h), including H.264 Constrained
+   High.
+4. Send REQUEST_SYNC_FRAME only when the client asked for one, not
+   unconditionally during session init, and pass the requested sync
+   frame type to the firmware.
+5. iris_hfi_gen1_set_frame_rate() skipped the OUTPUT queue for the
+   encoder too; only the decoder should skip it.
+6. Add NULL checks in iris_get_int_buf_tbl() and iris_vidc to prevent
+   a kernel panic on close after a firmware failure.
+7. Log the SFR diagnostic message on an HFI system error.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../media/platform/qcom/iris/iris_buffer.c    |   6 +
+ drivers/media/platform/qcom/iris/iris_ctrls.c | 114 ++++++++++++++++--
+ .../media/platform/qcom/iris/iris_hfi_gen1.c  |  15 ++-
+ .../qcom/iris/iris_hfi_gen1_command.c         |  34 +++++-
+ .../qcom/iris/iris_hfi_gen1_defines.h         |  47 ++++++++
+ .../qcom/iris/iris_hfi_gen1_response.c        |  13 +-
+ drivers/media/platform/qcom/iris/iris_probe.c |  20 ++-
+ drivers/media/platform/qcom/iris/iris_vidc.c  |   3 +
+ 8 files changed, 231 insertions(+), 21 deletions(-)
+
+diff --git a/drivers/media/platform/qcom/iris/iris_buffer.c b/drivers/media/platform/qcom/iris/iris_buffer.c
+index eb8de60c1..96df6967d 100644
+--- a/drivers/media/platform/qcom/iris/iris_buffer.c
++++ b/drivers/media/platform/qcom/iris/iris_buffer.c
+@@ -497,6 +497,12 @@ static void iris_get_int_buf_tbl(struct iris_inst *inst, u32 plane,
+ {
+ 	const struct iris_firmware_data *firmware_data = inst->core->iris_firmware_data;
+ 
++	if (!firmware_data) {
++		*internal_buf_type = NULL;
++		*internal_buffer_count = 0;
++		return;
++	}
++
+ 	if (inst->domain == DECODER) {
+ 		if (V4L2_TYPE_IS_OUTPUT(plane)) {
+ 			*internal_buf_type = firmware_data->dec_ip_int_buf_tbl;
+diff --git a/drivers/media/platform/qcom/iris/iris_ctrls.c b/drivers/media/platform/qcom/iris/iris_ctrls.c
+index bf17d310e..753ffc1f4 100644
+--- a/drivers/media/platform/qcom/iris/iris_ctrls.c
++++ b/drivers/media/platform/qcom/iris/iris_ctrls.c
+@@ -457,13 +457,23 @@ void iris_session_init_caps(struct iris_core *core)
+ 			continue;
+ 
+ 		core->inst_fw_caps_enc[cap_id].cap_id = caps[i].cap_id;
+-		core->inst_fw_caps_enc[cap_id].min = caps[i].min;
+-		core->inst_fw_caps_enc[cap_id].max = caps[i].max;
+ 		core->inst_fw_caps_enc[cap_id].step_or_mask = caps[i].step_or_mask;
+-		core->inst_fw_caps_enc[cap_id].value = caps[i].value;
+ 		core->inst_fw_caps_enc[cap_id].flags = caps[i].flags;
+ 		core->inst_fw_caps_enc[cap_id].hfi_id = caps[i].hfi_id;
+ 		core->inst_fw_caps_enc[cap_id].set = caps[i].set;
++
++		if (cap_id == PIPE) {
++			core->inst_fw_caps_enc[cap_id].value =
++				core->iris_platform_data->num_vpp_pipe;
++			core->inst_fw_caps_enc[cap_id].min =
++				core->iris_platform_data->num_vpp_pipe;
++			core->inst_fw_caps_enc[cap_id].max =
++				core->iris_platform_data->num_vpp_pipe;
++		} else {
++			core->inst_fw_caps_enc[cap_id].min = caps[i].min;
++			core->inst_fw_caps_enc[cap_id].max = caps[i].max;
++			core->inst_fw_caps_enc[cap_id].value = caps[i].value;
++		}
+ 	}
+ }
+ 
+@@ -585,6 +595,89 @@ int iris_set_level(struct iris_inst *inst, enum platform_inst_fw_cap_type cap_id
+ 					     &hfi_value, sizeof(u32));
+ }
+ 
++static u32 iris_h264_profile_to_gen1(u32 v4l2_prof)
++{
++	switch (v4l2_prof) {
++	case V4L2_MPEG_VIDEO_H264_PROFILE_BASELINE:
++		return HFI_H264_PROFILE_BASELINE;
++	case V4L2_MPEG_VIDEO_H264_PROFILE_CONSTRAINED_BASELINE:
++		return HFI_H264_PROFILE_CONSTRAINED_BASE;
++	case V4L2_MPEG_VIDEO_H264_PROFILE_MAIN:
++		return HFI_H264_PROFILE_MAIN;
++	case V4L2_MPEG_VIDEO_H264_PROFILE_HIGH:
++		return HFI_H264_PROFILE_HIGH;
++	case V4L2_MPEG_VIDEO_H264_PROFILE_CONSTRAINED_HIGH:
++		return HFI_H264_PROFILE_CONSTRAINED_HIGH;
++	case V4L2_MPEG_VIDEO_H264_PROFILE_STEREO_HIGH:
++		return HFI_H264_PROFILE_STEREO_HIGH;
++	case V4L2_MPEG_VIDEO_H264_PROFILE_MULTIVIEW_HIGH:
++		return HFI_H264_PROFILE_MULTIVIEW_HIGH;
++	default:
++		return HFI_H264_PROFILE_HIGH;
++	}
++}
++
++static u32 iris_h264_level_to_gen1(u32 v4l2_lvl)
++{
++	switch (v4l2_lvl) {
++	case V4L2_MPEG_VIDEO_H264_LEVEL_1_0: return HFI_H264_LEVEL_1;
++	case V4L2_MPEG_VIDEO_H264_LEVEL_1B: return HFI_H264_LEVEL_1b;
++	case V4L2_MPEG_VIDEO_H264_LEVEL_1_1: return HFI_H264_LEVEL_11;
++	case V4L2_MPEG_VIDEO_H264_LEVEL_1_2: return HFI_H264_LEVEL_12;
++	case V4L2_MPEG_VIDEO_H264_LEVEL_1_3: return HFI_H264_LEVEL_13;
++	case V4L2_MPEG_VIDEO_H264_LEVEL_2_0: return HFI_H264_LEVEL_2;
++	case V4L2_MPEG_VIDEO_H264_LEVEL_2_1: return HFI_H264_LEVEL_21;
++	case V4L2_MPEG_VIDEO_H264_LEVEL_2_2: return HFI_H264_LEVEL_22;
++	case V4L2_MPEG_VIDEO_H264_LEVEL_3_0: return HFI_H264_LEVEL_3;
++	case V4L2_MPEG_VIDEO_H264_LEVEL_3_1: return HFI_H264_LEVEL_31;
++	case V4L2_MPEG_VIDEO_H264_LEVEL_3_2: return HFI_H264_LEVEL_32;
++	case V4L2_MPEG_VIDEO_H264_LEVEL_4_0: return HFI_H264_LEVEL_4;
++	case V4L2_MPEG_VIDEO_H264_LEVEL_4_1: return HFI_H264_LEVEL_41;
++	case V4L2_MPEG_VIDEO_H264_LEVEL_4_2: return HFI_H264_LEVEL_42;
++	case V4L2_MPEG_VIDEO_H264_LEVEL_5_0: return HFI_H264_LEVEL_5;
++	case V4L2_MPEG_VIDEO_H264_LEVEL_5_1: return HFI_H264_LEVEL_51;
++	case V4L2_MPEG_VIDEO_H264_LEVEL_5_2: return HFI_H264_LEVEL_52;
++	case V4L2_MPEG_VIDEO_H264_LEVEL_6_0: return HFI_H264_LEVEL_6;
++	case V4L2_MPEG_VIDEO_H264_LEVEL_6_1: return HFI_H264_LEVEL_61;
++	case V4L2_MPEG_VIDEO_H264_LEVEL_6_2: return HFI_H264_LEVEL_62;
++	default: return HFI_H264_LEVEL_4;
++	}
++}
++
++static u32 iris_hevc_profile_to_gen1(u32 v4l2_prof)
++{
++	switch (v4l2_prof) {
++	case V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN:
++		return HFI_HEVC_PROFILE_MAIN;
++	case V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_10:
++		return HFI_HEVC_PROFILE_MAIN10;
++	case V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_STILL_PICTURE:
++		return HFI_HEVC_PROFILE_MAIN_STILL_PIC;
++	default:
++		return HFI_HEVC_PROFILE_MAIN;
++	}
++}
++
++static u32 iris_hevc_level_to_gen1(u32 v4l2_lvl)
++{
++	switch (v4l2_lvl) {
++	case V4L2_MPEG_VIDEO_HEVC_LEVEL_1: return HFI_HEVC_LEVEL_1;
++	case V4L2_MPEG_VIDEO_HEVC_LEVEL_2: return HFI_HEVC_LEVEL_2;
++	case V4L2_MPEG_VIDEO_HEVC_LEVEL_2_1: return HFI_HEVC_LEVEL_21;
++	case V4L2_MPEG_VIDEO_HEVC_LEVEL_3: return HFI_HEVC_LEVEL_3;
++	case V4L2_MPEG_VIDEO_HEVC_LEVEL_3_1: return HFI_HEVC_LEVEL_31;
++	case V4L2_MPEG_VIDEO_HEVC_LEVEL_4: return HFI_HEVC_LEVEL_4;
++	case V4L2_MPEG_VIDEO_HEVC_LEVEL_4_1: return HFI_HEVC_LEVEL_41;
++	case V4L2_MPEG_VIDEO_HEVC_LEVEL_5: return HFI_HEVC_LEVEL_5;
++	case V4L2_MPEG_VIDEO_HEVC_LEVEL_5_1: return HFI_HEVC_LEVEL_51;
++	case V4L2_MPEG_VIDEO_HEVC_LEVEL_5_2: return HFI_HEVC_LEVEL_52;
++	case V4L2_MPEG_VIDEO_HEVC_LEVEL_6: return HFI_HEVC_LEVEL_6;
++	case V4L2_MPEG_VIDEO_HEVC_LEVEL_6_1: return HFI_HEVC_LEVEL_61;
++	case V4L2_MPEG_VIDEO_HEVC_LEVEL_6_2: return HFI_HEVC_LEVEL_62;
++	default: return HFI_HEVC_LEVEL_4;
++	}
++}
++
+ int iris_set_profile_level_gen1(struct iris_inst *inst, enum platform_inst_fw_cap_type cap_id)
+ {
+ 	const struct iris_hfi_session_ops *hfi_ops = inst->hfi_session_ops;
+@@ -592,18 +685,18 @@ int iris_set_profile_level_gen1(struct iris_inst *inst, enum platform_inst_fw_ca
+ 	struct hfi_profile_level pl;
+ 
+ 	if (inst->codec == V4L2_PIX_FMT_H264) {
+-		pl.profile = inst->fw_caps[PROFILE_H264].value;
+-		pl.level = inst->fw_caps[LEVEL_H264].value;
++		pl.profile = iris_h264_profile_to_gen1(inst->fw_caps[PROFILE_H264].value);
++		pl.level = iris_h264_level_to_gen1(inst->fw_caps[LEVEL_H264].value);
+ 	} else {
+-		pl.profile = inst->fw_caps[PROFILE_HEVC].value;
+-		pl.level = inst->fw_caps[LEVEL_HEVC].value;
++		pl.profile = iris_hevc_profile_to_gen1(inst->fw_caps[PROFILE_HEVC].value);
++		pl.level = iris_hevc_level_to_gen1(inst->fw_caps[LEVEL_HEVC].value);
+ 	}
+ 
+ 	return hfi_ops->session_set_property(inst, hfi_id,
+ 					     HFI_HOST_FLAGS_NONE,
+ 					     iris_get_port_info(inst, cap_id),
+ 					     HFI_PAYLOAD_U32_ENUM,
+-					     &pl, sizeof(u32));
++					     &pl, sizeof(pl));
+ }
+ 
+ int iris_set_header_mode_gen1(struct iris_inst *inst, enum platform_inst_fw_cap_type cap_id)
+@@ -1487,6 +1580,11 @@ int iris_set_req_sync_frame(struct iris_inst *inst, enum platform_inst_fw_cap_ty
+ 	u32 hfi_id = inst->fw_caps[cap_id].hfi_id;
+ 	u32 hfi_val = 0;
+ 
++	if (!(inst->fw_caps[cap_id].flags & CAP_FLAG_CLIENT_SET))
++		return 0;
++
++	inst->fw_caps[cap_id].flags &= ~CAP_FLAG_CLIENT_SET;
++
+ 	if (inst->fw_caps[PREPEND_SPSPPS_TO_IDR].value)
+ 		hfi_val = HFI_SYNC_FRAME_REQUEST_WITH_PREFIX_SEQ_HDR;
+ 	else
+diff --git a/drivers/media/platform/qcom/iris/iris_hfi_gen1.c b/drivers/media/platform/qcom/iris/iris_hfi_gen1.c
+index 0f7e7d6b2..0712a39cb 100644
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen1.c
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen1.c
+@@ -32,7 +32,14 @@ static struct platform_inst_fw_cap inst_fw_cap_sm8250_dec[] = {
+ 	},
+ };
+ 
+-static const struct platform_inst_fw_cap inst_fw_cap_sm8250_enc[] = {
++static struct platform_inst_fw_cap inst_fw_cap_sm8250_enc[] = {
++	{
++		.cap_id = PIPE,
++		/* .max, .min and .value are set via platform data */
++		.step_or_mask = 1,
++		.hfi_id = HFI_PROPERTY_PARAM_WORK_ROUTE,
++		.set = iris_set_pipe,
++	},
+ 	{
+ 		.cap_id = STAGE,
+ 		.min = STAGE_1,
+@@ -89,7 +96,7 @@ static const struct platform_inst_fw_cap inst_fw_cap_sm8250_enc[] = {
+ 				BIT(V4L2_MPEG_VIDEO_H264_LEVEL_4_2) |
+ 				BIT(V4L2_MPEG_VIDEO_H264_LEVEL_5_0) |
+ 				BIT(V4L2_MPEG_VIDEO_H264_LEVEL_5_1),
+-		.value = V4L2_MPEG_VIDEO_H264_LEVEL_1_0,
++		.value = V4L2_MPEG_VIDEO_H264_LEVEL_4_0,
+ 		.hfi_id = HFI_PROPERTY_PARAM_PROFILE_LEVEL_CURRENT,
+ 		.flags = CAP_FLAG_OUTPUT_PORT | CAP_FLAG_MENU,
+ 		.set = iris_set_profile_level_gen1,
+@@ -111,7 +118,7 @@ static const struct platform_inst_fw_cap inst_fw_cap_sm8250_enc[] = {
+ 				BIT(V4L2_MPEG_VIDEO_HEVC_LEVEL_6) |
+ 				BIT(V4L2_MPEG_VIDEO_HEVC_LEVEL_6_1) |
+ 				BIT(V4L2_MPEG_VIDEO_HEVC_LEVEL_6_2),
+-		.value = V4L2_MPEG_VIDEO_HEVC_LEVEL_1,
++		.value = V4L2_MPEG_VIDEO_HEVC_LEVEL_4,
+ 		.hfi_id = HFI_PROPERTY_PARAM_PROFILE_LEVEL_CURRENT,
+ 		.flags = CAP_FLAG_OUTPUT_PORT | CAP_FLAG_MENU,
+ 		.set = iris_set_profile_level_gen1,
+@@ -399,11 +406,13 @@ static const u32 sm8250_vdec_input_config_param_default[] = {
+ };
+ 
+ static const u32 sm8250_venc_input_config_param[] = {
++	HFI_PROPERTY_CONFIG_VIDEOCORES_USAGE,
+ 	HFI_PROPERTY_CONFIG_FRAME_RATE,
+ 	HFI_PROPERTY_PARAM_UNCOMPRESSED_PLANE_ACTUAL_INFO,
+ 	HFI_PROPERTY_PARAM_FRAME_SIZE,
+ 	HFI_PROPERTY_PARAM_UNCOMPRESSED_FORMAT_SELECT,
+ 	HFI_PROPERTY_PARAM_BUFFER_COUNT_ACTUAL,
++	HFI_PROPERTY_PARAM_BUFFER_SIZE_ACTUAL,
+ };
+ 
+ static const u32 sm8250_dec_ip_int_buf_tbl[] = {
+diff --git a/drivers/media/platform/qcom/iris/iris_hfi_gen1_command.c b/drivers/media/platform/qcom/iris/iris_hfi_gen1_command.c
+index f6e9cbfcc..aef05431a 100644
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen1_command.c
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen1_command.c
+@@ -277,6 +277,7 @@ static int iris_hfi_gen1_queue_input_buffer(struct iris_inst *inst, struct iris_
+ 	struct hfi_session_empty_buffer_uncompressed_pkt uncom_ip_pkt;
+ 
+ 	if (inst->domain == DECODER) {
++		memset(&com_ip_pkt, 0, sizeof(com_ip_pkt));
+ 		com_ip_pkt.shdr.hdr.size = sizeof(struct hfi_session_empty_buffer_compressed_pkt);
+ 		com_ip_pkt.shdr.hdr.pkt_type = HFI_CMD_SESSION_EMPTY_BUFFER;
+ 		com_ip_pkt.shdr.session_id = inst->session_id;
+@@ -293,6 +294,7 @@ static int iris_hfi_gen1_queue_input_buffer(struct iris_inst *inst, struct iris_
+ 		return iris_hfi_queue_cmd_write(inst->core, &com_ip_pkt,
+ 						com_ip_pkt.shdr.hdr.size);
+ 	} else {
++		memset(&uncom_ip_pkt, 0, sizeof(uncom_ip_pkt));
+ 		uncom_ip_pkt.shdr.hdr.size =
+ 			sizeof(struct hfi_session_empty_buffer_uncompressed_pkt);
+ 		uncom_ip_pkt.shdr.hdr.pkt_type = HFI_CMD_SESSION_EMPTY_BUFFER;
+@@ -308,6 +310,8 @@ static int iris_hfi_gen1_queue_input_buffer(struct iris_inst *inst, struct iris_
+ 		uncom_ip_pkt.filled_len = buf->data_size;
+ 		uncom_ip_pkt.input_tag = buf->index;
+ 		uncom_ip_pkt.packet_buffer = buf->device_addr;
++		uncom_ip_pkt.extradata_buffer = 0;
++		uncom_ip_pkt.data = 0;
+ 		return iris_hfi_queue_cmd_write(inst->core, &uncom_ip_pkt,
+ 						uncom_ip_pkt.shdr.hdr.size);
+ 	}
+@@ -654,8 +658,8 @@ iris_hfi_gen1_packet_session_set_property(struct hfi_session_set_property_pkt *p
+ 		if (min_qp > 0xff || max_qp > 0xff)
+ 			return -ERANGE;
+ 
+-		range->min_qp.layer_id = 0xFF;
+-		range->max_qp.layer_id = 0xFF;
++		range->min_qp.layer_id = 0xFFFFFFFF;
++		range->max_qp.layer_id = 0xFFFFFFFF;
+ 		range->min_qp.qp_packed = (min_qp & 0xFF) | ((min_qp & 0xFF) << 8) |
+ 			((min_qp & 0xFF) << 16);
+ 		range->max_qp.qp_packed = (max_qp & 0xFF) | ((max_qp & 0xFF) << 8) |
+@@ -742,6 +746,10 @@ iris_hfi_gen1_packet_session_set_property(struct hfi_session_set_property_pkt *p
+ 		break;
+ 	}
+ 	case HFI_PROPERTY_CONFIG_VENC_REQUEST_SYNC_FRAME: {
++		u32 *in = pdata;
++
++		packet->data[1] = *in;
++		packet->shdr.hdr.size += sizeof(u32);
+ 		break;
+ 	}
+ 	default:
+@@ -973,6 +981,18 @@ static int iris_hfi_gen1_set_bufsize(struct iris_inst *inst, u32 plane)
+ 	struct hfi_buffer_size_actual bufsz;
+ 	int ret;
+ 
++	if (inst->domain == ENCODER) {
++		bufsz.type = HFI_BUFFER_INPUT;
++		bufsz.size = inst->buffers[BUF_INPUT].size;
++		ret = hfi_gen1_set_property(inst, ptype, &bufsz, sizeof(bufsz));
++		if (ret)
++			return ret;
++
++		bufsz.type = HFI_BUFFER_OUTPUT;
++		bufsz.size = inst->buffers[BUF_OUTPUT].size;
++		return hfi_gen1_set_property(inst, ptype, &bufsz, sizeof(bufsz));
++	}
++
+ 	if (iris_split_mode_enabled(inst)) {
+ 		bufsz.type = HFI_BUFFER_OUTPUT;
+ 		bufsz.size = inst->core->iris_firmware_desc->get_vpu_buffer_size(inst, BUF_DPB);
+@@ -1007,11 +1027,11 @@ static int iris_hfi_gen1_set_frame_rate(struct iris_inst *inst, u32 plane)
+ 	const u32 ptype = HFI_PROPERTY_CONFIG_FRAME_RATE;
+ 	struct hfi_framerate frate;
+ 
+-	if (V4L2_TYPE_IS_OUTPUT(plane))
++	if (inst->domain == DECODER && V4L2_TYPE_IS_OUTPUT(plane))
+ 		return 0;
+ 
+ 	frate.buffer_type = HFI_BUFFER_OUTPUT;
+-	frate.framerate = inst->frame_rate << 16;
++	frate.framerate = (inst->frame_rate ? inst->frame_rate : 30) << 16;
+ 
+ 	return hfi_gen1_set_property(inst, ptype, &frate, sizeof(frate));
+ }
+@@ -1077,6 +1097,8 @@ static int iris_hfi_gen1_session_set_config_params(struct iris_inst *inst, u32 p
+ 	};
+ 
+ 	static const struct iris_hfi_prop_type_handle venc_prop_type_handle_inp_arr[] = {
++		{HFI_PROPERTY_CONFIG_VIDEOCORES_USAGE,
++			iris_hfi_gen1_decide_core},
+ 		{HFI_PROPERTY_CONFIG_FRAME_RATE,
+ 			iris_hfi_gen1_set_frame_rate},
+ 		{HFI_PROPERTY_PARAM_UNCOMPRESSED_PLANE_ACTUAL_INFO,
+@@ -1087,6 +1109,8 @@ static int iris_hfi_gen1_session_set_config_params(struct iris_inst *inst, u32 p
+ 			iris_hfi_gen1_set_raw_format},
+ 		{HFI_PROPERTY_PARAM_BUFFER_COUNT_ACTUAL,
+ 			iris_hfi_gen1_set_num_bufs},
++		{HFI_PROPERTY_PARAM_BUFFER_SIZE_ACTUAL,
++			iris_hfi_gen1_set_bufsize},
+ 	};
+ 
+ 	if (inst->domain == DECODER) {
+@@ -1100,6 +1124,8 @@ static int iris_hfi_gen1_session_set_config_params(struct iris_inst *inst, u32 p
+ 			handler_size = ARRAY_SIZE(vdec_prop_type_handle_out_arr);
+ 		}
+ 	} else {
++		if (V4L2_TYPE_IS_CAPTURE(plane))
++			return 0;
+ 		config_params = core->iris_firmware_data->enc_input_config_params;
+ 		config_params_size = core->iris_firmware_data->enc_input_config_params_size;
+ 		handler = venc_prop_type_handle_inp_arr;
+diff --git a/drivers/media/platform/qcom/iris/iris_hfi_gen1_defines.h b/drivers/media/platform/qcom/iris/iris_hfi_gen1_defines.h
+index 275f3fea3..db457549b 100644
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen1_defines.h
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen1_defines.h
+@@ -87,6 +87,53 @@
+ #define HFI_PROPERTY_PARAM_UNCOMPRESSED_PLANE_ACTUAL_INFO	0x1002
+ #define HFI_PROPERTY_PARAM_UNCOMPRESSED_FORMAT_SELECT	0x1003
+ #define HFI_PROPERTY_PARAM_PROFILE_LEVEL_CURRENT	0x1005
++
++#define HFI_H264_PROFILE_BASELINE			0x00000001
++#define HFI_H264_PROFILE_MAIN				0x00000002
++#define HFI_H264_PROFILE_HIGH				0x00000004
++#define HFI_H264_PROFILE_STEREO_HIGH			0x00000008
++#define HFI_H264_PROFILE_MULTIVIEW_HIGH			0x00000010
++#define HFI_H264_PROFILE_CONSTRAINED_BASE		0x00000020
++#define HFI_H264_PROFILE_CONSTRAINED_HIGH		0x00000040
++
++#define HFI_H264_LEVEL_1				0x00000001
++#define HFI_H264_LEVEL_1b				0x00000002
++#define HFI_H264_LEVEL_11				0x00000004
++#define HFI_H264_LEVEL_12				0x00000008
++#define HFI_H264_LEVEL_13				0x00000010
++#define HFI_H264_LEVEL_2				0x00000020
++#define HFI_H264_LEVEL_21				0x00000040
++#define HFI_H264_LEVEL_22				0x00000080
++#define HFI_H264_LEVEL_3				0x00000100
++#define HFI_H264_LEVEL_31				0x00000200
++#define HFI_H264_LEVEL_32				0x00000400
++#define HFI_H264_LEVEL_4				0x00000800
++#define HFI_H264_LEVEL_41				0x00001000
++#define HFI_H264_LEVEL_42				0x00002000
++#define HFI_H264_LEVEL_5				0x00004000
++#define HFI_H264_LEVEL_51				0x00008000
++#define HFI_H264_LEVEL_52				0x00010000
++#define HFI_H264_LEVEL_6				0x00020000
++#define HFI_H264_LEVEL_61				0x00040000
++#define HFI_H264_LEVEL_62				0x00080000
++
++#define HFI_HEVC_PROFILE_MAIN				0x00000001
++#define HFI_HEVC_PROFILE_MAIN10				0x00000002
++#define HFI_HEVC_PROFILE_MAIN_STILL_PIC			0x00000004
++
++#define HFI_HEVC_LEVEL_1				0x00000001
++#define HFI_HEVC_LEVEL_2				0x00000002
++#define HFI_HEVC_LEVEL_21				0x00000004
++#define HFI_HEVC_LEVEL_3				0x00000008
++#define HFI_HEVC_LEVEL_31				0x00000010
++#define HFI_HEVC_LEVEL_4				0x00000020
++#define HFI_HEVC_LEVEL_41				0x00000040
++#define HFI_HEVC_LEVEL_5				0x00000080
++#define HFI_HEVC_LEVEL_51				0x00000100
++#define HFI_HEVC_LEVEL_52				0x00000200
++#define HFI_HEVC_LEVEL_6				0x00000400
++#define HFI_HEVC_LEVEL_61				0x00000800
++#define HFI_HEVC_LEVEL_62				0x00001000
+ #define HFI_PROPERTY_PARAM_WORK_MODE			0x1015
+ #define HFI_PROPERTY_PARAM_WORK_ROUTE			0x1017
+ #define HFI_PROPERTY_CONFIG_FRAME_RATE			0x2001
+diff --git a/drivers/media/platform/qcom/iris/iris_hfi_gen1_response.c b/drivers/media/platform/qcom/iris/iris_hfi_gen1_response.c
+index bfd7495bf..f7909f447 100644
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen1_response.c
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen1_response.c
+@@ -8,6 +8,7 @@
+ 
+ #include "iris_hfi_gen1.h"
+ #include "iris_hfi_gen1_defines.h"
++#include "iris_hfi_queue.h"
+ #include "iris_instance.h"
+ #include "iris_vdec.h"
+ #include "iris_vpu_buffer.h"
+@@ -220,10 +221,20 @@ iris_hfi_gen1_sys_event_notify(struct iris_core *core, void *packet)
+ 	struct hfi_msg_event_notify_pkt *pkt = packet;
+ 	struct iris_inst *instance;
+ 
+-	if (pkt->event_id == HFI_EVENT_SYS_ERROR)
++	if (pkt->event_id == HFI_EVENT_SYS_ERROR) {
++		struct hfi_sfr_struct {
++			u32 buf_size;
++			u8 rg_data[1];
++		} *sfr = core->sfr_vaddr;
++
+ 		dev_err(core->dev, "sys error (type: %x, session id:%x, data1:%x, data2:%x)\n",
+ 			pkt->event_id, pkt->shdr.session_id, pkt->event_data1,
+ 			pkt->event_data2);
++		if (sfr && sfr->rg_data[0]) {
++			((char *)sfr)[SFR_SIZE - 1] = '\0';
++			dev_err(core->dev, "firmware sfr: %s\n", sfr->rg_data);
++		}
++	}
+ 
+ 	core->state = IRIS_CORE_ERROR;
+ 
+diff --git a/drivers/media/platform/qcom/iris/iris_probe.c b/drivers/media/platform/qcom/iris/iris_probe.c
+index e4acf4a74..b417a5fe8 100644
+--- a/drivers/media/platform/qcom/iris/iris_probe.c
++++ b/drivers/media/platform/qcom/iris/iris_probe.c
+@@ -203,7 +203,8 @@ static void iris_remove(struct platform_device *pdev)
+ 	iris_core_deinit(core);
+ 
+ 	video_unregister_device(core->vdev_dec);
+-	video_unregister_device(core->vdev_enc);
++	if (core->vdev_enc)
++		video_unregister_device(core->vdev_enc);
+ 
+ 	v4l2_device_unregister(&core->v4l2_dev);
+ 
+@@ -277,9 +278,17 @@ static int iris_probe(struct platform_device *pdev)
+ 	if (ret)
+ 		goto err_v4l2_unreg;
+ 
+-	ret = iris_register_video_device(core, ENCODER);
+-	if (ret)
+-		goto err_vdev_unreg_dec;
++	/*
++	 * The SM8350 VPU firmware (vpu20_4v on the Galaxy Z Flip3) crashes
++	 * when the encoder node is opened, and the cause is not known yet.
++	 * Keep the encoder off there only: SM8250 runs the same HFI Gen1
++	 * encoder path upstream, and the other platforms are unaffected.
++	 */
++	if (!of_device_is_compatible(dev->of_node, "qcom,sm8350-iris")) {
++		ret = iris_register_video_device(core, ENCODER);
++		if (ret)
++			goto err_vdev_unreg_dec;
++	}
+ 
+ 	platform_set_drvdata(pdev, core);
+ 
+@@ -301,7 +310,8 @@ static int iris_probe(struct platform_device *pdev)
+ 	return 0;
+ 
+ err_vdev_unreg_enc:
+-	video_unregister_device(core->vdev_enc);
++	if (core->vdev_enc)
++		video_unregister_device(core->vdev_enc);
+ err_vdev_unreg_dec:
+ 	video_unregister_device(core->vdev_dec);
+ err_v4l2_unreg:
+diff --git a/drivers/media/platform/qcom/iris/iris_vidc.c b/drivers/media/platform/qcom/iris/iris_vidc.c
+index fcbc60016..bc95f75d8 100644
+--- a/drivers/media/platform/qcom/iris/iris_vidc.c
++++ b/drivers/media/platform/qcom/iris/iris_vidc.c
+@@ -253,6 +253,9 @@ static void iris_check_num_queued_internal_buffers(struct iris_inst *inst, u32 p
+ 	u32 internal_buffer_count, i;
+ 	u32 count = 0;
+ 
++	if (!firmware_data)
++		return;
++
+ 	if (V4L2_TYPE_IS_OUTPUT(plane)) {
+ 		internal_buf_type = firmware_data->dec_ip_int_buf_tbl;
+ 		internal_buffer_count = firmware_data->dec_ip_int_buf_tbl_size;
