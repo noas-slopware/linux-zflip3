@@ -1,0 +1,95 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] media: qcom: camss: vfe: size the CAMNOC AXI clock from bandwidth
+
+The VFE resources list camnoc_axi_src with a rate table, but
+vfe_set_clock_rates() only sizes the VFE core clock, so CAMNOC stays at
+its XO rate. Every IFE write to memory goes through it: at 19.2 MHz on a
+32-byte bus it carries about 600 MB/s, and any line arriving faster than
+that is lost. On SM8350 an IMX374 at 1.8 Gbps per lane (3648x2736 and
+1824x1368 at 30 fps) delivered no frames at all, while its 798 Mbps
+mode worked.
+
+Size the clock the way the Qualcomm CPAS driver does: the RDI bandwidth
+plus a 20% margin, never below 3 GB/s while streaming, over a 32-byte
+bus (camnoc-axi-min-ib-bw, camnoc-axi-clk-bw-margin-perc and
+camnoc-bus-width in the stock SM8350 devicetree). With that, CAMNOC runs
+at 300 MHz while streaming and both modes deliver every frame; the
+sensor's colour bars arrive exact in 60 of 60 frames.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/media/platform/qcom/camss/camss-vfe.c |   53 +++++++++++++++++++++++++
+ 1 file changed, 53 insertions(+)
+
+diff --git a/drivers/media/platform/qcom/camss/camss-vfe.c b/drivers/media/platform/qcom/camss/camss-vfe.c
+index 499102e..e76724b 100644
+--- a/drivers/media/platform/qcom/camss/camss-vfe.c
++++ b/drivers/media/platform/qcom/camss/camss-vfe.c
+@@ -945,6 +945,41 @@ static bool vfe_check_clock_levels(struct camss_clock *clock)
+  *
+  * Return 0 on success or a negative error code otherwise
+  */
++/*
++ * CAMNOC carries every IFE write to memory. Size its clock the way the
++ * Qualcomm CPAS does: the bandwidth plus a 20% margin, never less than
++ * 3 GB/s while streaming, over a 32-byte bus. Left at its XO rate it starves
++ * the IFE as soon as a line arrives faster than about 600 MB/s.
++ */
++#define VFE_CAMNOC_BUS_WIDTH		32
++#define VFE_CAMNOC_BW_MARGIN_PCT	20
++#define VFE_CAMNOC_MIN_BW		3000000000ULL
++
++static bool vfe_is_camnoc_clock(const struct camss_clock *clock)
++{
++	return !strcmp(clock->name, "camnoc_axi_src");
++}
++
++static u64 vfe_camnoc_rate(struct vfe_device *vfe, const u64 *pixel_clock)
++{
++	u64 bw = 0;
++	int j;
++
++	for (j = VFE_LINE_RDI0; j < vfe->res->line_num; j++) {
++		struct vfe_line *l = &vfe->line[j];
++		u8 bpp = camss_format_get_bpp(l->formats, l->nformats,
++					      l->fmt[MSM_VFE_PAD_SINK].code);
++
++		bw += div_u64(pixel_clock[j] * bpp, 8);
++	}
++
++	bw += div_u64(bw * VFE_CAMNOC_BW_MARGIN_PCT, 100);
++	if (bw < VFE_CAMNOC_MIN_BW)
++		bw = VFE_CAMNOC_MIN_BW;
++
++	return div_u64(bw, VFE_CAMNOC_BUS_WIDTH);
++}
++
+ static int vfe_set_clock_rates(struct vfe_device *vfe)
+ {
+ 	struct device *dev = vfe->camss->dev;
+@@ -962,6 +997,24 @@ static int vfe_set_clock_rates(struct vfe_device *vfe)
+ 	for (i = 0; i < vfe->nclocks; i++) {
+ 		struct camss_clock *clock = &vfe->clock[i];
+ 
++		if (vfe_is_camnoc_clock(clock) && vfe_check_clock_levels(clock)) {
++			u64 min_rate = vfe_camnoc_rate(vfe, pixel_clock);
++
++			for (j = 0; j < clock->nfreqs; j++)
++				if (min_rate <= clock->freq[j])
++					break;
++			if (j == clock->nfreqs)
++				j = clock->nfreqs - 1;
++
++			ret = clk_set_rate(clock->clk,
++					   clk_round_rate(clock->clk, clock->freq[j]));
++			if (ret < 0) {
++				dev_err(dev, "camnoc clk set rate failed: %d\n", ret);
++				return ret;
++			}
++			continue;
++		}
++
+ 		if (vfe_match_clock_names(vfe, clock) && vfe_check_clock_levels(clock)) {
+ 			u64 min_rate = 0;
+ 			long rate;

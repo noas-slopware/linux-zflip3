@@ -1,0 +1,38 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] media: qcom: camss: csid-gen2: report CSI2 RX and RDI interrupt status
+
+The gen2 CSID interrupt handler reads and clears the CSI2 RX and RDI
+interrupt status but never says what it saw, so a receiver that gets no
+frames looks the same as one that gets nothing at all. Print both with
+dev_dbg_ratelimited() when they are non-zero.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../media/platform/qcom/camss/camss-csid-gen2.c    |    7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/drivers/media/platform/qcom/camss/camss-csid-gen2.c b/drivers/media/platform/qcom/camss/camss-csid-gen2.c
+index a5b406c..e04811c 100644
+--- a/drivers/media/platform/qcom/camss/camss-csid-gen2.c
++++ b/drivers/media/platform/qcom/camss/camss-csid-gen2.c
+@@ -368,12 +368,19 @@ static irqreturn_t csid_isr(int irq, void *dev)
+ 
+ 	val = readl_relaxed(csid->base + CSID_CSI2_RX_IRQ_STATUS);
+ 	writel_relaxed(val, csid->base + CSID_CSI2_RX_IRQ_CLEAR);
++	if (val)
++		dev_dbg_ratelimited(csid->camss->dev, "CSID%u: CSI2 RX IRQ %#010x\n",
++				    csid->id, val);
+ 
+ 	/* Read and clear IRQ status for each enabled RDI channel */
+ 	for (i = 0; i < MSM_CSID_MAX_SRC_STREAMS; i++)
+ 		if (csid->phy.en_vc & BIT(i)) {
+ 			val = readl_relaxed(csid->base + CSID_CSI2_RDIN_IRQ_STATUS(i));
+ 			writel_relaxed(val, csid->base + CSID_CSI2_RDIN_IRQ_CLEAR(i));
++			if (val)
++				dev_dbg_ratelimited(csid->camss->dev,
++						    "CSID%u: RDI%d IRQ %#010x\n",
++						    csid->id, i, val);
+ 		}
+ 
+ 	val = 1 << IRQ_CMD_CLEAR;
