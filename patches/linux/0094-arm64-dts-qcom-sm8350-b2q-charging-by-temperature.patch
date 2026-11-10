@@ -1,0 +1,249 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] arm64: dts: qcom: sm8350-b2q: charging by temperature
+
+The board's thermistors on the PM8350 ADC as stock has them (usb_thm,
+chg_thm, wpc_thm, sub_bat_thm; the VADC node had no channels, so it failed
+to probe), monitored by the PMK8350 ADC_TM, which raises interrupts at the
+trip temperatures instead of being polled. Thermal zones carry stock's
+limits onto the charger's cooling devices: on wpc_thm, which stock reads
+as the battery temperature, 37 C caps wireless charging at 600 mA in and
+1000 mA, 42 C caps both inputs (1050 mA wired, 650 mA wireless), and 50 C
+stops charging; on chg_thm, 46 C caps wired charging at 1000 mA in and
+1900 mA.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts |  197 +++++++++++++++++++++++
+ 1 file changed, 197 insertions(+)
+
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+index 086137a..bb4b55b 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+@@ -10,6 +10,7 @@
+  */
+ 
+ #include <dt-bindings/gpio/gpio.h>
++#include <dt-bindings/iio/qcom,spmi-adc7-pm8350.h>
+ #include <dt-bindings/input/gpio-keys.h>
+ #include <dt-bindings/leds/common.h>
+ #include <dt-bindings/media/video-interfaces.h>
+@@ -1021,6 +1022,13 @@
+ 		"NC",
+ 		"NC";
+ 
++	/* stock chg_thm, wpc_thm, sub_bat_thm: thermistors on the ADC */
++	thm_adc_state: thm-adc-state {
++		pins = "gpio1", "gpio3", "gpio4";
++		function = "normal";
++		bias-high-impedance;
++	};
++
+ 	vol_up_n: vol-up-n-state {
+ 		pins = "gpio6";
+ 		function = "normal";
+@@ -1030,6 +1038,184 @@
+ 	};
+ };
+ 
++/*
++ * The board's thermistors, 100 kOhm pull-up, as stock's vadc channels:
++ * usb_thm (AMUX_THM2), chg_thm (AMUX_THM5), wpc_thm (GPIO2, which stock also
++ * reads as the battery temperature) and sub_bat_thm (GPIO3), all on PM8350.
++ */
++&pmk8350_vadc {
++	pinctrl-0 = <&thm_adc_state>;
++	pinctrl-names = "default";
++
++	channel@145 {
++		reg = <PM8350_ADC7_AMUX_THM2_100K_PU(1)>;
++		label = "usb_thm";
++		qcom,hw-settle-time = <200>;
++		qcom,pre-scaling = <1 1>;
++		qcom,ratiometric;
++	};
++
++	channel@148 {
++		reg = <PM8350_ADC7_AMUX_THM5_100K_PU(1)>;
++		label = "chg_thm";
++		qcom,hw-settle-time = <200>;
++		qcom,pre-scaling = <1 1>;
++		qcom,ratiometric;
++	};
++
++	channel@14b {
++		reg = <PM8350_ADC7_GPIO2_100K_PU(1)>;
++		label = "wpc_thm";
++		qcom,hw-settle-time = <200>;
++		qcom,pre-scaling = <1 1>;
++		qcom,ratiometric;
++	};
++
++	channel@14c {
++		reg = <PM8350_ADC7_GPIO3_100K_PU(1)>;
++		label = "sub_bat_thm";
++		qcom,hw-settle-time = <200>;
++		qcom,pre-scaling = <1 1>;
++		qcom,ratiometric;
++	};
++};
++
++/* the same thermistors as thermal sensors: thresholds raise interrupts */
++&pmk8350_adc_tm {
++	status = "okay";
++
++	wpc-thm@0 {
++		reg = <0>;
++		io-channels = <&pmk8350_vadc PM8350_ADC7_GPIO2_100K_PU(1)>;
++		qcom,hw-settle-time-us = <200>;
++		qcom,ratiometric;
++	};
++
++	chg-thm@1 {
++		reg = <1>;
++		io-channels = <&pmk8350_vadc PM8350_ADC7_AMUX_THM5_100K_PU(1)>;
++		qcom,hw-settle-time-us = <200>;
++		qcom,ratiometric;
++	};
++
++	usb-thm@2 {
++		reg = <2>;
++		io-channels = <&pmk8350_vadc PM8350_ADC7_AMUX_THM2_100K_PU(1)>;
++		qcom,hw-settle-time-us = <200>;
++		qcom,ratiometric;
++	};
++
++	sub-bat-thm@3 {
++		reg = <3>;
++		io-channels = <&pmk8350_vadc PM8350_ADC7_GPIO3_100K_PU(1)>;
++		qcom,hw-settle-time-us = <200>;
++		qcom,ratiometric;
++	};
++};
++
++/*
++ * Charging by temperature, stock's sec_battery limits. The cooling devices
++ * are the charger's inputs (id 0 wired, 1 wireless); levels 1 and 2 are the
++ * caps in maxim,thermal-*-current-limits-microamp, level 3 stops charging.
++ *
++ * batt-thermal, wpc_thm (stock's battery temperature):
++ *   37 C (wpc_high_temp, back at 35): wireless level 1, 600 mA in, 1000 mA
++ *   42 C (normal_warm_thresh): both level 2, 1050 mA wired, 650 mA wireless
++ *   50 C (warm_overheat_thresh): both stop
++ * chg-thermal, chg_thm:
++ *   46 C (chg_high_temp, back at 44): wired level 1, 1000 mA in, 1900 mA
++ */
++/ {
++	thermal-zones {
++		batt-thermal {
++			thermal-sensors = <&pmk8350_adc_tm 0>;
++
++			trips {
++				batt_hot: batt-hot {
++					temperature = <37000>;
++					hysteresis = <2000>;
++					type = "passive";
++				};
++
++				batt_warm: batt-warm {
++					temperature = <42000>;
++					hysteresis = <2000>;
++					type = "passive";
++				};
++
++				batt_overheat: batt-overheat {
++					temperature = <50000>;
++					hysteresis = <2000>;
++					type = "passive";
++				};
++			};
++
++			cooling-maps {
++				map0 {
++					trip = <&batt_hot>;
++					cooling-device = <&max77705_charger 1 1 1>;
++				};
++
++				map1 {
++					trip = <&batt_warm>;
++					cooling-device = <&max77705_charger 0 2 2>,
++							 <&max77705_charger 1 2 2>;
++				};
++
++				map2 {
++					trip = <&batt_overheat>;
++					cooling-device = <&max77705_charger 0 3 3>,
++							 <&max77705_charger 1 3 3>;
++				};
++			};
++		};
++
++		chg-thermal {
++			thermal-sensors = <&pmk8350_adc_tm 1>;
++
++			trips {
++				chg_hot: chg-hot {
++					temperature = <46000>;
++					hysteresis = <2000>;
++					type = "passive";
++				};
++			};
++
++			cooling-maps {
++				map0 {
++					trip = <&chg_hot>;
++					cooling-device = <&max77705_charger 0 1 1>;
++				};
++			};
++		};
++
++		/* stock usb-therm: a passive trip at 85 C for userspace */
++		usb-thermal {
++			thermal-sensors = <&pmk8350_adc_tm 2>;
++
++			trips {
++				usb-hot {
++					temperature = <85000>;
++					hysteresis = <10000>;
++					type = "passive";
++				};
++			};
++		};
++
++		sub-batt-thermal {
++			thermal-sensors = <&pmk8350_adc_tm 3>;
++
++			trips {
++				sub-batt-hot {
++					temperature = <85000>;
++					hysteresis = <10000>;
++					type = "passive";
++				};
++			};
++		};
++	};
++};
++
+ &pm8350c_gpios {
+ 	gpio-line-names =
+ 		"WPC_DET",
+@@ -2076,6 +2262,17 @@
+ 		monitored-battery = <&battery>;
+ 		usb-role-switch = <&usb_1_dwc3>;
+ 
++		/*
++		 * Thermal caps (thermal-zones above): wired level 1 and 2, then
++		 * wireless level 1 and 2. chg_high 1000/1900 mA and warm
++		 * 1050 mA wired; wpc_high 600/1000 mA and warm 650 mA wireless.
++		 */
++		#cooling-cells = <3>;
++		maxim,thermal-input-current-limits-microamp =
++			<1000000 1000000 600000 600000>;
++		maxim,thermal-charge-current-limits-microamp =
++			<1900000 1050000 1000000 650000>;
++
+ 		/* BC1.2 port type from the USB-C block (MFD irq 3) */
+ 		maxim,pmic = <&max77705>;
+ 		interrupt-parent = <&max77705>;

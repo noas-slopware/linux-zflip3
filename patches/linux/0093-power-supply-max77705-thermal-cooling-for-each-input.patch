@@ -1,0 +1,402 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] power: supply: max77705: thermal cooling for each input
+
+Stock's sec_battery lowers the charge current, and stops charging, by
+temperature, and treats the wired and the wireless input differently.
+Nothing did that here. Register two cooling devices on the charger node
+(#cooling-cells = <3>): 0 for CHGIN, 1 for WCIN. Levels 1 and 2 cap the
+input and charge current of that input, from
+maxim,thermal-{input,charge}-current-limits-microamp; level 3 stops
+charging from it. The caps sit under every current the driver sets (the
+port, AFC and PD currents, the WCIN ramp), which are kept and applied
+again when a level changes, and a thermal stop combines with the user's
+charge_behaviour instead of overwriting it.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../bindings/power/supply/maxim,max77705.yaml      |   20 ++
+ drivers/power/supply/max77705_charger.c            |  194 ++++++++++++++++++--
+ include/linux/power/max77705_charger.h             |   28 +++
+ 3 files changed, 226 insertions(+), 16 deletions(-)
+
+
+diff --git a/Documentation/devicetree/bindings/power/supply/maxim,max77705.yaml b/Documentation/devicetree/bindings/power/supply/maxim,max77705.yaml
+index c180f66..9f58bf5 100644
+--- a/Documentation/devicetree/bindings/power/supply/maxim,max77705.yaml
++++ b/Documentation/devicetree/bindings/power/supply/maxim,max77705.yaml
+@@ -116,6 +116,26 @@ properties:
+   maxim,wireless-charge-current-microamp:
+     description: Charge current while charging from WCIN.
+ 
++  "#cooling-cells":
++    const: 3
++    description:
++      Two cooling devices, 0 for the wired input (CHGIN) and 1 for the
++      wireless one (WCIN), each with levels 0 to 3. Levels 1 and 2 cap the
++      currents of that input, level 3 stops charging from it.
++
++  maxim,thermal-input-current-limits-microamp:
++    description:
++      Input current caps of levels 1 and 2 of the wired input, then of
++      levels 1 and 2 of the wireless one; 0 for no cap.
++    minItems: 4
++    maxItems: 4
++
++  maxim,thermal-charge-current-limits-microamp:
++    description:
++      Charge current caps, in the same order.
++    minItems: 4
++    maxItems: 4
++
+   reg:
+     maxItems: 1
+ 
+diff --git a/drivers/power/supply/max77705_charger.c b/drivers/power/supply/max77705_charger.c
+index 92e7f61..9c8e226 100644
+--- a/drivers/power/supply/max77705_charger.c
++++ b/drivers/power/supply/max77705_charger.c
+@@ -21,6 +21,7 @@
+ #include <linux/unaligned.h>
+ #include <linux/property.h>
+ #include <linux/regmap.h>
++#include <linux/thermal.h>
+ #include <linux/usb/role.h>
+ 
+ static const char *max77705_charger_model		= "max77705";
+@@ -208,6 +209,40 @@ static int max77705_get_online(struct regmap *regmap, int *val)
+ 	return 0;
+ }
+ 
++/*
++ * Thermal levels (DT cooling devices "wired-cooling" and "wireless-cooling",
++ * see max77705_charger_cooling_init()): each caps the input and charge
++ * current of its input, and the last one stops charging. The input in use is
++ * WCIN while charging from a pad, CHGIN otherwise.
++ */
++static struct max77705_cooling *max77705_cooling_now(struct max77705_charger_data *chg)
++{
++	return &chg->cooling[READ_ONCE(chg->wcin_active) ?
++			     MAX77705_THERMAL_WIRELESS : MAX77705_THERMAL_WIRED];
++}
++
++static unsigned int max77705_cap(unsigned int microamp, u32 cap)
++{
++	return cap ? min_t(unsigned int, microamp, cap) : microamp;
++}
++
++static unsigned int max77705_cap_input(struct max77705_charger_data *chg,
++				       enum max77705_thermal_input input,
++				       unsigned int microamp)
++{
++	struct max77705_cooling *cool = &chg->cooling[input];
++
++	return max77705_cap(microamp, cool->input_ua[READ_ONCE(cool->level)]);
++}
++
++static unsigned int max77705_cap_charge(struct max77705_charger_data *chg,
++					unsigned int microamp)
++{
++	struct max77705_cooling *cool = max77705_cooling_now(chg);
++
++	return max77705_cap(microamp, cool->charge_ua[READ_ONCE(cool->level)]);
++}
++
+ static int max77705_set_input_current(struct max77705_charger_data *chg, int microamp)
+ {
+ 	unsigned int regval;
+@@ -216,6 +251,9 @@ static int max77705_set_input_current(struct max77705_charger_data *chg, int mic
+ 	 * 1 LSB is 25 mA and the register holds the limit minus one step, as
+ 	 * Samsung's driver writes it: 100 mA is 0x03, 500 mA is 0x13.
+ 	 */
++	chg->req_input_ua = microamp;
++	microamp = max77705_cap_input(chg, MAX77705_THERMAL_WIRED, microamp);
++
+ 	regval = clamp_val(microamp, MAX77705_CURRENT_CHGIN_MIN,
+ 			   MAX77705_CURRENT_CHGIN_MAX);
+ 	regval = regval / MAX77705_CURRENT_CHGIN_STEP - 1;
+@@ -229,6 +267,7 @@ static int max77705_set_wcin_current(struct max77705_charger_data *chg,
+ {
+ 	unsigned int regval;
+ 
++	microamp = max77705_cap_input(chg, MAX77705_THERMAL_WIRELESS, microamp);
+ 	regval = clamp_val(microamp, MAX77705_CURRENT_CHGIN_MIN,
+ 			   MAX77705_CURRENT_WCIN_MAX);
+ 	regval = regval / MAX77705_CURRENT_CHGIN_STEP - 1;
+@@ -240,6 +279,9 @@ static int max77705_set_charge_current(struct max77705_charger_data *chg, int mi
+ {
+ 	unsigned int regval;
+ 
++	chg->req_charge_ua = microamp;
++	microamp = max77705_cap_charge(chg, microamp);
++
+ 	regval = clamp_val(microamp, MAX77705_CURRENT_CHGIN_MIN,
+ 			   MAX77705_CURRENT_CHG_MAX);
+ 	regval = regval / MAX77705_CURRENT_CHG_STEP;
+@@ -518,9 +560,11 @@ static int max77705_get_float_voltage(struct max77705_charger_data *chg,
+  * battery (SEC_BAT_CHG_MODE_CHARGING_OFF: mode 5, buck and charger, becomes
+  * mode 4, buck only). Only the CHG bit of the mode field changes.
+  */
+-static int max77705_set_charge_behaviour(struct max77705_charger_data *chg,
+-					 int behaviour)
++/* charging runs unless the user inhibits it or the input in use is too hot */
++static int max77705_update_charge_enable(struct max77705_charger_data *chg)
+ {
++	struct max77705_cooling *cool = max77705_cooling_now(chg);
++	bool off = READ_ONCE(cool->level) >= MAX77705_THERMAL_LEVELS - 1;
+ 	unsigned int mode;
+ 	int err;
+ 
+@@ -528,33 +572,38 @@ static int max77705_set_charge_behaviour(struct max77705_charger_data *chg,
+ 	if (err)
+ 		return err;
+ 
++	if (chg->user_inhibit || off)
++		mode &= ~MAX77705_CHG_MASK;
++	else
++		mode |= MAX77705_CHG_MASK;
++
++	return regmap_field_write(chg->rfield[MAX77705_MODE], mode);
++}
++
++static int max77705_set_charge_behaviour(struct max77705_charger_data *chg,
++					 int behaviour)
++{
+ 	switch (behaviour) {
+ 	case POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO:
+-		mode |= MAX77705_CHG_MASK;
++		chg->user_inhibit = false;
+ 		break;
+ 	case POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE:
+-		mode &= ~MAX77705_CHG_MASK;
++		chg->user_inhibit = true;
+ 		break;
+ 	default:
+ 		return -EINVAL;
+ 	}
+ 
+-	return regmap_field_write(chg->rfield[MAX77705_MODE], mode);
++	return max77705_update_charge_enable(chg);
+ }
+ 
+ static int max77705_get_charge_behaviour(struct max77705_charger_data *chg,
+ 					 int *behaviour)
+ {
+-	unsigned int mode;
+-	int err;
+-
+-	err = regmap_field_read(chg->rfield[MAX77705_MODE], &mode);
+-	if (err)
+-		return err;
+-
+-	*behaviour = (mode & MAX77705_CHG_MASK) ?
+-		     POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO :
+-		     POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE;
++	/* what the user asked for; a thermal stop is not a user setting */
++	*behaviour = chg->user_inhibit ?
++		     POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE :
++		     POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO;
+ 	return 0;
+ }
+ 
+@@ -762,12 +811,14 @@ static void max77705_wcin_work(struct work_struct *work)
+ 		max77705_set_wcin_current(chg, MAX77705_WCIN_IDLE_UA);
+ 		chg->wcin_limit = MAX77705_WCIN_IDLE_UA;
+ 		WRITE_ONCE(chg->wcin_active, false);
++		max77705_update_charge_enable(chg);
+ 		dev_info(chg->dev, "wireless input off\n");
+ 		power_supply_changed(chg->psy_chg);
+ 		return;
+ 	}
+ 
+-	chg->wcin_target = max77705_wcin_target(chg);
++	chg->wcin_target = max77705_cap_input(chg, MAX77705_THERMAL_WIRELESS,
++					      max77705_wcin_target(chg));
+ 
+ 	if (!chg->wcin_active) {
+ 		regmap_update_bits(chg->regmap, MAX77705_CHG_REG_CNFG_12,
+@@ -778,6 +829,7 @@ static void max77705_wcin_work(struct work_struct *work)
+ 				      MAX77705_WCIN_RAMP_START_UA);
+ 		max77705_set_wcin_current(chg, chg->wcin_limit);
+ 		WRITE_ONCE(chg->wcin_active, true);
++		max77705_update_charge_enable(chg);
+ 		dev_info(chg->dev, "wireless input on, %u mA\n",
+ 			 chg->wcin_target / 1000);
+ 		power_supply_changed(chg->psy_chg);
+@@ -860,6 +912,109 @@ static void max77705_charger_unreg_notifier(void *data)
+ 	power_supply_unreg_notifier(&chg->psy_nb);
+ }
+ 
++/* a thermal level changed: apply the caps of the input in use again */
++static void max77705_thermal_work(struct work_struct *work)
++{
++	struct max77705_charger_data *chg =
++		container_of(work, struct max77705_charger_data, thermal_work);
++
++	if (chg->req_input_ua)
++		max77705_set_input_current(chg, chg->req_input_ua);
++	if (chg->req_charge_ua)
++		max77705_set_charge_current(chg, chg->req_charge_ua);
++	max77705_update_charge_enable(chg);
++	/* WCIN's ramp target, which the wireless caps also bound */
++	queue_work(chg->wqueue, &chg->wcin_work);
++}
++
++static int max77705_cooling_get_max_state(struct thermal_cooling_device *cdev,
++					  unsigned long *state)
++{
++	*state = MAX77705_THERMAL_LEVELS - 1;
++	return 0;
++}
++
++static int max77705_cooling_get_cur_state(struct thermal_cooling_device *cdev,
++					  unsigned long *state)
++{
++	struct max77705_cooling *cool = cdev->devdata;
++
++	*state = READ_ONCE(cool->level);
++	return 0;
++}
++
++static int max77705_cooling_set_cur_state(struct thermal_cooling_device *cdev,
++					  unsigned long state)
++{
++	struct max77705_cooling *cool = cdev->devdata;
++	struct max77705_charger_data *chg = cool->chg;
++
++	if (state >= MAX77705_THERMAL_LEVELS)
++		return -EINVAL;
++	if (state == READ_ONCE(cool->level))
++		return 0;
++
++	dev_info(chg->dev, "%s charging: thermal level %lu\n",
++		 cool->input == MAX77705_THERMAL_WIRED ? "wired" : "wireless",
++		 state);
++	WRITE_ONCE(cool->level, state);
++	queue_work(chg->wqueue, &chg->thermal_work);
++	return 0;
++}
++
++static const struct thermal_cooling_device_ops max77705_cooling_ops = {
++	.get_max_state = max77705_cooling_get_max_state,
++	.get_cur_state = max77705_cooling_get_cur_state,
++	.set_cur_state = max77705_cooling_set_cur_state,
++};
++
++/*
++ * Two cooling devices on the charger node (#cooling-cells = <3>): id 0 for
++ * the wired input, id 1 for the wireless one, each with the input and charge
++ * current caps of levels 1 and 2 (stock's hot and warm limits) from
++ * maxim,thermal-{input,charge}-current-limits-microamp (wired level 1 and 2,
++ * then wireless level 1 and 2); level 3 stops charging from that input.
++ * Without the properties nothing is capped.
++ */
++static int max77705_charger_cooling_init(struct max77705_charger_data *chg)
++{
++	static const char * const names[] = {
++		[MAX77705_THERMAL_WIRED] = "max77705-wired",
++		[MAX77705_THERMAL_WIRELESS] = "max77705-wireless",
++	};
++	u32 icl[2 * MAX77705_THERMAL_INPUTS] = {}, fcc[2 * MAX77705_THERMAL_INPUTS] = {};
++	struct device *dev = chg->dev;
++	int i;
++
++	if (!device_property_present(dev, "#cooling-cells"))
++		return 0;
++
++	device_property_read_u32_array(dev, "maxim,thermal-input-current-limits-microamp",
++				       icl, ARRAY_SIZE(icl));
++	device_property_read_u32_array(dev, "maxim,thermal-charge-current-limits-microamp",
++				       fcc, ARRAY_SIZE(fcc));
++
++	for (i = 0; i < MAX77705_THERMAL_INPUTS; i++) {
++		struct max77705_cooling *cool = &chg->cooling[i];
++		struct thermal_cooling_device *cdev;
++
++		cool->chg = chg;
++		cool->input = i;
++		cool->input_ua[1] = icl[2 * i];
++		cool->input_ua[2] = icl[2 * i + 1];
++		cool->charge_ua[1] = fcc[2 * i];
++		cool->charge_ua[2] = fcc[2 * i + 1];
++
++		cdev = devm_thermal_of_cooling_device_register(dev, i, names[i], cool,
++							       &max77705_cooling_ops);
++		if (IS_ERR(cdev))
++			return dev_err_probe(dev, PTR_ERR(cdev),
++					     "cannot register %s cooling\n", names[i]);
++	}
++
++	return 0;
++}
++
+ static int max77705_charger_parse_dt(struct max77705_charger_data *chg)
+ {
+ 	struct device *dev = chg->dev;
+@@ -1979,6 +2134,9 @@ static int max77705_charger_probe(struct i2c_client *i2c)
+ 	if (ret)
+ 		return ret;
+ 	ret = devm_delayed_work_autocancel(dev, &chg->afc_work, max77705_afc_work);
++	if (ret)
++		return ret;
++	ret = devm_work_autocancel(dev, &chg->thermal_work, max77705_thermal_work);
+ 	if (ret)
+ 		return ret;
+ 	ret = devm_work_autocancel(dev, &chg->wcin_work, max77705_wcin_work);
+@@ -1997,6 +2155,10 @@ static int max77705_charger_probe(struct i2c_client *i2c)
+ 	if (ret)
+ 		return dev_err_probe(dev, ret, "failed to initialize charger IC\n");
+ 
++	ret = max77705_charger_cooling_init(chg);
++	if (ret)
++		return ret;
++
+ 	ret = max77705_charger_setup_usbc(chg);
+ 	if (ret)
+ 		return dev_err_probe(dev, ret, "failed to set up cable detection\n");
+diff --git a/include/linux/power/max77705_charger.h b/include/linux/power/max77705_charger.h
+index 8d313e8..c670e8b 100644
+--- a/include/linux/power/max77705_charger.h
++++ b/include/linux/power/max77705_charger.h
+@@ -258,6 +258,27 @@ static const struct reg_field max77705_reg_field[MAX77705_N_REGMAP_FIELDS] = {
+ };
+ 
+ struct usb_role_switch;
++struct thermal_cooling_device;
++
++/* thermal levels of an input: none, hot, warm, off */
++#define MAX77705_THERMAL_LEVELS		4
++
++enum max77705_thermal_input {
++	MAX77705_THERMAL_WIRED,
++	MAX77705_THERMAL_WIRELESS,
++	MAX77705_THERMAL_INPUTS,
++};
++
++struct max77705_charger_data;
++
++struct max77705_cooling {
++	struct max77705_charger_data	*chg;
++	enum max77705_thermal_input	input;
++	unsigned long			level;
++	/* caps per level in uA, 0 for none; level 3 stops charging */
++	u32				input_ua[MAX77705_THERMAL_LEVELS];
++	u32				charge_ua[MAX77705_THERMAL_LEVELS];
++};
+ 
+ struct max77705_charger_data {
+ 	struct device			*dev;
+@@ -319,6 +340,13 @@ struct max77705_charger_data {
+ 	unsigned int		wcin_target;	/* uA */
+ 	unsigned int		wcin_default_ua;
+ 	unsigned int		wcin_charge_ua;
++
++	/* thermal caps, and what was asked for before them */
++	struct max77705_cooling	cooling[MAX77705_THERMAL_INPUTS];
++	struct work_struct	thermal_work;
++	unsigned int		req_input_ua;
++	unsigned int		req_charge_ua;
++	bool			user_inhibit;
+ };
+ 
+ #endif /* __MAX77705_CHARGER_H */
