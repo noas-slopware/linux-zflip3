@@ -1,0 +1,11 @@
+[AC][SuspendAndShutdown]
+LidAction=0
+PowerButtonAction=32
+
+[Battery][SuspendAndShutdown]
+LidAction=0
+PowerButtonAction=32
+
+[LowBattery][SuspendAndShutdown]
+LidAction=0
+PowerButtonAction=32

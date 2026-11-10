@@ -1,0 +1,42 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] actions: handlebuttonevents: respect session inhibitors on lid close
+
+PowerDevil bypasses the policy agent when it handles the lid switch: the
+trigger is marked explicit, so an InterruptSession inhibitor (the Plasma
+Mobile Caffeine quick setting, or org.freedesktop.PowerManagement.Inhibit)
+does not stop the configured Sleep or Hibernate action.
+
+Check the policy agent before suspending. When the session is inhibited,
+turn the display off instead and leave the system running.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+---
+ daemon/actions/bundled/handlebuttonevents.cpp | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/daemon/actions/bundled/handlebuttonevents.cpp b/daemon/actions/bundled/handlebuttonevents.cpp
+--- a/daemon/actions/bundled/handlebuttonevents.cpp
++++ b/daemon/actions/bundled/handlebuttonevents.cpp
+@@ -11,6 +11,7 @@
+ #include <PowerDevilProfileSettings.h>
+ #include <powerdevil_debug.h>
+ #include <powerdevilcore.h>
++#include <powerdevilpolicyagent.h>
+ 
+ #include <QAction>
+ 
+@@ -156,6 +157,14 @@ void HandleButtonEvents::onLidClosedChanged(bool closed)
+             return;
+         }
+ 
++        if ((m_lidAction == PowerDevil::PowerButtonAction::Sleep ||
++             m_lidAction == PowerDevil::PowerButtonAction::Hibernate) &&
++            PowerDevil::PolicyAgent::instance()->requirePolicyCheck(PowerDevil::PolicyAgent::InterruptSession) != PowerDevil::PolicyAgent::None) {
++            qCDebug(POWERDEVIL) << "Lid action inhibited by an active session inhibitor, turning off the screen";
++            triggerAction(u"DPMSControl"_s, u"TurnOff"_s);
++            return;
++        }
++
+         processAction(m_lidAction);
+     } else {
+         // When we restore the keyboard brightness before waking up, we shouldn't conflict

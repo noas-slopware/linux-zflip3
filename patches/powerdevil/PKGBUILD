@@ -1,0 +1,76 @@
+# Maintainer: Noa Himesaka <himesaka@noa.codes>
+# SPDX-License-Identifier: MIT
+#
+# Arch's extra/powerdevil 6.8.2-1, rebuilt for the b2q aarch64 rootfs with the
+# lid-switch inhibitor patch in this directory (see README.md).
+#
+# Build on the phone as the unprivileged `build` user, from this directory:
+#
+#   su build -c 'cd /home/build/powerdevil && makepkg -s --noconfirm'
+#
+# Then install the resulting package as root with `pacman -U`. pkgrel is above
+# the ports repo's, so the patched build wins.
+
+pkgname=powerdevil
+pkgver=6.8.2
+_dirver=$(echo $pkgver | cut -d. -f1-3)
+pkgrel=2
+pkgdesc='Manages the power consumption settings of a Plasma Shell'
+arch=(aarch64)
+url='https://kde.org/plasma-desktop/'
+license=(LGPL-2.0-or-later)
+depends=(ddcutil
+         glibc
+         plasma-activities
+         kauth
+         kcmutils
+         kconfig
+         kcoreaddons
+         kcrash
+         kdbusaddons
+         kglobalaccel
+         ki18n
+         kidletime
+         kirigami
+         kitemmodels
+         knotifications
+         kpackage
+         kservice
+         kxmlgui
+         libkscreen
+         libplasma
+         libstdc++
+         plasma-workspace
+         qcoro
+         qt6-base
+         qt6-declarative
+         solid
+         systemd-libs
+         wayland)
+makedepends=(extra-cmake-modules
+             kdoctools
+             plasma-wayland-protocols)
+optdepends=('kinfocenter: for the Energy Information KCM'
+            'power-profiles-daemon: power profiles support'
+            'tlp: alternative power profiles support')
+groups=(plasma)
+source=("https://download.kde.org/stable/plasma/$_dirver/$pkgname-$pkgver.tar.xz"
+        0001-Respect-session-inhibitors-when-the-lid-is-closed.patch)
+sha256sums=('c663355adcfdfafe9824f48aa15881679fd71b0b16863a603a62ec0bce628d4a'
+            '04734165f9bfa54c51df14b299b768ae66a3f652aad34287352b592eef4b667f')
+
+prepare() {
+  cd $pkgname-$pkgver
+  patch -Np1 -i ../0001-Respect-session-inhibitors-when-the-lid-is-closed.patch
+}
+
+build() {
+  cmake -B build -S $pkgname-$pkgver \
+    -DKDE_INSTALL_LIBEXECDIR=lib \
+    -DBUILD_TESTING=OFF
+  cmake --build build
+}
+
+package() {
+  DESTDIR="$pkgdir" cmake --install build
+}
