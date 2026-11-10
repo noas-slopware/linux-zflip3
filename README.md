@@ -5,12 +5,17 @@ install tools and notes needed to run Arch Linux on it. Port by Noa Himesaka. No
 Samsung.
 
 **Status: daily-usable bring-up.** Arch Linux Ports with Plasma Mobile runs from UFS with
-display, touch, Wi-Fi, Bluetooth, GPU, charging, speakers, microphone, cellular data, SMS,
-MMS and VoLTE calls. Not yet: waking from suspend for an incoming call or SMS, the earpiece,
-DTMF, the cameras and hardware video decode, the cover display, the fingerprint sensor,
-motion and environment sensors, NFC, GNSS, wireless charging, the camera flash, and the
-hinge angle beyond open/closed. [`STATE.md`](STATE.md) has the details. The roadmap and the reasoning behind
-each step live on the `docs` branch ([`docs/plan.md`](https://github.com/noas-slopware/linux-zflip3/blob/docs/docs/plan.md)).
+display, touch, Wi-Fi, Bluetooth, GPU, charging, speakers, earpiece, microphone, cellular data,
+SMS, MMS and VoLTE calls (including waking from suspend on incoming messages and calls),
+USB host/OTG, hardware video decode (VP9 and H.264 without B-frames; see
+[`VIDEO-DECODE.md`](VIDEO-DECODE.md)), the cover display and its touchscreen, camera
+flash/torch LED, the SSC's accelerometer, gyroscope, magnetometer, compass and ambient light
+sensors, the SX9360 grip sensor that also provides proximity, and GNSS through ModemManager's
+QMI LOC. Not yet: the cameras, hardware video encode, NFC, wireless charging, the hinge angle
+beyond open/closed, and the fingerprint sensor (blocked by TrustZone, see `STATE.md`).
+[`STATE.md`](STATE.md) has the details. The roadmap and the reasoning behind each step live on
+the `docs` branch
+([`docs/plan.md`](https://github.com/noas-slopware/linux-zflip3/blob/docs/docs/plan.md)).
 
 ## The device
 
@@ -32,7 +37,7 @@ unlockable.
 
 ## What works
 
-"Verified" means seen working on the unit. Kernel 7.3.1 build #57, 2026-11-09.
+"Verified" means seen working on the unit. Kernel 7.3.1 build #81, 2026-11-10.
 
 | Subsystem | Status |
 |---|---|
@@ -40,15 +45,25 @@ unlockable.
 | USB device: gadget console, networking | verified |
 | UFS, rootfs (Arch Linux Ports aarch64) | verified |
 | Wi-Fi, Bluetooth, GPU (a660/freedreno) | verified |
-| Main display, touchscreen | verified (cover display not yet) |
+| Main display, touchscreen | verified |
 | Fold sensor: closing suspends, opening wakes | verified |
 | Charging, dual cells, fuel gauge | verified |
-| Speakers, microphones | verified (earpiece not yet) |
+| Speakers, earpiece, microphones | verified |
 | Cellular data (LG U+ LTE, IPv6 + CLAT) | verified |
 | IMS registration (ISIM AKA) | verified |
 | SMS send and receive, received while ModemManager or the phone was down | verified |
 | MMS send and receive (Spacebar) | verified |
 | VoLTE calls in and out, to and from other networks, AMR-WB / AMR-NB | verified |
+| DTMF in calls | in the repo, not on the phone: the ModemManager side is `patches/modemmanager/0004-*`; 1.24.2-10 had none |
+| Incoming call or SMS waking the phone from suspend | verified |
+| USB host/OTG (Type-C peripherals: YubiKey, USB-C audio/DAC, flash drives) | verified |
+| Hardware video decode (qcom-iris via qcom-va-driver) | partial: VP9 and H.264 without B-frames verified in Firefox 159 on 2026-11-10; H.264 B-frames broken and HEVC untested pending the kernel patches in [`VIDEO-DECODE.md`](VIDEO-DECODE.md) |
+| Camera flash and torch LED (S2MPB02) | verified on #81; the S2MPB02 MFD/regulator rework and the blink-free torch refresh (`patches/linux/0026-*` to `0031-*`, 2026-11-10) are not on the phone yet |
+| SSC sensors: accelerometer, gyroscope, magnetometer, compass, ambient light | verified (data via `ssccli`; `iio-sensor-proxy` reports them) |
+| Grip sensor (Semtech SX9360, IIO proximity) | verified (raw channels; its main electrode is the phone's proximity sensor) |
+| GNSS | verified through ModemManager's QMI LOC (`gps-raw`, `gps-nmea`; no fix indoors, no `/dev/gnss`) |
+| Cover display | working: 512x260 strip; `b2q-coverd` leases the non-desktop connector, sleeps by default and wakes on notification/call/SMS/power key; the main panel is DPMS Off while folded and only the cover is active; the call banner clears on hangup |
+| Cover touchscreen (Zinitix ZTW522) | verified: vendor protocol driver/DT in `patches/linux/0038-*`, `0039-*`; `b2q-coverd` grabs the evdev and dismisses tapped cards while the cover is lit; a tap never wakes it, a swipe does; udev keeps libinput off it |
 
 ## Not working yet
 
@@ -57,25 +72,15 @@ not that the hardware is broken on this unit.
 
 | Subsystem | State |
 |---|---|
-| Incoming call or SMS waking the phone from suspend | not yet: delivered at the next wake |
-| Earpiece during calls | calls play on the speaker; no Voice Call UCM profile yet |
-| Emergency and supplementary calls | DTMF is never sent; call waiting, hold and conference are not implemented |
-| Wi-Fi calling (VoWiFi) | not implemented |
 | 5G NR | the modem reports the capability; data and voice have only been verified on LTE |
 | Cameras (rear 12 MP wide + 12 MP ultrawide, front 10 MP) | not started: no sensor, CCI or CAMSS nodes |
-| Hardware video decode and encode (qcom-iris) | nodes exist but firmware load fails, so no VA-API and no V4L2 decode |
-| Camera flash and torch | no LED driver |
-| Fingerprint sensor in the power button | not started: the pins are TZ-owned, see `STATE.md` |
-| Accelerometer, gyro, magnetometer, proximity, ambient light | not started: no IIO drivers or DT nodes |
-| NFC | not started: the GPIO names are reserved only, there is no PN553/SN100 node |
-| GNSS | not started: no GNSS driver or modem LOC integration |
-| Cover display | not driven; only the main S6E3HAD panel is |
-| USB host/OTG | untested |
+| Hardware video decode: H.264 B-frames, HEVC | H.264 with B-frames fails (`surface sync timeout`), HEVC only logs pending-picture warnings; both need the Gen1 iris patches (see `VIDEO-DECODE.md`) |
+| Hardware video encode | not registered on SM8350: opening the encoder crashed the VPU firmware before 0021's input-packet fix, so `/dev/video1` is skipped there until it is retested (upstream registers it on SM8250) |
+| Fingerprint sensor in the power button | blocked: the SPI controller, its pins and the Goodix TA are TrustZone-owned; the next path is a QSEECom client for the Goodix TA, not a Linux SPI driver |
+| NFC | blocked: the SN100U node, pinctrl and the NCI 2.0 fixes are in `patches/linux/0033-*` to `0035-*`, but the controller never ACKs I2C, likely the PMIC reference clock |
 | Wireless charging and reverse wireless charging | not ported; the WPC GPIOs are named but unused |
 | Hinge angle | only open/closed via `SW_LID`, no angle sensor |
-| Bluetooth audio (A2DP/HFP) and USB-C audio | untested |
 | Idle power, thermal limits, charge curves | not tuned; QC 2.0, PPS and wireless charging are not ported |
-| RTC alarm waking from suspend | untested |
 
 ## Boot chain
 
@@ -113,18 +118,19 @@ partitions over USB.
 
 Priority order for a daily driver:
 
-- Incoming calls and SMS waking the phone from suspend: the IPA wakeup source never fires.
-- Earpiece during calls, then Bluetooth and USB-C audio.
-- DTMF, call waiting, hold, conference, and emergency calls.
-- Modem recovery after suspend, airplane mode or a modem crash.
-- Cameras and hardware video decode, both Iris work: CAMSS/CCI, the three sensors and the
-  flash LED, then the iris firmware loading and VA-API.
-- Fingerprint sensor.
-- Motion and environment sensors, so auto-rotate, proximity and auto-brightness work.
-- NFC and GNSS.
-- Cover display while folded.
+- ~~Motion and environment sensors~~: done (SSC on the SLPI, plus the SX9360 grip sensor).
+  Auto-rotate through Plasma is confirmed.
+- Fingerprint first: it needs Samsung's TZ images uploaded and a TEE interface to the
+  Goodix TA. `STATE.md` section 13 has the TrustZone findings; this is the current first
+  priority.
+- HFI Gen1 iris: port the decode-order output and larger capture-pool patches from the
+  gen2 series, then retest the encoder on SM8350 with 0021's input-packet fix and drop
+  the SM8350 skip if it holds. This fixes H.264 B-frames and adds hardware encode.
+- NFC: the SN100U does not ACK I2C and likely needs its PMIC reference clock; the node
+  and the NCI 2.0 fixes stay in `patches/linux/0033-*` to `0035-*`.
+- Cameras: CAMSS/CCI and the three sensors (rear wide, ultrawide, front); the largest
+  remaining subsystem.
 - Wireless charging, QC 2.0, PPS, thermal limits and idle drain.
-- Power and volume keys handled by Plasma Mobile (lock and sleep) instead of logind's poweroff.
 - The rest of the list in `STATE.md`.
 
 ### For the rootfs rebuild
@@ -133,17 +139,34 @@ Done by hand on the phone and not yet in `tools/build-rootfs.sh`; it goes in onc
 everything, cellular included, works:
 
 - packages beyond `ROOTFS_PACKAGES`: `mesa mesa-utils plasma-mobile plasma-login-manager
-  plasma-settings qmlkonsole bluedevil kscreen firefox feedbackd evtest i2c-tools plasma-dialer`
+  plasma-settings qmlkonsole bluedevil kscreen firefox feedbackd evtest i2c-tools plasma-dialer geoclue`
   (plus the Adreno zap shader),
 - the cellular stack built on the phone: `b2q-imsd` from `userspace/imsd/packaging`,
-  ModemManager with `patches/modemmanager/`, Spacebar from `userspace/spacebar` with
+  ModemManager 1.24.2-11 with `patches/modemmanager/` (0001, 0003, 0004), Spacebar from `userspace/spacebar` with
   `patches/spacebar/`, and `opencore-amr` plus `vo-amrwbenc` for the call codecs,
+- hardware video decode (not a pacman package): `qcom-va-driver 1.1.1` from
+  `github.com/nyanmisaka/libva-v4l2-qcom` at `~/src/qcom-va-driver`, built with
+  `tools/build-qcom-va-driver.sh` after the local patch; it installs
+  `/usr/lib/dri/qcom_drv_video.so` plus the `msm`/`v4l2` aliases. See `VIDEO-DECODE.md`,
 - the audio bits: `tools/extract-amp-firmware.sh` output in `/usr/lib/firmware/cirrus/`,
   the UCM files under `userspace/rootfs/usr/share/alsa/ucm2/`, the WirePlumber drop-in
   under `userspace/rootfs/etc/wireplumber/`, and the CS35L41 module once the 15 ms
   mailbox build is final,
 - the IMS runtime directories: `/var/lib/b2q-imsd/inbox` and `/run/b2q-imsd` for the
   durable SMS inbox and the call audio socket,
+- the sensors: `tools/extract-qcom-firmware.sh ... slpi` and
+  `tools/extract-sensor-files.sh` output (the DSP skels, sensor configs and
+  `sns_reg.conf` under `/usr/share/qcom/sm8350/Samsung/b2q/`), `hexagonrpcd` from
+  `userspace/hexagonrpcd`, the patched `iio-sensor-proxy` from
+  `userspace/iio-sensor-proxy` (`-Dssc-support=enabled` and the claim race patch),
+  and `b2q-sensors-tree.service` plus the `81-b2q-sensors.rules` udev rule from
+  `userspace/rootfs/`,
+- the NFC userspace stack: `neard` from `userspace/neard` (not in the ports repos),
+  which also provides `nfctool` for `/dev/nfc0`,
+- the cover daemon: `userspace/b2q-cover/` (`b2q-coverd`), which leases DSI-2 from KWin,
+  drives the panel with Cairo/Pango and controls its backlight; autostart under
+  `userspace/rootfs/etc/xdg/autostart/` and the backlight udev rule under
+  `userspace/rootfs/usr/lib/udev/rules.d/82-b2q-backlight.rules`,
 - the Spacebar MMSC default for `<user>` (`http://omammsc.uplus.co.kr:9084`,
   no proxy) so a reimage can send MMS without opening settings,
 - user `<user>` (groups wheel, video, audio, input, render), no password set by the
@@ -176,11 +199,16 @@ patches/linux/           numbered series against sources.lock's LINUX_VERSION
 patches/u-boot/          SM8350 and b2q support for U-Boot
 patches/modemmanager/    b2q-imsd backend for voice and messaging
 patches/spacebar/        MMS send, own number and duplicate fixes
+patches/qcom-va-driver/  local patch for the qcom-va-driver V4L2 backend
 patches/plasma-keyboard/ Korean composition, content types
 tools/                   host-side: extract firmware, build, pack, flash and install images
+VIDEO-DECODE.md          the hardware decode stack, measurements and caveats
 userspace/installer/     bring-up initramfs and installer
 userspace/rootfs/        files the rootfs carries on top of the distribution
 userspace/imsd/          IMS bearer, IMS daemon (VoLTE, SMS, MMS) and the call audio bridge
+userspace/hexagonrpcd/   FastRPC filesystem daemon for the sensor hub
+userspace/iio-sensor-proxy/ iio-sensor-proxy with the SSC claim-race fix
+userspace/neard/         Linux NFC daemon and nfctool for the NCI stack
 userspace/spacebar/      PKGBUILD for the patched Spacebar
 ```
 
