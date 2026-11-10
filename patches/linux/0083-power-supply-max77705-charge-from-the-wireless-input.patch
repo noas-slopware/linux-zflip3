@@ -10,10 +10,14 @@ off (0x40), so a cable takes over from the pad. The WCIN limit starts at
 (stock's wc_current_work); it drops to 425 mA when the pad goes away.
 
 The receiver is found through the new maxim,wireless-charger reference
-when WCIN comes up, and a power supply notifier follows its changes, so
-the charger never waits for the receiver's driver at probe. Without it,
+each time the limit is worked out, and put right after (holding it kept
+its power supply alive past its driver, and unloading the receiver
+module then froze the phone); a power supply notifier follows its
+changes, and the charger never waits for the receiver's driver at
+probe. Without it,
 WCIN runs at maxim,wireless-input-current-microamp (stock's initial
-500 mA). ONLINE and the input health now cover both inputs.
+500 mA). ONLINE, the input health and the input current limit now follow the
+input in use.
 
 AICL on a pad steps the WCIN limit down instead of CHGIN_LIM, and holds
 the ramp there; the CHGIN loop no longer steps below 100 mA, where the
@@ -25,9 +29,9 @@ Signed-off-by: Noa Himesaka <himesaka@noa.codes>
 Assisted-by: Claude:claude-opus-5-5
 ---
  .../bindings/power/supply/maxim,max77705.yaml      |   14 +
- drivers/power/supply/max77705_charger.c            |  277 ++++++++++++++++++++
- include/linux/power/max77705_charger.h             |   16 +
- 3 files changed, 301 insertions(+), 6 deletions(-)
+ drivers/power/supply/max77705_charger.c            |  274 +++++++++++++++++++-
+ include/linux/power/max77705_charger.h             |   14 +
+ 3 files changed, 295 insertions(+), 7 deletions(-)
 
 
 diff --git a/Documentation/devicetree/bindings/power/supply/maxim,max77705.yaml b/Documentation/devicetree/bindings/power/supply/maxim,max77705.yaml
@@ -56,7 +60,7 @@ index 55dacf7..c180f66 100644
      maxItems: 1
  
 diff --git a/drivers/power/supply/max77705_charger.c b/drivers/power/supply/max77705_charger.c
-index 9079a0c..c710f35 100644
+index 9079a0c..54e147e 100644
 --- a/drivers/power/supply/max77705_charger.c
 +++ b/drivers/power/supply/max77705_charger.c
 @@ -73,6 +73,12 @@ static irqreturn_t max77705_aicl_irq(int irq, void *irq_drv_data)
@@ -156,7 +160,19 @@ index 9079a0c..c710f35 100644
  
  	switch (charge_dtls) {
  	case 0x00:
-@@ -634,6 +676,181 @@ static int max77705_set_b2sovrc(struct max77705_charger_data *chg)
+@@ -401,7 +443,10 @@ static int max77705_get_input_current(struct max77705_charger_data *chg,
+ 	unsigned int reg_data;
+ 	int get_current = 0;
+ 
+-	regmap_field_read(chg->rfield[MAX77705_CHG_CHGIN_LIM], &reg_data);
++	/* the limit of the input in use: WCIN_LIM on a pad, same encoding */
++	regmap_field_read(chg->rfield[READ_ONCE(chg->wcin_active) ?
++				      MAX77705_CHG_WCIN : MAX77705_CHG_CHGIN_LIM],
++			  &reg_data);
+ 
+ 	if (reg_data <= 3)
+ 		get_current = MAX77705_CURRENT_CHGIN_MIN;
+@@ -634,6 +679,173 @@ static int max77705_set_b2sovrc(struct max77705_charger_data *chg)
  	return 0;
  }
  
@@ -173,35 +189,33 @@ index 9079a0c..c710f35 100644
 +#define MAX77705_WCIN_RAMP_MS		1000
 +#define MAX77705_WCIN_IDLE_UA		425000
 +
-+static struct power_supply *max77705_wireless(struct max77705_charger_data *chg)
-+{
-+	struct power_supply *psy;
-+
-+	/* looked up when needed, so the charger never waits for the receiver */
-+	if (!chg->psy_wls && !READ_ONCE(chg->wls_gone)) {
-+		psy = power_supply_get_by_reference(dev_fwnode(chg->dev),
-+						    "maxim,wireless-charger");
-+		if (!IS_ERR_OR_NULL(psy))
-+			chg->psy_wls = psy;
-+	}
-+
-+	return chg->psy_wls;
-+}
-+
++/*
++ * The receiver is looked up for each read and put right after: holding it
++ * would keep its power supply alive past its driver (an unbind or a module
++ * unload), with its property callbacks gone. It also means the charger never
++ * waits for the receiver at probe.
++ */
 +static unsigned int max77705_wcin_target(struct max77705_charger_data *chg)
 +{
-+	struct power_supply *wls = max77705_wireless(chg);
++	unsigned int target = chg->wcin_default_ua;
 +	union power_supply_propval val;
++	struct power_supply *wls;
 +
-+	if (wls &&
-+	    !power_supply_get_property(wls, POWER_SUPPLY_PROP_ONLINE, &val) &&
++	wls = power_supply_get_by_reference(dev_fwnode(chg->dev),
++					    "maxim,wireless-charger");
++	if (IS_ERR_OR_NULL(wls))
++		return target;
++
++	if (!power_supply_get_property(wls, POWER_SUPPLY_PROP_ONLINE, &val) &&
 +	    val.intval &&
 +	    !power_supply_get_property(wls, POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT,
 +				       &val) &&
 +	    val.intval > 0)
-+		return min_t(unsigned int, val.intval, MAX77705_CURRENT_WCIN_MAX);
++		target = min_t(unsigned int, val.intval, MAX77705_CURRENT_WCIN_MAX);
 +
-+	return chg->wcin_default_ua;
++	power_supply_put(wls);
++
++	return target;
 +}
 +
 +static void max77705_wcin_work(struct work_struct *work)
@@ -322,23 +336,17 @@ index 9079a0c..c710f35 100644
 +	return NOTIFY_OK;
 +}
 +
-+static void max77705_charger_put_wireless(void *data)
++static void max77705_charger_unreg_notifier(void *data)
 +{
 +	struct max77705_charger_data *chg = data;
 +
 +	power_supply_unreg_notifier(&chg->psy_nb);
-+	WRITE_ONCE(chg->wls_gone, true);
-+	/* a queued wcin_work may still take the reference: let it finish */
-+	flush_workqueue(chg->wqueue);
-+	if (chg->psy_wls)
-+		power_supply_put(chg->psy_wls);
-+	chg->psy_wls = NULL;
 +}
 +
  static int max77705_charger_parse_dt(struct max77705_charger_data *chg)
  {
  	struct device *dev = chg->dev;
-@@ -701,6 +918,13 @@ static int max77705_charger_parse_dt(struct max77705_charger_data *chg)
+@@ -701,6 +913,13 @@ static int max77705_charger_parse_dt(struct max77705_charger_data *chg)
  				 &chg->pd_max_input_ua);
  	device_property_read_u32(dev, "maxim,pd-max-charge-current-microamp",
  				 &chg->pd_max_charge_ua);
@@ -352,7 +360,7 @@ index 9079a0c..c710f35 100644
  	ret = device_property_count_u8(dev, "maxim,pd-sink-caps");
  	if (ret > 0 && ret <= MAX77705_USBC_OPCODE_DATA_LEN &&
  	    !device_property_read_u8_array(dev, "maxim,pd-sink-caps",
-@@ -1086,6 +1310,8 @@ static int max77705_charger_set_otg(struct max77705_charger_data *chg, bool enab
+@@ -1086,6 +1305,8 @@ static int max77705_charger_set_otg(struct max77705_charger_data *chg, bool enab
  		chg->otg_on = false;
  	}
  
@@ -361,7 +369,7 @@ index 9079a0c..c710f35 100644
  	power_supply_changed(chg->psy_chg);
  	return 0;
  }
-@@ -1560,12 +1786,22 @@ static int max77705_charger_initialize(struct max77705_charger_data *chg)
+@@ -1560,12 +1781,22 @@ static int max77705_charger_initialize(struct max77705_charger_data *chg)
  	if (err)
  		goto err;
  
@@ -386,7 +394,7 @@ index 9079a0c..c710f35 100644
  	err = regmap_field_write(chg->rfield[MAX77705_WCIN], MAX77705_WCIN_4_5);
  	if (err)
  		goto err;
-@@ -1736,6 +1972,17 @@ static int max77705_charger_probe(struct i2c_client *i2c)
+@@ -1736,6 +1967,17 @@ static int max77705_charger_probe(struct i2c_client *i2c)
  	ret = devm_delayed_work_autocancel(dev, &chg->afc_work, max77705_afc_work);
  	if (ret)
  		return ret;
@@ -404,7 +412,7 @@ index 9079a0c..c710f35 100644
  
  	ret = max77705_charger_initialize(chg);
  	if (ret)
-@@ -1752,6 +1999,21 @@ static int max77705_charger_probe(struct i2c_client *i2c)
+@@ -1752,6 +1994,21 @@ static int max77705_charger_probe(struct i2c_client *i2c)
  	if (ret)
  		return ret;
  
@@ -412,7 +420,7 @@ index 9079a0c..c710f35 100644
 +	ret = power_supply_reg_notifier(&chg->psy_nb);
 +	if (ret)
 +		return ret;
-+	ret = devm_add_action_or_reset(dev, max77705_charger_put_wireless, chg);
++	ret = devm_add_action_or_reset(dev, max77705_charger_unreg_notifier, chg);
 +	if (ret)
 +		return ret;
 +
@@ -426,7 +434,7 @@ index 9079a0c..c710f35 100644
  	ret = devm_request_threaded_irq(dev, regmap_irq_get_virq(irq_data, MAX77705_AICL_I),
  					NULL, max77705_aicl_irq,
  					IRQF_TRIGGER_NONE,
-@@ -1763,6 +2025,9 @@ static int max77705_charger_probe(struct i2c_client *i2c)
+@@ -1763,6 +2020,9 @@ static int max77705_charger_probe(struct i2c_client *i2c)
  	if (ret)
  		return dev_err_probe(dev, ret, "failed to enable charge\n");
  
@@ -437,7 +445,7 @@ index 9079a0c..c710f35 100644
  }
  
 diff --git a/include/linux/power/max77705_charger.h b/include/linux/power/max77705_charger.h
-index 7014694..8efea22 100644
+index 7014694..8d313e8 100644
 --- a/include/linux/power/max77705_charger.h
 +++ b/include/linux/power/max77705_charger.h
 @@ -136,6 +136,8 @@
@@ -457,7 +465,7 @@ index 7014694..8efea22 100644
  
  /* One entry per BC1.2 port type, in register order: SDP, CDP, DCP */
  #define MAX77705_NUM_PORT_TYPES		3
-@@ -305,6 +308,19 @@ struct max77705_charger_data {
+@@ -305,6 +308,17 @@ struct max77705_charger_data {
  	unsigned int		pd_max_voltage_mv;
  	unsigned int		pd_max_input_ua;
  	unsigned int		pd_max_charge_ua;
@@ -467,8 +475,6 @@ index 7014694..8efea22 100644
 +	struct delayed_work	wcin_ramp_work;
 +	struct work_struct	wcin_aicl_work;
 +	struct notifier_block	psy_nb;
-+	struct power_supply	*psy_wls;
-+	bool			wls_gone;	/* unbinding: no new lookups */
 +	bool			wcin_active;
 +	unsigned int		wcin_limit;	/* uA, what CNFG_10 holds now */
 +	unsigned int		wcin_target;	/* uA */

@@ -9,7 +9,8 @@ the mode interrupt on, the 17 V clamp, a 1.6 A limit, CMA modulation,
 the foreign object detection gains from the DT and the RPP scale. It
 services the chip's interrupt line (clear INT_A, then CLEAR_INT, while
 the line stays asserted) and reports the receiver as a wireless power
-supply with its output voltage, current, die temperature and the input
+supply with its output voltage, current, die temperature (IDT's conversion,
+not the degrees stock's comment claims) and the input
 current the charger may draw, stock's 800 mA for a basic pad.
 
 The chip runs from the pad, so it is only set up once the pad detect
@@ -22,8 +23,8 @@ Assisted-by: Claude:claude-opus-5-5
  .../bindings/power/supply/idt,p9320.yaml           |   86 +++
  drivers/power/supply/Kconfig                       |   10 
  drivers/power/supply/Makefile                      |    1 
- drivers/power/supply/p9320_charger.c               |  517 ++++++++++++++++++++
- 4 files changed, 614 insertions(+)
+ drivers/power/supply/p9320_charger.c               |  524 ++++++++++++++++++++
+ 4 files changed, 621 insertions(+)
 
 
 diff --git a/Documentation/devicetree/bindings/power/supply/idt,p9320.yaml b/Documentation/devicetree/bindings/power/supply/idt,p9320.yaml
@@ -153,10 +154,10 @@ index 04ee35e..b56238e 100644
  obj-$(CONFIG_CHARGER_MAX8997)	+= max8997_charger.o
 diff --git a/drivers/power/supply/p9320_charger.c b/drivers/power/supply/p9320_charger.c
 new file mode 100644
-index 0000000..2885b3c
+index 0000000..007a9bf
 --- /dev/null
 +++ b/drivers/power/supply/p9320_charger.c
-@@ -0,0 +1,517 @@
+@@ -0,0 +1,524 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * IDT (Renesas) P9320 Qi wireless power receiver
@@ -204,7 +205,7 @@ index 0000000..2885b3c
 +#define P9320_VOUT_SET			0x3e
 +#define P9320_ADC_VRECT			0x40	/* mV */
 +#define P9320_ADC_IOUT			0x44	/* mA */
-+#define P9320_ADC_DIE_TEMP		0x46	/* degrees C, 12 bit */
++#define P9320_ADC_DIE_TEMP		0x46	/* 12 bit, see p9320_get_property() */
 +#define P9320_OP_FREQ			0x48	/* kHz */
 +#define P9320_ILIM_SET			0x4c
 +#define P9320_CMD_L			0x4e
@@ -536,8 +537,15 @@ index 0000000..2885b3c
 +			ret = p9320_read16(chip, P9320_ADC_IOUT, &raw);
 +			val->intval = raw * 1000;
 +		} else {
++			/*
++			 * Not degrees, whatever stock's comment says (it reads
++			 * 2971 on a pad at room temperature): IDT's conversion
++			 * for its receivers, (raw - 1350) * 83 / 444 - 273 C,
++			 * here in tenths.
++			 */
 +			ret = p9320_read16(chip, P9320_ADC_DIE_TEMP, &raw);
-+			val->intval = (raw & 0xfff) * 10;
++			val->intval = ((int)(raw & 0xfff) - 1350) * 830 / 444 -
++				      2730;
 +		}
 +		break;
 +	default:
