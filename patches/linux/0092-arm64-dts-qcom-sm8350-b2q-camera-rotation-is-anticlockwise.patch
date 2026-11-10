@@ -1,0 +1,63 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] arm64: dts: qcom: sm8350-b2q: camera rotation is anticlockwise
+
+Stock's sensor-position-roll (90 for both rear cameras, 270 for the
+front one) is a clockwise angle, the same convention as Android's
+sensor orientation. The DT rotation property is anticlockwise: libcamera
+reads it as such, and its Android layer converts it with
+(360 - rotation) % 360. Taking the stock values as they are turned every
+camera upside down in plasma-camera. Use 270, 90 and 270.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts |   21 +++++++++++++++------
+ 1 file changed, 15 insertions(+), 6 deletions(-)
+
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+index 85b253a..086137a 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+@@ -2523,8 +2523,11 @@
+ 		vif-supply = <&s2mpb02_l8>;
+ 
+ 		orientation = <1>;
+-		/* Stock sensor-position-roll 90 (qcom,cam-sensor0) */
+-		rotation = <90>;
++		/*
++		 * Stock sensor-position-roll 90 (qcom,cam-sensor0) is clockwise, like
++		 * Android's sensor orientation; DT rotation is anticlockwise.
++		 */
++		rotation = <270>;
+ 
+ 		port {
+ 			cam_wide_ep: endpoint {
+@@ -2559,8 +2562,11 @@
+ 		vif-supply = <&s2mpb02_l9>;
+ 
+ 		orientation = <0>;
+-		/* Stock sensor-position-roll 270 (qcom,cam-sensor1) */
+-		rotation = <270>;
++		/*
++		 * Stock sensor-position-roll 270 (qcom,cam-sensor1) is clockwise, like
++		 * Android's sensor orientation; DT rotation is anticlockwise.
++		 */
++		rotation = <90>;
+ 
+ 		port {
+ 			cam_front_ep: endpoint {
+@@ -2599,8 +2605,11 @@
+ 		vif-supply = <&s2mpb02_l10>;
+ 
+ 		orientation = <1>;
+-		/* Stock sensor-position-roll 90 (qcom,cam-sensor2) */
+-		rotation = <90>;
++		/*
++		 * Stock sensor-position-roll 90 (qcom,cam-sensor2) is clockwise, like
++		 * Android's sensor orientation; DT rotation is anticlockwise.
++		 */
++		rotation = <270>;
+ 
+ 		port {
+ 			cam_uw_ep: endpoint {
