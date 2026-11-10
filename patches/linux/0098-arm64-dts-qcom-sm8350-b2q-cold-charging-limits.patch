@@ -1,0 +1,34 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] arm64: dts: qcom: sm8350-b2q: cold charging limits
+
+Stock's cool1, cool2, cool3 and cold steps on batt-thermal: below 18,
+15 and 5 C the charge current is capped at 2200, 650 and 200 mA, below
+0 C charging stops.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts |    9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+index 7727cab..49d6353 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+@@ -2273,6 +2273,15 @@
+ 		maxim,thermal-charge-current-limits-microamp =
+ 			<1900000 1050000 1000000 650000>;
+ 
++		/*
++		 * Cold, stock's cool1/cool2/cool3/cold (wired and wireless
++		 * alike): below 18, 15 and 5 C 2200, 650 and 200 mA, below
++		 * 0 C no charging.
++		 */
++		maxim,cold-thermal-zone = "batt-thermal";
++		maxim,cold-temperatures-millicelsius = <18000 15000 5000 0>;
++		maxim,cold-charge-current-limits-microamp = <2200000 650000 200000>;
++
+ 		/* BC1.2 port type from the USB-C block (MFD irq 3) */
+ 		maxim,pmic = <&max77705>;
+ 		interrupt-parent = <&max77705>;

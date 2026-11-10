@@ -1,0 +1,93 @@
+From 13fa8c42d07c482851bcf6e434015fb42d14bcdb Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Wed, 11 Nov 2026 03:03:37 +0900
+Subject: [PATCH] volumeosd: do not break while there is no default sink
+
+PreferredDevice.sink is null until PulseAudio is connected, and while a
+profile switch replaces the default sink. The popup then evaluated
+"!PreferredDevice.sink || (...)" to the boolean true and used it as the
+mute button's icon name and text, so the button showed a broken icon,
+and the volume label and slider threw on the null sink. Show the muted
+icon and 0 until there is a sink, and only write to one that exists.
+
+The applet's stream filter read the name of a stream's client, which a
+stream does not always have.
+---
+ .../qml/popups/volumeosd/AudioApplet.qml      |  2 +-
+ .../popups/volumeosd/VolumeChangedPopup.qml   | 22 +++++++++++--------
+ 2 files changed, 14 insertions(+), 10 deletions(-)
+
+diff --git a/components/mobileshell/qml/popups/volumeosd/AudioApplet.qml b/components/mobileshell/qml/popups/volumeosd/AudioApplet.qml
+index 30cedf637..a486c83a5 100644
+--- a/components/mobileshell/qml/popups/volumeosd/AudioApplet.qml
++++ b/components/mobileshell/qml/popups/volumeosd/AudioApplet.qml
+@@ -60,7 +60,7 @@ ColumnLayout {
+         id: paSinkInputFilterModel
+         filters: [
+             { role: "VirtualStream", value: false },
+-            { role: "Client", value: (client) => client.name !== "libcanberra" },
++            { role: "Client", value: (client) => !client || client.name !== "libcanberra" },
+         ]
+         sourceModel: paSinkInputModel
+     }
+diff --git a/components/mobileshell/qml/popups/volumeosd/VolumeChangedPopup.qml b/components/mobileshell/qml/popups/volumeosd/VolumeChangedPopup.qml
+index ab77a2793..e679ad674 100644
+--- a/components/mobileshell/qml/popups/volumeosd/VolumeChangedPopup.qml
++++ b/components/mobileshell/qml/popups/volumeosd/VolumeChangedPopup.qml
+@@ -154,11 +154,11 @@ Window {
+                 anchors.leftMargin: Kirigami.Units.smallSpacing * 2
+                 anchors.rightMargin: Kirigami.Units.smallSpacing
+ 
+-                property int volumePercent: PreferredDevice.sink.volume / PulseAudio.NormalVolume * 100.0
++                property int volumePercent: PreferredDevice.sink ? PreferredDevice.sink.volume / PulseAudio.NormalVolume * 100.0 : 0
+ 
+                 PlasmaComponents.ToolButton {
+-                    icon.name: !PreferredDevice.sink || (PreferredDevice.sink.muted ? "audio-volume-muted" : MobileShell.AudioInfo.icon)
+-                    text: !PreferredDevice.sink || (PreferredDevice.sink.muted ? i18n("Unmute") : i18n("Mute"))
++                    icon.name: !PreferredDevice.sink || PreferredDevice.sink.muted ? "audio-volume-muted" : MobileShell.AudioInfo.icon
++                    text: PreferredDevice.sink && PreferredDevice.sink.muted ? i18n("Unmute") : i18n("Mute")
+                     display: Controls.AbstractButton.IconOnly
+                     Layout.alignment: Qt.AlignVCenter
+                     Layout.preferredWidth: Kirigami.Units.iconSizes.medium
+@@ -167,7 +167,9 @@ Window {
+ 
+                     onClicked: {
+                         hideTimer.restart();
+-                        PreferredDevice.sink.muted = !PreferredDevice.sink.muted;
++                        if (PreferredDevice.sink) {
++                            PreferredDevice.sink.muted = !PreferredDevice.sink.muted;
++                        }
+                     }
+                 }
+ 
+@@ -183,12 +185,14 @@ Window {
+                     stepSize: to / (to / PulseAudio.NormalVolume * 100.0)
+ 
+                     volumeObject: PreferredDevice.sink
+-                    muted: PreferredDevice.sink.muted
+-                    value: PreferredDevice.sink.volume
++                    muted: PreferredDevice.sink ? PreferredDevice.sink.muted : true
++                    value: PreferredDevice.sink ? PreferredDevice.sink.volume : 0
+ 
+                     onMoved: {
+-                        PreferredDevice.sink.volume = value;
+-                        PreferredDevice.sink.muted = value === 0;
++                        if (PreferredDevice.sink) {
++                            PreferredDevice.sink.volume = value;
++                            PreferredDevice.sink.muted = value === 0;
++                        }
+                     }
+                     onPressedChanged: {
+                         if (pressed) {
+@@ -199,7 +203,7 @@ Window {
+                             // Otherwise it might be that the slider is at v10
+                             // whereas PA rejected the volume change and is
+                             // still at v15 (e.g.).
+-                            value = Qt.binding(() => PreferredDevice.sink.volume);
++                            value = Qt.binding(() => PreferredDevice.sink ? PreferredDevice.sink.volume : 0);
+                             hideTimer.restart();
+                         }
+                     }
+-- 
+2.56.0
+

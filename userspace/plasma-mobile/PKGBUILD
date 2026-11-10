@@ -6,7 +6,7 @@
 pkgname=plasma-mobile
 pkgver=6.8.2
 _dirver=$(echo $pkgver | cut -d. -f1-3)
-pkgrel=2
+pkgrel=3
 pkgdesc='Plasma shell for mobile devices'
 arch=(x86_64 aarch64)
 url='https://plasma-mobile.org/'
@@ -72,10 +72,12 @@ optdepends=(
   'plasma-settings: System settings'
 )
 source=("https://download.kde.org/stable/plasma/$_dirver/$pkgname-$pkgver.tar.xz"{,.sig}
-        0001-quicksettings-Never-use-a-negative-page-size.patch)
+        0001-quicksettings-Never-use-a-negative-page-size.patch
+        0002-volumeosd-do-not-break-while-there-is-no-default-sink.patch)
 sha256sums=('3b7abedd90131d3a79917c494a7443432b2619f495a8b1ae2acfac14a9f0121a'
             'SKIP'
-            '99f3e44cf2a681229eff10960432add22a3cf154390bfd8588ad01ea3d482e7f')
+            '99f3e44cf2a681229eff10960432add22a3cf154390bfd8588ad01ea3d482e7f'
+            'd3b5e09ba1cb9ca9ef1afee99364e01678b7e25db0edbd08861e68a31e2ccc61')
 validpgpkeys=(
   E0A3EB202F8E57528E13E72FD7574483BB57B18D # Jonathan Esk-Riddell <jr@jriddell.org>
   0AAC775BB6437A8D9AF7A3ACFE0784117FBCE11D # Bhushan Shah <bshah@kde.org>
@@ -85,6 +87,7 @@ validpgpkeys=(
 
 prepare() {
   patch -d $pkgname-$pkgver -p1 < 0001-quicksettings-Never-use-a-negative-page-size.patch
+  patch -d $pkgname-$pkgver -p1 < 0002-volumeosd-do-not-break-while-there-is-no-default-sink.patch
 }
 
 build() {

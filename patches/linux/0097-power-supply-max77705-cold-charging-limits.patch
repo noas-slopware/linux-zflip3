@@ -1,0 +1,253 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] power: supply: max77705: cold charging limits
+
+Charging lithium cells cold wears them, and stock's sec_battery steps the
+charge current down below 18, 15 and 5 C and stops below 0 C. Thermal
+zones only act on rising temperatures, so the charger reads the battery
+thermal zone itself while an input is online, as sec_battery's monitor
+does: on plug-in and once a minute after, nothing while on battery. The
+zone is looked up for each read. A level is left 1 C above its
+threshold. The cold cap combines with the thermal levels: the lower
+charge current wins, and either can stop charging.
+
+DT: maxim,cold-thermal-zone, maxim,cold-temperatures-millicelsius and
+maxim,cold-charge-current-limits-microamp.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../bindings/power/supply/maxim,max77705.yaml      |   20 ++++
+ drivers/power/supply/max77705_charger.c            |  107 +++++++++++++++++++-
+ include/linux/power/max77705_charger.h             |   11 ++
+ 3 files changed, 135 insertions(+), 3 deletions(-)
+
+
+diff --git a/Documentation/devicetree/bindings/power/supply/maxim,max77705.yaml b/Documentation/devicetree/bindings/power/supply/maxim,max77705.yaml
+index 9f58bf5..190aa71 100644
+--- a/Documentation/devicetree/bindings/power/supply/maxim,max77705.yaml
++++ b/Documentation/devicetree/bindings/power/supply/maxim,max77705.yaml
+@@ -136,6 +136,26 @@ properties:
+     minItems: 4
+     maxItems: 4
+ 
++  maxim,cold-thermal-zone:
++    $ref: /schemas/types.yaml#/definitions/string
++    description:
++      Thermal zone of the battery, read while charging for the cold limits.
++
++  maxim,cold-temperatures-millicelsius:
++    $ref: /schemas/types.yaml#/definitions/int32-array
++    description:
++      Falling thresholds of the four cold levels. Charging leaves a level
++      1 C above its threshold.
++    minItems: 4
++    maxItems: 4
++
++  maxim,cold-charge-current-limits-microamp:
++    description:
++      Charge current caps of the first three cold levels; the fourth stops
++      charging.
++    minItems: 3
++    maxItems: 3
++
+   reg:
+     maxItems: 1
+ 
+diff --git a/drivers/power/supply/max77705_charger.c b/drivers/power/supply/max77705_charger.c
+index 9c8e226..3e6352f 100644
+--- a/drivers/power/supply/max77705_charger.c
++++ b/drivers/power/supply/max77705_charger.c
+@@ -29,6 +29,7 @@ static const char *max77705_charger_manufacturer	= "Maxim Integrated";
+ 
+ static int max77705_charger_set_otg(struct max77705_charger_data *chg, bool enable);
+ static void max77705_otg_work(struct work_struct *work);
++static void max77705_cold_check(struct max77705_charger_data *chg);
+ 
+ /*
+  * How long a pin-only attach (CCPinStat set, CCStat still no connection,
+@@ -117,6 +118,7 @@ static irqreturn_t max77705_chgin_irq(int irq, void *irq_drv_data)
+ 	queue_work(chg->wqueue, &chg->chgin_work);
+ 	/* a cable arriving or leaving decides which input is in use */
+ 	queue_work(chg->wqueue, &chg->wcin_work);
++	max77705_cold_check(chg);
+ 
+ 	return IRQ_HANDLED;
+ }
+@@ -126,6 +128,7 @@ static irqreturn_t max77705_wcin_irq(int irq, void *irq_drv_data)
+ 	struct max77705_charger_data *chg = irq_drv_data;
+ 
+ 	queue_work(chg->wqueue, &chg->wcin_work);
++	max77705_cold_check(chg);
+ 
+ 	return IRQ_HANDLED;
+ }
+@@ -239,8 +242,13 @@ static unsigned int max77705_cap_charge(struct max77705_charger_data *chg,
+ 					unsigned int microamp)
+ {
+ 	struct max77705_cooling *cool = max77705_cooling_now(chg);
++	unsigned int cold = READ_ONCE(chg->cold_level);
+ 
+-	return max77705_cap(microamp, cool->charge_ua[READ_ONCE(cool->level)]);
++	microamp = max77705_cap(microamp, cool->charge_ua[READ_ONCE(cool->level)]);
++	if (cold && cold < MAX77705_COLD_LEVELS)
++		microamp = max77705_cap(microamp, chg->cold_charge_ua[cold - 1]);
++
++	return microamp;
+ }
+ 
+ static int max77705_set_input_current(struct max77705_charger_data *chg, int microamp)
+@@ -564,7 +572,8 @@ static int max77705_get_float_voltage(struct max77705_charger_data *chg,
+ static int max77705_update_charge_enable(struct max77705_charger_data *chg)
+ {
+ 	struct max77705_cooling *cool = max77705_cooling_now(chg);
+-	bool off = READ_ONCE(cool->level) >= MAX77705_THERMAL_LEVELS - 1;
++	bool off = READ_ONCE(cool->level) >= MAX77705_THERMAL_LEVELS - 1 ||
++		   READ_ONCE(chg->cold_level) >= MAX77705_COLD_LEVELS;
+ 	unsigned int mode;
+ 	int err;
+ 
+@@ -1015,6 +1024,93 @@ static int max77705_charger_cooling_init(struct max77705_charger_data *chg)
+ 	return 0;
+ }
+ 
++/*
++ * Cold limits, stock sec_battery's cool1/cool2/cool3/cold steps. Thermal
++ * zones only act on rising temperatures, so while an input is online the
++ * charger reads the battery zone itself, as sec_battery's monitor does: on
++ * plug-in and then once a minute. The zone is looked up for each read, so
++ * nothing outlives the sensor's driver. Back up a level 1 C above its
++ * threshold.
++ */
++#define MAX77705_COLD_PERIOD_MS		60000
++#define MAX77705_COLD_HYSTERESIS_MC	1000
++
++static void max77705_cold_work(struct work_struct *work)
++{
++	struct max77705_charger_data *chg =
++		container_of(work, struct max77705_charger_data, cold_work.work);
++	struct thermal_zone_device *tz;
++	unsigned int ok, level = 0;
++	int temp, i;
++
++	if (regmap_read(chg->regmap, MAX77705_CHG_REG_INT_OK, &ok))
++		return;
++
++	if (ok & (MAX77705_CHGIN_OK | MAX77705_WCIN_OK)) {
++		tz = thermal_zone_get_zone_by_name(chg->cold_zone);
++		if (IS_ERR(tz) || thermal_zone_get_temp(tz, &temp)) {
++			/* not there yet: try again later, change nothing */
++			level = chg->cold_level;
++		} else {
++			for (i = 0; i < MAX77705_COLD_LEVELS; i++) {
++				int limit = chg->cold_mc[i];
++
++				/* leaving a level needs the hysteresis */
++				if (chg->cold_level > i)
++					limit += MAX77705_COLD_HYSTERESIS_MC;
++				if (temp < limit)
++					level = i + 1;
++			}
++		}
++		queue_delayed_work(chg->wqueue, &chg->cold_work,
++				   msecs_to_jiffies(MAX77705_COLD_PERIOD_MS));
++	}
++
++	if (level == chg->cold_level)
++		return;
++
++	if (level)
++		dev_info(chg->dev, "battery cold (%d mC): level %u\n", temp, level);
++	else
++		dev_info(chg->dev, "battery no longer cold\n");
++	WRITE_ONCE(chg->cold_level, level);
++	queue_work(chg->wqueue, &chg->thermal_work);
++}
++
++/*
++ * maxim,cold-thermal-zone names the battery zone, and
++ * maxim,cold-temperatures-millicelsius the falling thresholds of the four
++ * levels; maxim,cold-charge-current-limits-microamp caps the first three,
++ * the fourth stops charging. Without them nothing is limited.
++ */
++static void max77705_charger_cold_init(struct max77705_charger_data *chg)
++{
++	struct device *dev = chg->dev;
++	u32 mc[MAX77705_COLD_LEVELS];
++	int i;
++
++	if (device_property_read_string(dev, "maxim,cold-thermal-zone",
++					&chg->cold_zone) ||
++	    device_property_read_u32_array(dev, "maxim,cold-temperatures-millicelsius",
++					   mc, MAX77705_COLD_LEVELS) ||
++	    device_property_read_u32_array(dev, "maxim,cold-charge-current-limits-microamp",
++					   chg->cold_charge_ua,
++					   MAX77705_COLD_LEVELS - 1)) {
++		chg->cold_zone = NULL;
++		return;
++	}
++
++	/* the DT cells are unsigned; thresholds are below 0 C as well */
++	for (i = 0; i < MAX77705_COLD_LEVELS; i++)
++		chg->cold_mc[i] = (s32)mc[i];
++}
++
++static void max77705_cold_check(struct max77705_charger_data *chg)
++{
++	if (chg->cold_zone)
++		mod_delayed_work(chg->wqueue, &chg->cold_work, 0);
++}
++
+ static int max77705_charger_parse_dt(struct max77705_charger_data *chg)
+ {
+ 	struct device *dev = chg->dev;
+@@ -2137,6 +2233,9 @@ static int max77705_charger_probe(struct i2c_client *i2c)
+ 	if (ret)
+ 		return ret;
+ 	ret = devm_work_autocancel(dev, &chg->thermal_work, max77705_thermal_work);
++	if (ret)
++		return ret;
++	ret = devm_delayed_work_autocancel(dev, &chg->cold_work, max77705_cold_work);
+ 	if (ret)
+ 		return ret;
+ 	ret = devm_work_autocancel(dev, &chg->wcin_work, max77705_wcin_work);
+@@ -2158,6 +2257,7 @@ static int max77705_charger_probe(struct i2c_client *i2c)
+ 	ret = max77705_charger_cooling_init(chg);
+ 	if (ret)
+ 		return ret;
++	max77705_charger_cold_init(chg);
+ 
+ 	ret = max77705_charger_setup_usbc(chg);
+ 	if (ret)
+@@ -2196,8 +2296,9 @@ static int max77705_charger_probe(struct i2c_client *i2c)
+ 	if (ret)
+ 		return dev_err_probe(dev, ret, "failed to enable charge\n");
+ 
+-	/* the phone may have booted on a pad */
++	/* the phone may have booted on a pad, or plugged in */
+ 	queue_work(chg->wqueue, &chg->wcin_work);
++	max77705_cold_check(chg);
+ 
+ 	return devm_add_action_or_reset(dev, max77705_charger_disable, chg);
+ }
+diff --git a/include/linux/power/max77705_charger.h b/include/linux/power/max77705_charger.h
+index c670e8b..7a148c6 100644
+--- a/include/linux/power/max77705_charger.h
++++ b/include/linux/power/max77705_charger.h
+@@ -347,6 +347,17 @@ struct max77705_charger_data {
+ 	unsigned int		req_input_ua;
+ 	unsigned int		req_charge_ua;
+ 	bool			user_inhibit;
++
++	/*
++	 * Cold limits: below each of cold_mc[] (falling) the charge current
++	 * is capped at cold_charge_ua[], below the last charging stops.
++	 */
++#define MAX77705_COLD_LEVELS		4
++	struct delayed_work	cold_work;
++	const char		*cold_zone;
++	int			cold_mc[MAX77705_COLD_LEVELS];
++	u32			cold_charge_ua[MAX77705_COLD_LEVELS - 1];
++	unsigned int		cold_level;	/* 0: not cold */
+ };
+ 
+ #endif /* __MAX77705_CHARGER_H */
