@@ -1,0 +1,1489 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] media: i2c: add a driver for the Sony IMX563
+
+The Sony IMX563 is the rear wide camera sensor of the Samsung Galaxy Z
+Flip3 (SM-F711N). It sends 10-bit Bayer data over a MIPI CSI-2 C-PHY
+link of three trios and is controlled over I2C at 0x10, with the chip
+ID 0x0563 at 0x0016.
+
+No datasheet was available. The init list and the mode lists are copied
+from the sensor module that the phone's stock camera stack loads
+(com.samsung.sensormodule.0_sony_imx563_DV0_DV1; the DV2 module has the
+same sensor data), in its order and with its values; only comments were
+added. The modes are the stock ones at 1896 Msps per trio:
+
+- 4000x3000, 30 fps (stock mode 0)
+- 4000x2252, 30 fps (stock mode 1) or 60 fps (stock mode 2)
+
+Stock's modes 1 and 2 have the same size and the same list except for
+the frame length (8002 or 4000 lines) and the initial exposure, so they
+are one mode here: the vertical blanking control sets the frame length,
+from stock's 60 fps value up. The default is stock's 30 fps.
+
+Both modes read out the full 4032 pixel width and crop it to 4000
+columns digitally, starting at column 16. 4000x3000 reads rows 12 to
+3011; 4000x2252 reads rows 384 to 2639 and crops from row 386. The
+crop selection reports these windows. The stock modes at 2297.6 and
+2944 Msps are left out, and so is stock's mode 8, whose frame length
+does not match its frame rate.
+
+The OP PLL in every list gives 19.2 MHz / 2 * 395 / 2 = 1896 Msps per
+trio, the base entry of the stock kernel's adaptive MIPI table for this
+sensor. The link frequency is half the symbol rate, 948 MHz, and the
+endpoint must list it.
+
+The pixel rate is 4121.6 Mpixel/s: the VT PLL is 19.2 MHz / 3 * 322 =
+2060.8 MHz in every list, and line length times frame length times
+frame rate gives twice that in every stock mode. That is the rate that
+makes line length / pixel rate the line time. The CSI-2 output rate is
+lower, 1296.864 Mpixel/s by stock's figure.
+
+The controls are exposure (10 lines up to frame length - 96), analogue
+gain (codes 0 to 896, gain = 1024 / (1024 - code), up to 8x, as stock's
+sensor library computes it), digital gain (Q8, 0x100 to 0xfd7, stock's
+15.84x cap), vblank, read-only hblank, pixel rate and link frequency,
+and the SMIA/CCS test pattern at 0x0600 with its four colour registers.
+Stock writes 0xb000 = 0 with every pattern change, and so does the
+driver. There are no flip controls: stock never writes the orientation
+register.
+
+The lists leave the HDR mode (0x0220) off, so the short exposure and
+gain registers they seed are not driven. Stock describes a second
+stream on virtual channel 1 for these modes, which looks like PDAF data;
+only the image on virtual channel 0 is described.
+
+The media bus code is SRGGB10. The stock module gives CFA code 3 for
+every mode, as the IMX258 module does, and mainline's imx258 driver
+reports the unflipped IMX258 as RGGB. Code 2 in the IMX374 module was
+confirmed as GRBG on the phone. All crop offsets are even, so the order
+is the same in both modes.
+
+Power-up follows stock: an extra 1.8 V rail (stock's cam_v_custom1),
+VANA, VDIG and VIF 1 ms apart, XCLR released, MCLK 2 ms later, then
+18 ms before the first access. The binding calls the extra rail
+vcustom. The init list programs EXCK for 19.2 MHz, so probe rejects any
+other clock rate. The endpoint is parsed as C-PHY, so one that says
+D-PHY is refused.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../bindings/media/i2c/sony,imx563.yaml       |  113 ++
+ drivers/media/i2c/Kconfig                     |   10 +
+ drivers/media/i2c/Makefile                    |    1 +
+ drivers/media/i2c/imx563.c                    | 1253 +++++++++++++++++
+ 4 files changed, 1377 insertions(+)
+ create mode 100644 Documentation/devicetree/bindings/media/i2c/sony,imx563.yaml
+ create mode 100644 drivers/media/i2c/imx563.c
+
+diff --git a/Documentation/devicetree/bindings/media/i2c/sony,imx563.yaml b/Documentation/devicetree/bindings/media/i2c/sony,imx563.yaml
+new file mode 100644
+index 0000000..7786cfe
+--- /dev/null
++++ b/Documentation/devicetree/bindings/media/i2c/sony,imx563.yaml
+@@ -0,0 +1,113 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/media/i2c/sony,imx563.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: Sony IMX563 CMOS Digital Image Sensor
++
++maintainers:
++  - Noa Himesaka <himesaka@noa.codes>
++
++description:
++  IMX563 is a CMOS active pixel image sensor with a 10-bit RAW Bayer output.
++  It is programmed through I2C and sends image data over a three-trio MIPI
++  CSI-2 C-PHY interface.
++
++$ref: /schemas/media/video-interface-devices.yaml#
++
++properties:
++  compatible:
++    const: sony,imx563
++
++  reg:
++    maxItems: 1
++
++  clocks:
++    description: Input clock (INCK), 19.2 MHz.
++    maxItems: 1
++
++  reset-gpios:
++    description: Reference to the GPIO connected to the XCLR pin, if any.
++    maxItems: 1
++
++  vana-supply:
++    description: Analogue voltage (VANA) supply, 2.8 V.
++
++  vdig-supply:
++    description: Digital core voltage (VDIG) supply, 1.1 V.
++
++  vif-supply:
++    description: Interface voltage (VIF) supply, 1.8 V.
++
++  vcustom-supply:
++    description:
++      An additional 1.8 V supply on the camera module, which the Samsung
++      Galaxy Z Flip3 vendor driver calls cam_v_custom1. Which pins it feeds
++      is not documented. It is enabled first, before VANA, VDIG and VIF, and
++      disabled last.
++
++  port:
++    $ref: /schemas/graph.yaml#/$defs/port-base
++    additionalProperties: false
++
++    properties:
++      endpoint:
++        $ref: /schemas/media/video-interfaces.yaml#
++        unevaluatedProperties: false
++
++        properties:
++          bus-type:
++            const: 1 # MEDIA_BUS_TYPE_CSI2_CPHY
++
++          data-lanes:
++            items:
++              - const: 1
++              - const: 2
++              - const: 3
++
++          link-frequencies: true
++
++        required:
++          - bus-type
++          - data-lanes
++          - link-frequencies
++
++required:
++  - compatible
++  - reg
++  - clocks
++  - port
++
++unevaluatedProperties: false
++
++examples:
++  - |
++    #include <dt-bindings/gpio/gpio.h>
++    #include <dt-bindings/media/video-interfaces.h>
++
++    i2c {
++        #address-cells = <1>;
++        #size-cells = <0>;
++
++        camera@10 {
++            compatible = "sony,imx563";
++            reg = <0x10>;
++            clocks = <&imx563_clk>;
++            reset-gpios = <&gpio 136 GPIO_ACTIVE_LOW>;
++            vana-supply = <&vana>;
++            vdig-supply = <&vdig>;
++            vif-supply = <&vif>;
++            vcustom-supply = <&vcustom>;
++            orientation = <1>;
++
++            port {
++                endpoint {
++                    remote-endpoint = <&csiphy0_ep>;
++                    bus-type = <MEDIA_BUS_TYPE_CSI2_CPHY>;
++                    data-lanes = <1 2 3>;
++                    link-frequencies = /bits/ 64 <948000000>;
++                };
++            };
++        };
++    };
+diff --git a/drivers/media/i2c/Kconfig b/drivers/media/i2c/Kconfig
+index 18ac3a6..814ff69 100644
+--- a/drivers/media/i2c/Kconfig
++++ b/drivers/media/i2c/Kconfig
+@@ -309,6 +309,16 @@ config VIDEO_IMX471
+ 	  To compile this driver as a module, choose M here: the
+ 	  module will be called imx471.
+ 
++config VIDEO_IMX563
++	tristate "Sony IMX563 sensor support"
++	select V4L2_CCI_I2C
++	help
++	  This is a Video4Linux2 sensor driver for the Sony
++	  IMX563 camera.
++
++	  To compile this driver as a module, choose M here: the
++	  module will be called imx563.
++
+ config VIDEO_IMX678
+ 	tristate "Sony IMX678 sensor support"
+ 	depends on GPIOLIB
+diff --git a/drivers/media/i2c/Makefile b/drivers/media/i2c/Makefile
+index 4c19c87..f58fc64 100644
+--- a/drivers/media/i2c/Makefile
++++ b/drivers/media/i2c/Makefile
+@@ -62,6 +62,7 @@ obj-$(CONFIG_VIDEO_IMX355) += imx355.o
+ obj-$(CONFIG_VIDEO_IMX374) += imx374.o
+ obj-$(CONFIG_VIDEO_IMX412) += imx412.o
+ obj-$(CONFIG_VIDEO_IMX415) += imx415.o
++obj-$(CONFIG_VIDEO_IMX563) += imx563.o
+ obj-$(CONFIG_VIDEO_IMX678) += imx678.o
+ obj-$(CONFIG_VIDEO_IMX471) += imx471.o
+ obj-$(CONFIG_VIDEO_IR_I2C) += ir-kbd-i2c.o
+diff --git a/drivers/media/i2c/imx563.c b/drivers/media/i2c/imx563.c
+new file mode 100644
+index 0000000..7dbbb15
+--- /dev/null
++++ b/drivers/media/i2c/imx563.c
+@@ -0,0 +1,1253 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Sony IMX563 image sensor driver
++ *
++ * The register lists come from the IMX563 sensor module that the Samsung
++ * Galaxy Z Flip3 (SM-F711N) ships for its rear wide camera. No datasheet
++ * was used; registers outside the SMIA/CCS standard set are written as the
++ * stock lists write them, without a name.
++ *
++ * Structure follows the imx374 driver.
++ */
++
++#include <linux/clk.h>
++#include <linux/delay.h>
++#include <linux/gpio/consumer.h>
++#include <linux/i2c.h>
++#include <linux/module.h>
++#include <linux/pm_runtime.h>
++#include <linux/regulator/consumer.h>
++
++#include <media/v4l2-cci.h>
++#include <media/v4l2-ctrls.h>
++#include <media/v4l2-device.h>
++#include <media/v4l2-fwnode.h>
++#include <media/v4l2-mediabus.h>
++
++#define IMX563_REG_CHIP_ID		CCI_REG16(0x0016)
++#define IMX563_CHIP_ID			0x0563
++
++#define IMX563_REG_MODE_SELECT		CCI_REG8(0x0100)
++#define IMX563_MODE_STANDBY		0x00
++#define IMX563_MODE_STREAMING		0x01
++
++#define IMX563_REG_FRM_LENGTH_LINES	CCI_REG16(0x0340)
++
++/*
++ * Exposure in lines. The stock module limits it to 10 lines minimum, to
++ * frame length - 96 and to 65436 lines in total.
++ */
++#define IMX563_REG_EXPOSURE		CCI_REG16(0x0202)
++#define IMX563_EXPOSURE_MIN		10
++#define IMX563_EXPOSURE_STEP		1
++#define IMX563_EXPOSURE_OFFSET		96
++#define IMX563_EXPOSURE_MAX		65436
++#define IMX563_FLL_MAX			(IMX563_EXPOSURE_MAX + IMX563_EXPOSURE_OFFSET)
++
++/* Analogue gain code: gain = 1024 / (1024 - code), up to 8x */
++#define IMX563_REG_ANALOG_GAIN		CCI_REG16(0x0204)
++#define IMX563_ANA_GAIN_MIN		0
++#define IMX563_ANA_GAIN_MAX		896
++#define IMX563_ANA_GAIN_STEP		1
++#define IMX563_ANA_GAIN_DEFAULT		0
++
++/*
++ * Digital gain, Q8 (0x100 = 1.0x). Stock's sensor library caps it at
++ * 15.84x.
++ */
++#define IMX563_REG_DIGITAL_GAIN		CCI_REG16(0x020e)
++#define IMX563_DGTL_GAIN_MIN		0x0100
++#define IMX563_DGTL_GAIN_MAX		0x0fd7
++#define IMX563_DGTL_GAIN_STEP		1
++#define IMX563_DGTL_GAIN_DEFAULT	0x0100
++
++/* Test pattern (SMIA/CCS layout) */
++#define IMX563_REG_TP_B000		CCI_REG8(0xb000)
++#define IMX563_REG_TEST_PATTERN		CCI_REG16(0x0600)
++#define IMX563_REG_TESTP_RED		CCI_REG16(0x0602)
++#define IMX563_REG_TESTP_GREENR		CCI_REG16(0x0604)
++#define IMX563_REG_TESTP_BLUE		CCI_REG16(0x0606)
++#define IMX563_REG_TESTP_GREENB		CCI_REG16(0x0608)
++#define IMX563_TESTP_COLOUR_MIN		0
++#define IMX563_TESTP_COLOUR_MAX		0x03ff
++#define IMX563_TESTP_COLOUR_STEP	1
++
++/* The init list programs EXCK for a 19.2 MHz input clock (0x0136) */
++#define IMX563_XCLK_FREQ		19200000
++
++/*
++ * Pixel rate for the timing registers. The VT PLL is the same in every
++ * mode (19.2 MHz / 3 * 322 = 2060.8 MHz), and line length x frame length
++ * x frame rate comes to twice that in every stock mode. This is the rate
++ * that makes line length / pixel rate the line time.
++ *
++ * The CSI-2 output rate is lower: stock gives 1296.864 Mpixel/s for these
++ * modes, which is what three trios at 1896 Msps carry in RAW10.
++ */
++#define IMX563_PIXEL_RATE		4121600000LL
++
++/*
++ * The pixel array, as the stock module gives it. The stock modes read out
++ * the full width (x 0 to 4031) and crop it to 4000 columns digitally.
++ */
++#define IMX563_NATIVE_WIDTH		4032U
++#define IMX563_NATIVE_HEIGHT		3024U
++
++/* Three C-PHY trios */
++#define IMX563_DATA_LANES		3
++
++/*
++ * OP PLL: 19.2 MHz / 0x030d * 0x030e:0x030f / 0x030b = 19.2 / 2 * 395 / 2
++ * = 1896 Msps per trio, the base entry of the stock kernel's adaptive MIPI
++ * table for this sensor. On C-PHY the link frequency is half the symbol
++ * rate.
++ */
++static const s64 imx563_link_freq_menu[] = {
++	948000000,
++};
++
++static const char * const imx563_test_pattern_menu[] = {
++	"Disabled",
++	"Solid Colour",
++	"Colour Bars",
++	"Colour Bars With Fade to Grey",
++	"Pseudorandom Sequence (PN9)",
++};
++
++/* In stock's power-up order */
++static const char * const imx563_supply_name[] = {
++	"vcustom",	/* Extra 1.8 V rail, stock's cam_v_custom1 */
++	"vana",		/* Analogue (2.8 V) */
++	"vdig",		/* Digital core (1.1 V) */
++	"vif",		/* Interface (1.8 V) */
++};
++
++#define IMX563_NUM_SUPPLIES ARRAY_SIZE(imx563_supply_name)
++
++/*
++ * The stock module has no flip settings, so the sensor runs unflipped.
++ * Its CFA code for every mode is 3, the code the IMX258 module also gives,
++ * and mainline reports the unflipped IMX258 as RGGB.
++ */
++#define IMX563_MBUS_CODE		MEDIA_BUS_FMT_SRGGB10_1X10
++
++struct imx563_mode {
++	unsigned int width;
++	unsigned int height;
++
++	/* Analogue and digital crop, in native pixel array coordinates */
++	struct v4l2_rect crop;
++
++	/* Line length as the mode list sets it */
++	unsigned int llp;
++
++	/*
++	 * Frame length: the shortest that stock runs the mode list with, and
++	 * the one the list sets.
++	 */
++	unsigned int fll_min;
++	unsigned int fll_def;
++
++	/* Coarse integration time as the mode list sets it */
++	unsigned int exposure_def;
++
++	const struct cci_reg_sequence *regs;
++	unsigned int num_regs;
++};
++
++/*
++ * Register lists, verbatim from the stock module, in stock's order.
++ *
++ * imx563_init_regs is stock's init list, written before any mode list.
++ * It sets the 19.2 MHz EXCK and C-PHY signalling, then a run of
++ * 0xf800-0xf8c3 writes that are left alone.
++ *
++ * Stock has three modes at 1896 Msps, all with the same 95 addresses in
++ * the same order. The 4000x3000 list is stock's mode 0 (30 fps). The
++ * 4000x2252 list is stock's mode 1 (30 fps). Stock's mode 2 (60 fps) is
++ * the same list with a frame length of 4000 lines and the coarse
++ * integration time at 4000 - 96; nothing else differs. Here it is the
++ * 4000x2252 mode with the shortest vertical blanking.
++ *
++ * For each of these modes stock also describes a second RAW10 stream on
++ * virtual channel 1, a quarter of the image height, which looks like PDAF
++ * data. Only the image on virtual channel 0 is described here.
++ *
++ * The HDR mode (0x0220) is off in all three lists, so the short exposure
++ * and gain registers they seed are not driven by any control.
++ */
++
++static const struct cci_reg_sequence imx563_init_regs[] = {
++	{ CCI_REG8(0x0136), 0x13 },	/* EXCK frequency: 19.20 MHz */
++	{ CCI_REG8(0x0137), 0x33 },
++	{ CCI_REG8(0x33f0), 0x03 },
++	{ CCI_REG8(0x33f1), 0x01 },
++	{ CCI_REG8(0x0111), 0x03 },	/* CSI signalling mode: C-PHY */
++	{ CCI_REG8(0xf800), 0x9b },
++	{ CCI_REG8(0xf801), 0x9b },
++	{ CCI_REG8(0xf802), 0xea },
++	{ CCI_REG8(0xf803), 0xdb },
++	{ CCI_REG8(0xf804), 0x55 },
++	{ CCI_REG8(0xf805), 0x48 },
++	{ CCI_REG8(0xf806), 0x6f },
++	{ CCI_REG8(0xf807), 0x00 },
++	{ CCI_REG8(0xf808), 0x3c },
++	{ CCI_REG8(0xf809), 0x91 },
++	{ CCI_REG8(0xf80a), 0x17 },
++	{ CCI_REG8(0xf80b), 0xfa },
++	{ CCI_REG8(0xf80c), 0x55 },
++	{ CCI_REG8(0xf80d), 0x80 },
++	{ CCI_REG8(0xf80e), 0x35 },
++	{ CCI_REG8(0xf80f), 0x00 },
++	{ CCI_REG8(0xf810), 0x1a },
++	{ CCI_REG8(0xf811), 0xcb },
++	{ CCI_REG8(0xf812), 0x17 },
++	{ CCI_REG8(0xf813), 0xfa },
++	{ CCI_REG8(0xf884), 0x4f },
++	{ CCI_REG8(0xf885), 0x86 },
++	{ CCI_REG8(0xf886), 0xac },
++	{ CCI_REG8(0xf887), 0x17 },
++	{ CCI_REG8(0xf888), 0xd0 },
++	{ CCI_REG8(0xf889), 0x18 },
++	{ CCI_REG8(0xf88a), 0x0b },
++	{ CCI_REG8(0xf88b), 0x00 },
++	{ CCI_REG8(0xf88c), 0xf6 },
++	{ CCI_REG8(0xf88d), 0x00 },
++	{ CCI_REG8(0xf88e), 0x03 },
++	{ CCI_REG8(0xf88f), 0x10 },
++	{ CCI_REG8(0xf890), 0xbc },
++	{ CCI_REG8(0xf891), 0x03 },
++	{ CCI_REG8(0xf892), 0xfa },
++	{ CCI_REG8(0xf893), 0xe8 },
++	{ CCI_REG8(0xf894), 0x98 },
++	{ CCI_REG8(0xf895), 0x2c },
++	{ CCI_REG8(0xf896), 0xa8 },
++	{ CCI_REG8(0xf897), 0x17 },
++	{ CCI_REG8(0xf898), 0xa0 },
++	{ CCI_REG8(0xf899), 0x05 },
++	{ CCI_REG8(0xf89a), 0xd0 },
++	{ CCI_REG8(0xf89b), 0x18 },
++	{ CCI_REG8(0xf89c), 0x0b },
++	{ CCI_REG8(0xf89d), 0x00 },
++	{ CCI_REG8(0xf89e), 0xf0 },
++	{ CCI_REG8(0xf89f), 0x00 },
++	{ CCI_REG8(0xf8a0), 0x03 },
++	{ CCI_REG8(0xf8a1), 0x10 },
++	{ CCI_REG8(0xf8a2), 0xfc },
++	{ CCI_REG8(0xf8a3), 0x41 },
++	{ CCI_REG8(0xf8a4), 0x01 },
++	{ CCI_REG8(0xf8a5), 0x00 },
++	{ CCI_REG8(0xf8a6), 0x24 },
++	{ CCI_REG8(0xf8a7), 0x10 },
++	{ CCI_REG8(0xf8a8), 0x90 },
++	{ CCI_REG8(0xf8a9), 0x1a },
++	{ CCI_REG8(0xf8aa), 0xd1 },
++	{ CCI_REG8(0xf8ab), 0x20 },
++	{ CCI_REG8(0xf8ac), 0xd3 },
++	{ CCI_REG8(0xf8ad), 0x48 },
++	{ CCI_REG8(0xf8ae), 0x1e },
++	{ CCI_REG8(0xf8af), 0x11 },
++	{ CCI_REG8(0xf8b0), 0x50 },
++	{ CCI_REG8(0xf8b1), 0x82 },
++	{ CCI_REG8(0xf8b2), 0x51 },
++	{ CCI_REG8(0xf8b3), 0x03 },
++	{ CCI_REG8(0xf8b4), 0x28 },
++	{ CCI_REG8(0xf8b5), 0x01 },
++	{ CCI_REG8(0xf8b6), 0xa4 },
++	{ CCI_REG8(0xf8b7), 0x31 },
++	{ CCI_REG8(0xf8b8), 0xa5 },
++	{ CCI_REG8(0xf8b9), 0x21 },
++	{ CCI_REG8(0xf8ba), 0x09 },
++	{ CCI_REG8(0xf8bb), 0x10 },
++	{ CCI_REG8(0xf8bc), 0xd1 },
++	{ CCI_REG8(0xf8bd), 0x20 },
++	{ CCI_REG8(0xf8be), 0xe4 },
++	{ CCI_REG8(0xf8bf), 0x1a },
++	{ CCI_REG8(0xf8c0), 0x1f },
++	{ CCI_REG8(0xf8c1), 0x10 },
++	{ CCI_REG8(0xf8c2), 0xa0 },
++	{ CCI_REG8(0xf8c3), 0x70 },
++	{ CCI_REG8(0x9391), 0x02 },
++	{ CCI_REG8(0x9392), 0x03 },
++	{ CCI_REG8(0x4339), 0x01 },
++	{ CCI_REG8(0xe0c1), 0x01 },
++	{ CCI_REG8(0x9f00), 0x01 },
++	{ CCI_REG8(0x9f04), 0x02 },
++	{ CCI_REG8(0x9f05), 0x3f },
++	{ CCI_REG8(0xbc40), 0x03 },
++	{ CCI_REG8(0xbc41), 0x03 },
++	{ CCI_REG8(0xbc4c), 0x03 },
++	{ CCI_REG8(0x3058), 0x00 },
++};
++
++static const struct cci_reg_sequence imx563_4000x3000_regs[] = {
++	{ CCI_REG8(0x0112), 0x0a },	/* CSI data format: RAW10 in, RAW10 out */
++	{ CCI_REG8(0x0113), 0x0a },
++	{ CCI_REG8(0x0114), 0x02 },	/* CSI lane mode: 3 trios */
++	{ CCI_REG8(0x0220), 0x00 },	/* HDR mode: off */
++	{ CCI_REG8(0x0221), 0x11 },
++	{ CCI_REG8(0x0222), 0x01 },
++	{ CCI_REG8(0x0340), 0x1f },	/* frame length lines */
++	{ CCI_REG8(0x0341), 0x42 },
++	{ CCI_REG8(0x0342), 0x43 },	/* line length pck */
++	{ CCI_REG8(0x0343), 0x10 },
++	{ CCI_REG8(0x0900), 0x00 },	/* binning mode */
++	{ CCI_REG8(0x0901), 0x11 },	/* binning type */
++	{ CCI_REG8(0x0902), 0x00 },	/* binning weighting */
++	{ CCI_REG8(0x3004), 0x03 },
++	{ CCI_REG8(0x30a5), 0x00 },
++	{ CCI_REG8(0x30a8), 0x06 },
++	{ CCI_REG8(0x3200), 0x01 },
++	{ CCI_REG8(0x4060), 0x00 },
++	{ CCI_REG8(0x4061), 0x00 },
++	{ CCI_REG8(0x0344), 0x00 },	/* x addr start */
++	{ CCI_REG8(0x0345), 0x00 },
++	{ CCI_REG8(0x0346), 0x00 },	/* y addr start */
++	{ CCI_REG8(0x0347), 0x0c },
++	{ CCI_REG8(0x0348), 0x0f },	/* x addr end */
++	{ CCI_REG8(0x0349), 0xbf },
++	{ CCI_REG8(0x034a), 0x0b },	/* y addr end */
++	{ CCI_REG8(0x034b), 0xc3 },
++	{ CCI_REG8(0x034c), 0x0f },	/* x output size */
++	{ CCI_REG8(0x034d), 0xa0 },
++	{ CCI_REG8(0x034e), 0x0b },	/* y output size */
++	{ CCI_REG8(0x034f), 0xb8 },
++	{ CCI_REG8(0x0408), 0x00 },	/* digital crop x offset */
++	{ CCI_REG8(0x0409), 0x10 },
++	{ CCI_REG8(0x040a), 0x00 },	/* digital crop y offset */
++	{ CCI_REG8(0x040b), 0x00 },
++	{ CCI_REG8(0x040c), 0x0f },	/* digital crop width */
++	{ CCI_REG8(0x040d), 0xa0 },
++	{ CCI_REG8(0x040e), 0x0b },	/* digital crop height */
++	{ CCI_REG8(0x040f), 0xb8 },
++	{ CCI_REG8(0x0303), 0x02 },	/* vt sys clk div */
++	{ CCI_REG8(0x0305), 0x03 },	/* pre pll clk div */
++	{ CCI_REG8(0x0306), 0x01 },	/* pll multiplier */
++	{ CCI_REG8(0x0307), 0x42 },
++	{ CCI_REG8(0x030b), 0x02 },	/* op sys clk div */
++	{ CCI_REG8(0x030d), 0x02 },	/* op pre pll clk div */
++	{ CCI_REG8(0x030e), 0x01 },	/* op pll multiplier */
++	{ CCI_REG8(0x030f), 0x8b },
++	{ CCI_REG8(0x0310), 0x01 },	/* pll mode */
++	{ CCI_REG8(0x3240), 0x00 },
++	{ CCI_REG8(0x0860), 0x80 },	/* C-PHY TX EPD settings */
++	{ CCI_REG8(0x0861), 0x28 },
++	{ CCI_REG8(0x0862), 0x00 },
++	{ CCI_REG8(0x0863), 0x28 },
++	{ CCI_REG8(0x40b8), 0x03 },
++	{ CCI_REG8(0x40b9), 0x28 },
++	{ CCI_REG8(0x40bc), 0x00 },
++	{ CCI_REG8(0x40bd), 0x78 },
++	{ CCI_REG8(0x40be), 0x00 },
++	{ CCI_REG8(0x40bf), 0x78 },
++	{ CCI_REG8(0x7500), 0x02 },
++	{ CCI_REG8(0x57aa), 0x06 },
++	{ CCI_REG8(0x57ab), 0x5a },
++	{ CCI_REG8(0x5620), 0x01 },
++	{ CCI_REG8(0x5621), 0xac },
++	{ CCI_REG8(0x57a6), 0x00 },
++	{ CCI_REG8(0x57a7), 0x00 },
++	{ CCI_REG8(0x6d41), 0x13 },
++	{ CCI_REG8(0x6d4c), 0x13 },
++	{ CCI_REG8(0x6d57), 0x13 },
++	{ CCI_REG8(0x6d62), 0x13 },
++	{ CCI_REG8(0x6a51), 0x04 },
++	{ CCI_REG8(0x6a54), 0x04 },
++	{ CCI_REG8(0x6a55), 0x05 },
++	{ CCI_REG8(0x6a72), 0x05 },
++	{ CCI_REG8(0x6a75), 0x05 },
++	{ CCI_REG8(0x6a76), 0x0a },
++	{ CCI_REG8(0x6a7d), 0x01 },
++	{ CCI_REG8(0x6a80), 0x01 },
++	{ CCI_REG8(0x6a81), 0x00 },
++	{ CCI_REG8(0x6a9e), 0x02 },
++	{ CCI_REG8(0x6aa1), 0x02 },
++	{ CCI_REG8(0x6aa2), 0x03 },
++	{ CCI_REG8(0x0202), 0x1e },	/* coarse integration time */
++	{ CCI_REG8(0x0203), 0xe2 },
++	{ CCI_REG8(0x0224), 0x01 },	/* short integration time */
++	{ CCI_REG8(0x0225), 0xf4 },
++	{ CCI_REG8(0x0204), 0x00 },	/* analogue gain */
++	{ CCI_REG8(0x0205), 0x00 },
++	{ CCI_REG8(0x020e), 0x01 },	/* digital gain */
++	{ CCI_REG8(0x020f), 0x00 },
++	{ CCI_REG8(0x0216), 0x00 },	/* short analogue gain */
++	{ CCI_REG8(0x0217), 0x00 },
++	{ CCI_REG8(0x0218), 0x01 },	/* short digital gain */
++	{ CCI_REG8(0x0219), 0x00 },
++	{ CCI_REG8(0x9390), 0x00 },
++};
++
++static const struct cci_reg_sequence imx563_4000x2252_regs[] = {
++	{ CCI_REG8(0x0112), 0x0a },	/* CSI data format: RAW10 in, RAW10 out */
++	{ CCI_REG8(0x0113), 0x0a },
++	{ CCI_REG8(0x0114), 0x02 },	/* CSI lane mode: 3 trios */
++	{ CCI_REG8(0x0220), 0x00 },	/* HDR mode: off */
++	{ CCI_REG8(0x0221), 0x11 },
++	{ CCI_REG8(0x0222), 0x01 },
++	{ CCI_REG8(0x0340), 0x1f },	/* frame length lines */
++	{ CCI_REG8(0x0341), 0x42 },
++	{ CCI_REG8(0x0342), 0x43 },	/* line length pck */
++	{ CCI_REG8(0x0343), 0x10 },
++	{ CCI_REG8(0x0900), 0x00 },	/* binning mode */
++	{ CCI_REG8(0x0901), 0x11 },	/* binning type */
++	{ CCI_REG8(0x0902), 0x00 },	/* binning weighting */
++	{ CCI_REG8(0x3004), 0x03 },
++	{ CCI_REG8(0x30a5), 0x00 },
++	{ CCI_REG8(0x30a8), 0x06 },
++	{ CCI_REG8(0x3200), 0x01 },
++	{ CCI_REG8(0x4060), 0x00 },
++	{ CCI_REG8(0x4061), 0x00 },
++	{ CCI_REG8(0x0344), 0x00 },	/* x addr start */
++	{ CCI_REG8(0x0345), 0x00 },
++	{ CCI_REG8(0x0346), 0x01 },	/* y addr start */
++	{ CCI_REG8(0x0347), 0x80 },
++	{ CCI_REG8(0x0348), 0x0f },	/* x addr end */
++	{ CCI_REG8(0x0349), 0xbf },
++	{ CCI_REG8(0x034a), 0x0a },	/* y addr end */
++	{ CCI_REG8(0x034b), 0x4f },
++	{ CCI_REG8(0x034c), 0x0f },	/* x output size */
++	{ CCI_REG8(0x034d), 0xa0 },
++	{ CCI_REG8(0x034e), 0x08 },	/* y output size */
++	{ CCI_REG8(0x034f), 0xcc },
++	{ CCI_REG8(0x0408), 0x00 },	/* digital crop x offset */
++	{ CCI_REG8(0x0409), 0x10 },
++	{ CCI_REG8(0x040a), 0x00 },	/* digital crop y offset */
++	{ CCI_REG8(0x040b), 0x02 },
++	{ CCI_REG8(0x040c), 0x0f },	/* digital crop width */
++	{ CCI_REG8(0x040d), 0xa0 },
++	{ CCI_REG8(0x040e), 0x08 },	/* digital crop height */
++	{ CCI_REG8(0x040f), 0xcc },
++	{ CCI_REG8(0x0303), 0x02 },	/* vt sys clk div */
++	{ CCI_REG8(0x0305), 0x03 },	/* pre pll clk div */
++	{ CCI_REG8(0x0306), 0x01 },	/* pll multiplier */
++	{ CCI_REG8(0x0307), 0x42 },
++	{ CCI_REG8(0x030b), 0x02 },	/* op sys clk div */
++	{ CCI_REG8(0x030d), 0x02 },	/* op pre pll clk div */
++	{ CCI_REG8(0x030e), 0x01 },	/* op pll multiplier */
++	{ CCI_REG8(0x030f), 0x8b },
++	{ CCI_REG8(0x0310), 0x01 },	/* pll mode */
++	{ CCI_REG8(0x3240), 0x00 },
++	{ CCI_REG8(0x0860), 0x80 },	/* C-PHY TX EPD settings */
++	{ CCI_REG8(0x0861), 0x28 },
++	{ CCI_REG8(0x0862), 0x00 },
++	{ CCI_REG8(0x0863), 0x28 },
++	{ CCI_REG8(0x40b8), 0x03 },
++	{ CCI_REG8(0x40b9), 0x28 },
++	{ CCI_REG8(0x40bc), 0x00 },
++	{ CCI_REG8(0x40bd), 0x78 },
++	{ CCI_REG8(0x40be), 0x00 },
++	{ CCI_REG8(0x40bf), 0x78 },
++	{ CCI_REG8(0x7500), 0x02 },
++	{ CCI_REG8(0x57aa), 0x06 },
++	{ CCI_REG8(0x57ab), 0x5a },
++	{ CCI_REG8(0x5620), 0x01 },
++	{ CCI_REG8(0x5621), 0xac },
++	{ CCI_REG8(0x57a6), 0x00 },
++	{ CCI_REG8(0x57a7), 0x00 },
++	{ CCI_REG8(0x6d41), 0x13 },
++	{ CCI_REG8(0x6d4c), 0x13 },
++	{ CCI_REG8(0x6d57), 0x13 },
++	{ CCI_REG8(0x6d62), 0x13 },
++	{ CCI_REG8(0x6a51), 0x04 },
++	{ CCI_REG8(0x6a54), 0x04 },
++	{ CCI_REG8(0x6a55), 0x05 },
++	{ CCI_REG8(0x6a72), 0x05 },
++	{ CCI_REG8(0x6a75), 0x05 },
++	{ CCI_REG8(0x6a76), 0x0a },
++	{ CCI_REG8(0x6a7d), 0x01 },
++	{ CCI_REG8(0x6a80), 0x01 },
++	{ CCI_REG8(0x6a81), 0x00 },
++	{ CCI_REG8(0x6a9e), 0x02 },
++	{ CCI_REG8(0x6aa1), 0x02 },
++	{ CCI_REG8(0x6aa2), 0x03 },
++	{ CCI_REG8(0x0202), 0x1e },	/* coarse integration time */
++	{ CCI_REG8(0x0203), 0xe2 },
++	{ CCI_REG8(0x0224), 0x01 },	/* short integration time */
++	{ CCI_REG8(0x0225), 0xf4 },
++	{ CCI_REG8(0x0204), 0x00 },	/* analogue gain */
++	{ CCI_REG8(0x0205), 0x00 },
++	{ CCI_REG8(0x020e), 0x01 },	/* digital gain */
++	{ CCI_REG8(0x020f), 0x00 },
++	{ CCI_REG8(0x0216), 0x00 },	/* short analogue gain */
++	{ CCI_REG8(0x0217), 0x00 },
++	{ CCI_REG8(0x0218), 0x01 },	/* short digital gain */
++	{ CCI_REG8(0x0219), 0x00 },
++	{ CCI_REG8(0x9390), 0x00 },
++};
++
++static const struct imx563_mode supported_modes[] = {
++	{
++		/* Stock "mode3 4000x3000@30fps Data rate 1896Msps": 4:3 */
++		.width = 4000,
++		.height = 3000,
++		.crop = {
++			.left = 16,
++			.top = 12,
++			.width = 4000,
++			.height = 3000,
++		},
++		.llp = 17168,
++		.fll_min = 8002,
++		.fll_def = 8002,
++		.exposure_def = 7906,
++		.regs = imx563_4000x3000_regs,
++		.num_regs = ARRAY_SIZE(imx563_4000x3000_regs),
++	},
++	{
++		/*
++		 * Stock "mode3 4000x2252@30fps Data rate 1896Msps" and, at the
++		 * shortest frame length, "mode3 4000x2252@60fps Data rate
++		 * 1896Msps": 16:9
++		 */
++		.width = 4000,
++		.height = 2252,
++		.crop = {
++			.left = 16,
++			.top = 386,
++			.width = 4000,
++			.height = 2252,
++		},
++		.llp = 17168,
++		.fll_min = 4000,
++		.fll_def = 8002,
++		.exposure_def = 7906,
++		.regs = imx563_4000x2252_regs,
++		.num_regs = ARRAY_SIZE(imx563_4000x2252_regs),
++	},
++};
++
++struct imx563 {
++	struct device *dev;
++	struct v4l2_subdev sd;
++	struct media_pad pad;
++
++	struct regmap *regmap;
++	struct clk *xclk;
++
++	struct gpio_desc *reset_gpio;
++	struct regulator_bulk_data supplies[IMX563_NUM_SUPPLIES];
++
++	struct v4l2_ctrl_handler ctrl_handler;
++	struct v4l2_ctrl *pixel_rate;
++	struct v4l2_ctrl *link_freq;
++	struct v4l2_ctrl *exposure;
++	struct v4l2_ctrl *vblank;
++	struct v4l2_ctrl *hblank;
++
++	/* Mode of the active state, protected by the state lock */
++	const struct imx563_mode *mode;
++};
++
++static inline struct imx563 *to_imx563(struct v4l2_subdev *sd)
++{
++	return container_of(sd, struct imx563, sd);
++}
++
++/* -----------------------------------------------------------------------------
++ * Controls
++ */
++
++static int imx563_set_ctrl(struct v4l2_ctrl *ctrl)
++{
++	struct imx563 *imx563 = container_of(ctrl->handler, struct imx563,
++					     ctrl_handler);
++	const struct imx563_mode *mode = imx563->mode;
++	int ret = 0;
++
++	if (ctrl->id == V4L2_CID_VBLANK) {
++		int exposure_max = mode->height + ctrl->val -
++				   IMX563_EXPOSURE_OFFSET;
++
++		exposure_max = min(exposure_max, IMX563_EXPOSURE_MAX);
++		ret = __v4l2_ctrl_modify_range(imx563->exposure,
++					       imx563->exposure->minimum,
++					       exposure_max,
++					       imx563->exposure->step,
++					       min_t(int, exposure_max,
++						     mode->exposure_def));
++		if (ret)
++			return ret;
++	}
++
++	/* Registers are written only while the sensor is powered */
++	if (pm_runtime_get_if_in_use(imx563->dev) == 0)
++		return 0;
++
++	switch (ctrl->id) {
++	case V4L2_CID_EXPOSURE:
++		cci_write(imx563->regmap, IMX563_REG_EXPOSURE, ctrl->val, &ret);
++		break;
++	case V4L2_CID_ANALOGUE_GAIN:
++		cci_write(imx563->regmap, IMX563_REG_ANALOG_GAIN, ctrl->val,
++			  &ret);
++		break;
++	case V4L2_CID_DIGITAL_GAIN:
++		cci_write(imx563->regmap, IMX563_REG_DIGITAL_GAIN, ctrl->val,
++			  &ret);
++		break;
++	case V4L2_CID_VBLANK:
++		cci_write(imx563->regmap, IMX563_REG_FRM_LENGTH_LINES,
++			  mode->height + ctrl->val, &ret);
++		break;
++	case V4L2_CID_TEST_PATTERN:
++		/* Stock writes 0xb000 = 0 with every pattern change */
++		cci_write(imx563->regmap, IMX563_REG_TP_B000, 0, &ret);
++		cci_write(imx563->regmap, IMX563_REG_TEST_PATTERN, ctrl->val,
++			  &ret);
++		break;
++	case V4L2_CID_TEST_PATTERN_RED:
++		cci_write(imx563->regmap, IMX563_REG_TESTP_RED, ctrl->val,
++			  &ret);
++		break;
++	case V4L2_CID_TEST_PATTERN_GREENR:
++		cci_write(imx563->regmap, IMX563_REG_TESTP_GREENR, ctrl->val,
++			  &ret);
++		break;
++	case V4L2_CID_TEST_PATTERN_BLUE:
++		cci_write(imx563->regmap, IMX563_REG_TESTP_BLUE, ctrl->val,
++			  &ret);
++		break;
++	case V4L2_CID_TEST_PATTERN_GREENB:
++		cci_write(imx563->regmap, IMX563_REG_TESTP_GREENB, ctrl->val,
++			  &ret);
++		break;
++	case V4L2_CID_LINK_FREQ:
++	case V4L2_CID_PIXEL_RATE:
++	case V4L2_CID_HBLANK:
++		/* Read-only, fixed by the mode list */
++		break;
++	default:
++		ret = -EINVAL;
++		break;
++	}
++
++	pm_runtime_put_autosuspend(imx563->dev);
++
++	return ret;
++}
++
++static const struct v4l2_ctrl_ops imx563_ctrl_ops = {
++	.s_ctrl = imx563_set_ctrl,
++};
++
++static int imx563_init_controls(struct imx563 *imx563)
++{
++	const struct imx563_mode *mode = imx563->mode;
++	struct v4l2_ctrl_handler *hdl = &imx563->ctrl_handler;
++	struct v4l2_fwnode_device_properties props;
++	unsigned int i;
++	int ret;
++
++	ret = v4l2_ctrl_handler_init(hdl, 14);
++	if (ret)
++		return ret;
++
++	imx563->pixel_rate = v4l2_ctrl_new_std(hdl, &imx563_ctrl_ops,
++					       V4L2_CID_PIXEL_RATE,
++					       IMX563_PIXEL_RATE,
++					       IMX563_PIXEL_RATE, 1,
++					       IMX563_PIXEL_RATE);
++
++	imx563->link_freq =
++		v4l2_ctrl_new_int_menu(hdl, &imx563_ctrl_ops,
++				       V4L2_CID_LINK_FREQ,
++				       ARRAY_SIZE(imx563_link_freq_menu) - 1,
++				       0, imx563_link_freq_menu);
++	if (imx563->link_freq)
++		imx563->link_freq->flags |= V4L2_CTRL_FLAG_READ_ONLY;
++
++	imx563->hblank = v4l2_ctrl_new_std(hdl, &imx563_ctrl_ops,
++					   V4L2_CID_HBLANK,
++					   mode->llp - mode->width,
++					   mode->llp - mode->width, 1,
++					   mode->llp - mode->width);
++	if (imx563->hblank)
++		imx563->hblank->flags |= V4L2_CTRL_FLAG_READ_ONLY;
++
++	/* Frames can be made longer than stock's, not shorter */
++	imx563->vblank = v4l2_ctrl_new_std(hdl, &imx563_ctrl_ops,
++					   V4L2_CID_VBLANK,
++					   mode->fll_min - mode->height,
++					   IMX563_FLL_MAX - mode->height, 1,
++					   mode->fll_def - mode->height);
++
++	imx563->exposure = v4l2_ctrl_new_std(hdl, &imx563_ctrl_ops,
++					     V4L2_CID_EXPOSURE,
++					     IMX563_EXPOSURE_MIN,
++					     mode->fll_def - IMX563_EXPOSURE_OFFSET,
++					     IMX563_EXPOSURE_STEP,
++					     mode->exposure_def);
++
++	v4l2_ctrl_new_std(hdl, &imx563_ctrl_ops, V4L2_CID_ANALOGUE_GAIN,
++			  IMX563_ANA_GAIN_MIN, IMX563_ANA_GAIN_MAX,
++			  IMX563_ANA_GAIN_STEP, IMX563_ANA_GAIN_DEFAULT);
++
++	v4l2_ctrl_new_std(hdl, &imx563_ctrl_ops, V4L2_CID_DIGITAL_GAIN,
++			  IMX563_DGTL_GAIN_MIN, IMX563_DGTL_GAIN_MAX,
++			  IMX563_DGTL_GAIN_STEP, IMX563_DGTL_GAIN_DEFAULT);
++
++	v4l2_ctrl_new_std_menu_items(hdl, &imx563_ctrl_ops,
++				     V4L2_CID_TEST_PATTERN,
++				     ARRAY_SIZE(imx563_test_pattern_menu) - 1,
++				     0, 0, imx563_test_pattern_menu);
++	for (i = 0; i < 4; i++) {
++		/*
++		 * V4L2_CID_TEST_PATTERN_GREENR, _BLUE and _GREENB follow
++		 * V4L2_CID_TEST_PATTERN_RED in that order. The solid colour
++		 * pattern is white by default.
++		 */
++		v4l2_ctrl_new_std(hdl, &imx563_ctrl_ops,
++				  V4L2_CID_TEST_PATTERN_RED + i,
++				  IMX563_TESTP_COLOUR_MIN,
++				  IMX563_TESTP_COLOUR_MAX,
++				  IMX563_TESTP_COLOUR_STEP,
++				  IMX563_TESTP_COLOUR_MAX);
++	}
++
++	if (hdl->error) {
++		ret = hdl->error;
++		dev_err_probe(imx563->dev, ret, "control init failed\n");
++		goto error;
++	}
++
++	ret = v4l2_fwnode_device_parse(imx563->dev, &props);
++	if (ret)
++		goto error;
++
++	ret = v4l2_ctrl_new_fwnode_properties(hdl, &imx563_ctrl_ops, &props);
++	if (ret)
++		goto error;
++
++	imx563->sd.ctrl_handler = hdl;
++
++	return 0;
++
++error:
++	v4l2_ctrl_handler_free(hdl);
++
++	return ret;
++}
++
++/* -----------------------------------------------------------------------------
++ * Subdev operations
++ */
++
++static int imx563_enable_streams(struct v4l2_subdev *sd,
++				 struct v4l2_subdev_state *state, u32 pad,
++				 u64 streams_mask)
++{
++	struct imx563 *imx563 = to_imx563(sd);
++	const struct imx563_mode *mode = imx563->mode;
++	int ret;
++
++	ret = pm_runtime_resume_and_get(imx563->dev);
++	if (ret < 0)
++		return ret;
++
++	ret = cci_multi_reg_write(imx563->regmap, imx563_init_regs,
++				  ARRAY_SIZE(imx563_init_regs), NULL);
++	if (ret) {
++		dev_err(imx563->dev, "failed to write init registers: %d\n",
++			ret);
++		goto err_rpm_put;
++	}
++
++	ret = cci_multi_reg_write(imx563->regmap, mode->regs, mode->num_regs,
++				  NULL);
++	if (ret) {
++		dev_err(imx563->dev, "failed to write mode registers: %d\n",
++			ret);
++		goto err_rpm_put;
++	}
++
++	/*
++	 * After the mode list, which ends with exposure and gain defaults.
++	 * The vertical blanking control sets the frame length, which picks
++	 * 30 or 60 fps for 4000x2252.
++	 */
++	ret = __v4l2_ctrl_handler_setup(imx563->sd.ctrl_handler);
++	if (ret)
++		goto err_rpm_put;
++
++	ret = cci_write(imx563->regmap, IMX563_REG_MODE_SELECT,
++			IMX563_MODE_STREAMING, NULL);
++	if (ret)
++		goto err_rpm_put;
++
++	return 0;
++
++err_rpm_put:
++	pm_runtime_put_autosuspend(imx563->dev);
++	return ret;
++}
++
++static int imx563_disable_streams(struct v4l2_subdev *sd,
++				  struct v4l2_subdev_state *state, u32 pad,
++				  u64 streams_mask)
++{
++	struct imx563 *imx563 = to_imx563(sd);
++	int ret;
++
++	ret = cci_write(imx563->regmap, IMX563_REG_MODE_SELECT,
++			IMX563_MODE_STANDBY, NULL);
++	if (ret)
++		dev_err(imx563->dev, "failed to stop streaming: %d\n", ret);
++
++	pm_runtime_put_autosuspend(imx563->dev);
++
++	return ret;
++}
++
++static int imx563_enum_mbus_code(struct v4l2_subdev *sd,
++				 struct v4l2_subdev_state *state,
++				 struct v4l2_subdev_mbus_code_enum *code)
++{
++	if (code->index > 0)
++		return -EINVAL;
++
++	code->code = IMX563_MBUS_CODE;
++
++	return 0;
++}
++
++static int imx563_enum_frame_size(struct v4l2_subdev *sd,
++				  struct v4l2_subdev_state *state,
++				  struct v4l2_subdev_frame_size_enum *fse)
++{
++	const struct imx563_mode *mode;
++
++	if (fse->code != IMX563_MBUS_CODE ||
++	    fse->index >= ARRAY_SIZE(supported_modes))
++		return -EINVAL;
++
++	mode = &supported_modes[fse->index];
++	fse->min_width = mode->width;
++	fse->max_width = mode->width;
++	fse->min_height = mode->height;
++	fse->max_height = mode->height;
++
++	return 0;
++}
++
++static int imx563_update_controls(struct imx563 *imx563,
++				  const struct imx563_mode *mode)
++{
++	int hblank = mode->llp - mode->width;
++	int vblank = mode->fll_def - mode->height;
++	int ret;
++
++	ret = __v4l2_ctrl_modify_range(imx563->hblank, hblank, hblank, 1,
++				       hblank);
++	if (ret)
++		return ret;
++
++	ret = __v4l2_ctrl_modify_range(imx563->vblank,
++				       mode->fll_min - mode->height,
++				       IMX563_FLL_MAX - mode->height, 1,
++				       vblank);
++	if (ret)
++		return ret;
++
++	ret = __v4l2_ctrl_s_ctrl(imx563->vblank, vblank);
++	if (ret)
++		return ret;
++
++	return __v4l2_ctrl_modify_range(imx563->exposure,
++					IMX563_EXPOSURE_MIN,
++					mode->fll_def - IMX563_EXPOSURE_OFFSET,
++					IMX563_EXPOSURE_STEP,
++					mode->exposure_def);
++}
++
++static int imx563_set_pad_format(struct v4l2_subdev *sd,
++				 struct v4l2_subdev_state *state,
++				 struct v4l2_subdev_format *fmt)
++{
++	struct imx563 *imx563 = to_imx563(sd);
++	const struct imx563_mode *mode;
++	struct v4l2_mbus_framefmt *format;
++	struct v4l2_rect *crop;
++	int ret;
++
++	if (fmt->which == V4L2_SUBDEV_FORMAT_ACTIVE &&
++	    v4l2_subdev_is_streaming(sd))
++		return -EBUSY;
++
++	mode = v4l2_find_nearest_size(supported_modes,
++				      ARRAY_SIZE(supported_modes),
++				      width, height,
++				      fmt->format.width, fmt->format.height);
++
++	fmt->format.code = IMX563_MBUS_CODE;
++	fmt->format.width = mode->width;
++	fmt->format.height = mode->height;
++	fmt->format.field = V4L2_FIELD_NONE;
++	fmt->format.colorspace = V4L2_COLORSPACE_RAW;
++	fmt->format.ycbcr_enc = V4L2_YCBCR_ENC_601;
++	fmt->format.quantization = V4L2_QUANTIZATION_FULL_RANGE;
++	fmt->format.xfer_func = V4L2_XFER_FUNC_NONE;
++
++	format = v4l2_subdev_state_get_format(state, 0);
++	*format = fmt->format;
++
++	crop = v4l2_subdev_state_get_crop(state, 0);
++	*crop = mode->crop;
++
++	if (fmt->which == V4L2_SUBDEV_FORMAT_ACTIVE) {
++		imx563->mode = mode;
++		ret = imx563_update_controls(imx563, mode);
++		if (ret)
++			return ret;
++	}
++
++	return 0;
++}
++
++static int imx563_get_selection(struct v4l2_subdev *sd,
++				struct v4l2_subdev_state *state,
++				struct v4l2_subdev_selection *sel)
++{
++	switch (sel->target) {
++	case V4L2_SEL_TGT_CROP:
++		sel->r = *v4l2_subdev_state_get_crop(state, 0);
++		return 0;
++
++	case V4L2_SEL_TGT_NATIVE_SIZE:
++	case V4L2_SEL_TGT_CROP_DEFAULT:
++	case V4L2_SEL_TGT_CROP_BOUNDS:
++		sel->r.left = 0;
++		sel->r.top = 0;
++		sel->r.width = IMX563_NATIVE_WIDTH;
++		sel->r.height = IMX563_NATIVE_HEIGHT;
++		return 0;
++	}
++
++	return -EINVAL;
++}
++
++static int imx563_init_state(struct v4l2_subdev *sd,
++			     struct v4l2_subdev_state *state)
++{
++	struct v4l2_subdev_format fmt = {
++		.which = V4L2_SUBDEV_FORMAT_TRY,
++		.pad = 0,
++		.format = {
++			.code = IMX563_MBUS_CODE,
++			.width = supported_modes[0].width,
++			.height = supported_modes[0].height,
++		},
++	};
++
++	return imx563_set_pad_format(sd, state, &fmt);
++}
++
++static const struct v4l2_subdev_video_ops imx563_video_ops = {
++	.s_stream = v4l2_subdev_s_stream_helper,
++};
++
++static const struct v4l2_subdev_pad_ops imx563_pad_ops = {
++	.enum_mbus_code = imx563_enum_mbus_code,
++	.get_fmt = v4l2_subdev_get_fmt,
++	.set_fmt = imx563_set_pad_format,
++	.get_selection = imx563_get_selection,
++	.enum_frame_size = imx563_enum_frame_size,
++	.enable_streams = imx563_enable_streams,
++	.disable_streams = imx563_disable_streams,
++};
++
++static const struct v4l2_subdev_ops imx563_subdev_ops = {
++	.video = &imx563_video_ops,
++	.pad = &imx563_pad_ops,
++};
++
++static const struct v4l2_subdev_internal_ops imx563_internal_ops = {
++	.init_state = imx563_init_state,
++};
++
++/* -----------------------------------------------------------------------------
++ * Power management
++ */
++
++/*
++ * Stock's power sequence: the extra 1.8 V rail, VANA, VDIG and VIF 1 ms
++ * apart, then XCLR released, MCLK 2 ms later, then 18 ms before the first
++ * access. Power-down asserts XCLR, stops MCLK and drops the rails in
++ * reverse, 1 ms apart.
++ */
++static int imx563_power_on(struct device *dev)
++{
++	struct v4l2_subdev *sd = dev_get_drvdata(dev);
++	struct imx563 *imx563 = to_imx563(sd);
++	unsigned int i;
++	int ret;
++
++	for (i = 0; i < IMX563_NUM_SUPPLIES; i++) {
++		ret = regulator_enable(imx563->supplies[i].consumer);
++		if (ret) {
++			dev_err(dev, "failed to enable %s: %d\n",
++				imx563->supplies[i].supply, ret);
++			goto err_supplies;
++		}
++		usleep_range(1000, 1100);
++	}
++
++	gpiod_set_value_cansleep(imx563->reset_gpio, 0);
++	usleep_range(2000, 2200);
++
++	ret = clk_prepare_enable(imx563->xclk);
++	if (ret) {
++		dev_err(dev, "failed to enable clock: %d\n", ret);
++		gpiod_set_value_cansleep(imx563->reset_gpio, 1);
++		goto err_supplies;
++	}
++	usleep_range(18000, 19000);
++
++	return 0;
++
++err_supplies:
++	while (i--)
++		regulator_disable(imx563->supplies[i].consumer);
++
++	return ret;
++}
++
++static int imx563_power_off(struct device *dev)
++{
++	struct v4l2_subdev *sd = dev_get_drvdata(dev);
++	struct imx563 *imx563 = to_imx563(sd);
++	unsigned int i;
++
++	gpiod_set_value_cansleep(imx563->reset_gpio, 1);
++	usleep_range(1000, 1100);
++
++	clk_disable_unprepare(imx563->xclk);
++	usleep_range(1000, 1100);
++
++	for (i = IMX563_NUM_SUPPLIES; i--;) {
++		regulator_disable(imx563->supplies[i].consumer);
++		usleep_range(1000, 1100);
++	}
++
++	return 0;
++}
++
++/* -----------------------------------------------------------------------------
++ * Probe & remove
++ */
++
++static int imx563_identify_module(struct imx563 *imx563)
++{
++	u64 val;
++	int ret;
++
++	ret = cci_read(imx563->regmap, IMX563_REG_CHIP_ID, &val, NULL);
++	if (ret)
++		return dev_err_probe(imx563->dev, ret,
++				     "failed to read chip id\n");
++
++	if (val != IMX563_CHIP_ID)
++		return dev_err_probe(imx563->dev, -ENODEV,
++				     "chip id mismatch: expected 0x%04x, read 0x%04llx\n",
++				     IMX563_CHIP_ID, val);
++
++	return 0;
++}
++
++static int imx563_check_hwcfg(struct imx563 *imx563)
++{
++	struct device *dev = imx563->dev;
++	struct v4l2_fwnode_endpoint ep_cfg = {
++		.bus_type = V4L2_MBUS_CSI2_CPHY
++	};
++	struct fwnode_handle *endpoint;
++	unsigned long link_freq_bitmap;
++	int ret;
++
++	endpoint = fwnode_graph_get_next_endpoint(dev_fwnode(dev), NULL);
++	if (!endpoint)
++		return dev_err_probe(dev, -EINVAL, "endpoint node not found\n");
++
++	/* Fails with -ENXIO if the endpoint gives a bus type other than C-PHY */
++	ret = v4l2_fwnode_endpoint_alloc_parse(endpoint, &ep_cfg);
++	fwnode_handle_put(endpoint);
++	if (ret == -ENXIO)
++		return dev_err_probe(dev, ret, "only C-PHY is supported\n");
++	if (ret)
++		return dev_err_probe(dev, ret, "could not parse endpoint\n");
++
++	if (ep_cfg.bus.mipi_csi2.num_data_lanes != IMX563_DATA_LANES) {
++		ret = dev_err_probe(dev, -EINVAL,
++				    "only %u C-PHY trios are supported\n",
++				    IMX563_DATA_LANES);
++		goto out;
++	}
++
++	ret = v4l2_link_freq_to_bitmap(dev, ep_cfg.link_frequencies,
++				       ep_cfg.nr_of_link_frequencies,
++				       imx563_link_freq_menu,
++				       ARRAY_SIZE(imx563_link_freq_menu),
++				       &link_freq_bitmap);
++
++out:
++	v4l2_fwnode_endpoint_free(&ep_cfg);
++
++	return ret;
++}
++
++static int imx563_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	struct imx563 *imx563;
++	unsigned long freq;
++	unsigned int i;
++	int ret;
++
++	imx563 = devm_kzalloc(dev, sizeof(*imx563), GFP_KERNEL);
++	if (!imx563)
++		return -ENOMEM;
++
++	imx563->dev = dev;
++
++	v4l2_i2c_subdev_init(&imx563->sd, client, &imx563_subdev_ops);
++	imx563->sd.internal_ops = &imx563_internal_ops;
++
++	ret = imx563_check_hwcfg(imx563);
++	if (ret)
++		return ret;
++
++	imx563->mode = &supported_modes[0];
++
++	imx563->regmap = devm_cci_regmap_init_i2c(client, 16);
++	if (IS_ERR(imx563->regmap))
++		return dev_err_probe(dev, PTR_ERR(imx563->regmap),
++				     "failed to initialize CCI\n");
++
++	imx563->xclk = devm_v4l2_sensor_clk_get(dev, NULL);
++	if (IS_ERR(imx563->xclk))
++		return dev_err_probe(dev, PTR_ERR(imx563->xclk),
++				     "failed to get clock\n");
++
++	freq = clk_get_rate(imx563->xclk);
++	if (freq != IMX563_XCLK_FREQ)
++		return dev_err_probe(dev, -EINVAL,
++				     "clock frequency %lu Hz not supported, need %u Hz\n",
++				     freq, IMX563_XCLK_FREQ);
++
++	for (i = 0; i < IMX563_NUM_SUPPLIES; i++)
++		imx563->supplies[i].supply = imx563_supply_name[i];
++
++	ret = devm_regulator_bulk_get(dev, IMX563_NUM_SUPPLIES,
++				      imx563->supplies);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to get regulators\n");
++
++	/* XCLR is active low: request it asserted, the sensor held in reset */
++	imx563->reset_gpio = devm_gpiod_get_optional(dev, "reset",
++						     GPIOD_OUT_HIGH);
++	if (IS_ERR(imx563->reset_gpio))
++		return dev_err_probe(dev, PTR_ERR(imx563->reset_gpio),
++				     "failed to get reset gpio\n");
++
++	ret = imx563_power_on(dev);
++	if (ret)
++		return ret;
++
++	ret = imx563_identify_module(imx563);
++	if (ret)
++		goto error_power_off;
++
++	ret = imx563_init_controls(imx563);
++	if (ret)
++		goto error_power_off;
++
++	imx563->sd.flags |= V4L2_SUBDEV_FL_HAS_DEVNODE;
++	imx563->sd.entity.function = MEDIA_ENT_F_CAM_SENSOR;
++	imx563->pad.flags = MEDIA_PAD_FL_SOURCE;
++
++	ret = media_entity_pads_init(&imx563->sd.entity, 1, &imx563->pad);
++	if (ret) {
++		dev_err_probe(dev, ret, "failed to init entity pads\n");
++		goto error_handler_free;
++	}
++
++	imx563->sd.state_lock = imx563->ctrl_handler.lock;
++	ret = v4l2_subdev_init_finalize(&imx563->sd);
++	if (ret < 0) {
++		dev_err_probe(dev, ret, "subdev init error\n");
++		goto error_media_entity;
++	}
++
++	pm_runtime_set_active(dev);
++	pm_runtime_enable(dev);
++
++	ret = v4l2_async_register_subdev_sensor(&imx563->sd);
++	if (ret < 0) {
++		dev_err_probe(dev, ret, "failed to register sensor sub-device\n");
++		goto error_subdev_cleanup;
++	}
++
++	pm_runtime_set_autosuspend_delay(dev, 1000);
++	pm_runtime_use_autosuspend(dev);
++	pm_runtime_idle(dev);
++
++	return 0;
++
++error_subdev_cleanup:
++	v4l2_subdev_cleanup(&imx563->sd);
++	pm_runtime_disable(dev);
++	pm_runtime_set_suspended(dev);
++
++error_media_entity:
++	media_entity_cleanup(&imx563->sd.entity);
++
++error_handler_free:
++	v4l2_ctrl_handler_free(&imx563->ctrl_handler);
++
++error_power_off:
++	imx563_power_off(dev);
++
++	return ret;
++}
++
++static void imx563_remove(struct i2c_client *client)
++{
++	struct v4l2_subdev *sd = i2c_get_clientdata(client);
++	struct imx563 *imx563 = to_imx563(sd);
++
++	v4l2_async_unregister_subdev(sd);
++	v4l2_subdev_cleanup(sd);
++	media_entity_cleanup(&sd->entity);
++	v4l2_ctrl_handler_free(&imx563->ctrl_handler);
++
++	pm_runtime_disable(&client->dev);
++	if (!pm_runtime_status_suspended(&client->dev)) {
++		imx563_power_off(&client->dev);
++		pm_runtime_set_suspended(&client->dev);
++	}
++}
++
++static const struct of_device_id imx563_of_match[] = {
++	{ .compatible = "sony,imx563" },
++	{ /* sentinel */ }
++};
++MODULE_DEVICE_TABLE(of, imx563_of_match);
++
++static DEFINE_RUNTIME_DEV_PM_OPS(imx563_pm_ops, imx563_power_off,
++				 imx563_power_on, NULL);
++
++static struct i2c_driver imx563_i2c_driver = {
++	.driver = {
++		.name = "imx563",
++		.of_match_table = imx563_of_match,
++		.pm = pm_ptr(&imx563_pm_ops),
++	},
++	.probe = imx563_probe,
++	.remove = imx563_remove,
++};
++
++module_i2c_driver(imx563_i2c_driver);
++
++MODULE_AUTHOR("Noa Himesaka <himesaka@noa.codes>");
++MODULE_DESCRIPTION("Sony IMX563 sensor driver");
++MODULE_LICENSE("GPL");

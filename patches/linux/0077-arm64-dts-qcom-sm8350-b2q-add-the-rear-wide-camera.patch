@@ -1,0 +1,233 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] arm64: dts: qcom: sm8350-b2q: add the rear wide camera
+
+Describe the rear wide camera as stock's qcom,cam-sensor0 (dtbo entry 3)
+wires it: CCI0 master 0, CSIPHY0, MCLK0 on gpio100 at 19.2 MHz and
+CAM_RESET0 on gpio136, with its four S2MPB02 rails (L3 1.1 V cam_vdig,
+L8 1.8 V cam_vio, L14 2.8 V cam_vana and L6 1.8 V cam_v_custom1). The
+pin states follow stock's cam_sensor_mclk0 and rst0 states; the board
+overlay raises the MCLK0 drive strength to 4 mA, and so does this node.
+In the stock DT L6 has no consumer other than this sensor, while L8 also
+supplies the wide camera's actuator and EEPROM, which are not described
+here.
+
+The sensor is a Sony IMX563. The stock DT carries neither its I2C
+address nor its link; stock's sensor module gives 0x10 and a C-PHY link
+of three trios with lane assignment 0x210. Both endpoints say C-PHY.
+The CSIPHY side lists trios 0, 1 and 2, for which CAMSS computes the
+lane enable value 0x2a that downstream writes and the CSID lane
+assignment 0x210. The CAMSS binding requires clock-lanes on every
+endpoint, so the CSIPHY0 endpoint keeps one, which CAMSS ignores on
+C-PHY. The sensor endpoint lists 948 MHz, the link frequency of the
+imx563 driver's modes (1896 Msps per trio). The camera faces away from
+the user, so the node says orientation 1 (back).
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../boot/dts/qcom/sm8350-samsung-b2q.dts      | 136 +++++++++++++++++-
+ 1 file changed, 133 insertions(+), 3 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+index 2f486e5..a8e07d7 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+@@ -12,6 +12,7 @@
+ #include <dt-bindings/gpio/gpio.h>
+ #include <dt-bindings/input/gpio-keys.h>
+ #include <dt-bindings/leds/common.h>
++#include <dt-bindings/media/video-interfaces.h>
+ #include <dt-bindings/pinctrl/qcom,pmic-gpio.h>
+ #include <dt-bindings/regulator/qcom,rpmh-regulator.h>
+ #include "sm8350.dtsi"
+@@ -482,7 +483,7 @@
+ 		 * Stock's s2mpb02_pmic@59 (dtbo entry 3). Only the rails with a
+ 		 * consumer here, or that stock keeps always on, are described:
+ 		 * the core switches off an unclaimed rail it manages. Of the
+-		 * camera rails only the ultrawide's and the front camera's are
++		 * camera rails only those of the three image sensors are
+ 		 * described so far.
+ 		 */
+ 		s2mpb02: pmic@59 {
+@@ -505,6 +506,13 @@
+ 			};
+ 
+ 			regulators {
++				/* Stock's cam_vdig for the rear wide, 1.1 V */
++				s2mpb02_l3: ldo3 {
++					regulator-name = "s2mpb02-l3";
++					regulator-min-microvolt = <1100000>;
++					regulator-max-microvolt = <1100000>;
++				};
++
+ 				/* Stock's cam_vdig for the rear ultrawide, 1.2 V */
+ 				s2mpb02_l4: ldo4 {
+ 					regulator-name = "s2mpb02-l4";
+@@ -519,6 +527,26 @@
+ 					regulator-max-microvolt = <1050000>;
+ 				};
+ 
++				/*
++				 * Stock's cam_v_custom1 for the rear wide, 1.8 V. The
++				 * wide sensor is its only consumer in the stock DT.
++				 */
++				s2mpb02_l6: ldo6 {
++					regulator-name = "s2mpb02-l6";
++					regulator-min-microvolt = <1800000>;
++					regulator-max-microvolt = <1800000>;
++				};
++
++				/*
++				 * Stock's cam_vio for the rear wide, 1.8 V. Stock also
++				 * gives it to the wide's actuator and EEPROM.
++				 */
++				s2mpb02_l8: ldo8 {
++					regulator-name = "s2mpb02-l8";
++					regulator-min-microvolt = <1800000>;
++					regulator-max-microvolt = <1800000>;
++				};
++
+ 				/* Stock's cam_vio for the front camera, 1.8 V */
+ 				s2mpb02_l9: ldo9 {
+ 					regulator-name = "s2mpb02-l9";
+@@ -552,6 +580,13 @@
+ 					regulator-boot-on;
+ 				};
+ 
++				/* Stock's cam_vana for the rear wide, 2.8 V */
++				s2mpb02_l14: ldo14 {
++					regulator-name = "s2mpb02-l14";
++					regulator-min-microvolt = <2800000>;
++					regulator-max-microvolt = <2800000>;
++				};
++
+ 				/* Stock's cam_vana for the front camera, 2.8 V */
+ 				s2mpb02_l15: ldo15 {
+ 					regulator-name = "s2mpb02-l15";
+@@ -1655,6 +1690,44 @@
+ 			output-low;
+ 		};
+ 	};
++
++	/*
++	 * Rear wide: MCLK0 and CAM_RESET0, as stock's cam_sensor_mclk0 and
++	 * rst0 states. Stock's board overlay raises the MCLK0 drive strength
++	 * to 4 mA in both.
++	 */
++	cam_wide_default: cam-wide-default-state {
++		mclk-pins {
++			pins = "gpio100";
++			function = "cam_mclk";
++			drive-strength = <4>;
++			bias-disable;
++		};
++
++		rst-pins {
++			pins = "gpio136";
++			function = "gpio";
++			drive-strength = <2>;
++			bias-disable;
++		};
++	};
++
++	cam_wide_suspend: cam-wide-suspend-state {
++		mclk-pins {
++			pins = "gpio100";
++			function = "cam_mclk";
++			drive-strength = <4>;
++			bias-pull-down;
++		};
++
++		rst-pins {
++			pins = "gpio136";
++			function = "gpio";
++			drive-strength = <2>;
++			bias-pull-down;
++			output-low;
++		};
++	};
+ };
+ 
+ // SoC I/O nodes
+@@ -2262,8 +2335,15 @@
+ };
+ 
+ /*
+- * Cameras: the front and the rear ultrawide. Neither the I2C address nor
+- * the lane count is in the stock DT (stock's userspace supplies them).
++ * Cameras: the rear wide, the front and the rear ultrawide. Neither the
++ * I2C address nor the lane count is in the stock DT (stock's userspace
++ * supplies them).
++ *
++ * Rear wide: stock's qcom,cam-sensor0 (dtbo entry 3) on CCI0 master 0 and
++ * CSIPHY0, MCLK0 at 19.2 MHz, reset on gpio136. Stock's sensor module
++ * gives 0x10 and a C-PHY link of three trios (lane assignment 0x210), and
++ * every mode the imx563 driver offers runs at 1896 Msps per trio, a link
++ * frequency of 948 MHz.
+  *
+  * Front: stock's qcom,cam-sensor1 (dtbo entry 3) on CCI0 master 1 and
+  * CSIPHY3, MCLK2 at 24 MHz, reset on gpio202. Stock's sensor module gives
+@@ -2287,6 +2367,21 @@
+ 		#size-cells = <0>;
+ 
+ 		/* The port index is the CSIPHY id */
++		port@0 {
++			reg = <0>;
++
++			/*
++			 * C-PHY has no clock lane. The CAMSS binding requires
++			 * clock-lanes, and the driver ignores it on C-PHY.
++			 */
++			csiphy0_ep: endpoint {
++				bus-type = <MEDIA_BUS_TYPE_CSI2_CPHY>;
++				clock-lanes = <7>;
++				data-lanes = <0 1 2>;
++				remote-endpoint = <&cam_wide_ep>;
++			};
++		};
++
+ 		port@2 {
+ 			reg = <2>;
+ 
+@@ -2313,6 +2408,41 @@
+ 	status = "okay";
+ };
+ 
++&cci0_i2c0 {
++	#address-cells = <1>;
++	#size-cells = <0>;
++
++	camera@10 {
++		compatible = "sony,imx563";
++		reg = <0x10>;
++
++		reset-gpios = <&tlmm 136 GPIO_ACTIVE_LOW>;
++		pinctrl-0 = <&cam_wide_default>;
++		pinctrl-1 = <&cam_wide_suspend>;
++		pinctrl-names = "default", "sleep";
++
++		clocks = <&camcc CAM_CC_MCLK0_CLK>;
++		assigned-clocks = <&camcc CAM_CC_MCLK0_CLK>;
++		assigned-clock-rates = <19200000>;
++
++		vana-supply = <&s2mpb02_l14>;
++		vcustom-supply = <&s2mpb02_l6>;
++		vdig-supply = <&s2mpb02_l3>;
++		vif-supply = <&s2mpb02_l8>;
++
++		orientation = <1>;
++
++		port {
++			cam_wide_ep: endpoint {
++				bus-type = <MEDIA_BUS_TYPE_CSI2_CPHY>;
++				link-frequencies = /bits/ 64 <948000000>;
++				data-lanes = <1 2 3>;
++				remote-endpoint = <&csiphy0_ep>;
++			};
++		};
++	};
++};
++
+ &cci0_i2c1 {
+ 	#address-cells = <1>;
+ 	#size-cells = <0>;

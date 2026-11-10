@@ -115,3 +115,5 @@ CONFIG_SM_CAMCC_8350=m
 CONFIG_VIDEO_IMX258=m
 # Cameras: the front IMX374 (patches/linux/0062-0063).
 CONFIG_VIDEO_IMX374=m
+# Cameras: the rear wide IMX563 (patches/linux/0076-0077).
+CONFIG_VIDEO_IMX563=m

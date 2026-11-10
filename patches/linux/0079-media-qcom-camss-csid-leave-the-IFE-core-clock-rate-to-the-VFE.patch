@@ -1,0 +1,53 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] media: qcom: camss: csid: leave the IFE core clock rate to the VFE
+
+On SoCs where the CSID sits inside the IFE, the CSID resources list the
+IFE core clock ("vfeN", "vfe_lite") with its rate table, and
+csid_set_clock_rates() sets every clock that is not a "csiN" clock to
+its first rate. That clobbers the rate the VFE chose for the pipeline:
+the CSID powers its parent VFE, which sizes the IFE clock, then knocks it
+back to the lowest level, and when the pipeline powers the VFE itself
+vfe_check_clock_rates() finds it too low and fails with -EBUSY.
+
+On SM8350 an IMX563 at 4121.6 Mpix/s needs the IFE at 720 MHz, so every
+stream failed with "Failed to power up pipeline: -16". Leave the IFE
+core clock rate to the VFE. Sensors that fit the lowest level are
+unaffected: their colour bars are byte-identical before and after.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/media/platform/qcom/camss/camss-csid.c |   13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/media/platform/qcom/camss/camss-csid.c b/drivers/media/platform/qcom/camss/camss-csid.c
+index 90d28e5..d35d80f 100644
+--- a/drivers/media/platform/qcom/camss/camss-csid.c
++++ b/drivers/media/platform/qcom/camss/camss-csid.c
+@@ -536,6 +536,17 @@ const struct csid_format_info *csid_get_fmt_entry(const struct csid_format_info
+  * csid_set_clock_rates - Calculate and set clock rates on CSID module
+  * @csiphy: CSID device
+  */
++/*
++ * The IFE core clock in a CSID's clock list ("vfeN", "vfe_lite"): on SoCs
++ * where the CSID sits inside the IFE the CSID needs it running, but the VFE
++ * owns its rate and sizes it for the pipeline in vfe_set_clock_rates().
++ */
++static bool csid_is_ife_core_clock(const struct camss_clock *clock)
++{
++	return !strcmp(clock->name, "vfe_lite") ||
++	       (!strncmp(clock->name, "vfe", 3) && !strchr(clock->name, '_'));
++}
++
+ static int csid_set_clock_rates(struct csid_device *csid)
+ {
+ 	struct device *dev = csid->camss->dev;
+@@ -592,7 +603,7 @@ static int csid_set_clock_rates(struct csid_device *csid)
+ 				dev_err(dev, "clk set rate failed: %d\n", ret);
+ 				return ret;
+ 			}
+-		} else if (clock->nfreqs) {
++		} else if (clock->nfreqs && !csid_is_ife_core_clock(clock)) {
+ 			clk_set_rate(clock->clk, clock->freq[0]);
+ 		}
+ 	}
