@@ -1,0 +1,32 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Wed, 11 Nov 2026 03:41:19 +0900
+Subject: [PATCH] ipa: simple: af: Skip frames without statistics
+
+The software ISP fills the statistics only every kStatPerNumFrames
+frames; on the others stats->valid is false and the variance is the
+previous frame's. Agc, Awb and BlackLevel skip those frames. Af did not,
+so it moved the lens on every frame and compared each new position with
+a measurement taken at an old one.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ src/ipa/simple/algorithms/af.cpp | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/src/ipa/simple/algorithms/af.cpp b/src/ipa/simple/algorithms/af.cpp
+index a208ada5..d4f025dc 100644
+--- a/src/ipa/simple/algorithms/af.cpp
++++ b/src/ipa/simple/algorithms/af.cpp
+@@ -40,6 +40,10 @@ void Af::process(IPAContext &context,
+ 		 const SwIspStats *stats,
+ 		 [[maybe_unused]] ControlList &metadata)
+ {
++	/* statistics come every kStatPerNumFrames frames, as for Agc and Awb */
++	if (!stats->valid)
++		return;
++
+ 	const double variance = stats->variance;
+ 	LOG(IPASoftIspAf, Debug) << "Focus stats: " << variance;
+ 	afAlgo_.process(context.activeState.af, variance);

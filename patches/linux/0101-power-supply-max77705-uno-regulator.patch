@@ -48,7 +48,7 @@ index 6425145..ad6ee8b 100644
  	  Say Y to enable support for the Maxim MAX77705 battery charger.
  
 diff --git a/drivers/power/supply/max77705_charger.c b/drivers/power/supply/max77705_charger.c
-index 3e6352f..d36dd50 100644
+index 3e6352f..ed257cc 100644
 --- a/drivers/power/supply/max77705_charger.c
 +++ b/drivers/power/supply/max77705_charger.c
 @@ -21,6 +21,7 @@
@@ -298,7 +298,17 @@ index 3e6352f..d36dd50 100644
  static int max77705_set_charge_behaviour(struct max77705_charger_data *chg,
  					 int behaviour)
  {
-@@ -714,6 +917,13 @@ static void max77705_chgin_isr_work(struct work_struct *work)
+@@ -625,7 +828,8 @@ static int max77705_chg_get_property(struct power_supply *psy,
+ 
+ 	switch (psp) {
+ 	case POWER_SUPPLY_PROP_ONLINE:
+-		if (chg->otg_on) {
++		/* the boost drives an output: nothing comes in */
++		if (chg->otg_on || READ_ONCE(chg->uno_on)) {
+ 			val->intval = 0;
+ 			return 0;
+ 		}
+@@ -714,6 +918,13 @@ static void max77705_chgin_isr_work(struct work_struct *work)
  {
  	struct max77705_charger_data *chg =
  		container_of(work, struct max77705_charger_data, chgin_work);
@@ -312,7 +322,7 @@ index 3e6352f..d36dd50 100644
  
  	power_supply_changed(chg->psy_chg);
  }
-@@ -809,7 +1019,7 @@ static void max77705_wcin_work(struct work_struct *work)
+@@ -809,7 +1020,7 @@ static void max77705_wcin_work(struct work_struct *work)
  	 * change ("shutdown problem"), which is not done here.
  	 */
  	active = (ok & MAX77705_WCIN_OK) && !(ok & MAX77705_CHGIN_OK) &&
@@ -321,7 +331,7 @@ index 3e6352f..d36dd50 100644
  
  	if (!active) {
  		cancel_delayed_work(&chg->wcin_ramp_work);
-@@ -1509,7 +1719,12 @@ static int max77705_charger_set_otg(struct max77705_charger_data *chg, bool enab
+@@ -1509,7 +1720,12 @@ static int max77705_charger_set_otg(struct max77705_charger_data *chg, bool enab
  	dev_info(chg->dev, "setting USB OTG / host mode: %d\n", enable);
  
  	if (enable) {
@@ -334,7 +344,7 @@ index 3e6352f..d36dd50 100644
  		if (ret)
  			return ret;
  
-@@ -1541,7 +1756,11 @@ static int max77705_charger_set_otg(struct max77705_charger_data *chg, bool enab
+@@ -1541,7 +1757,11 @@ static int max77705_charger_set_otg(struct max77705_charger_data *chg, bool enab
  		if (ret)
  			dev_warn(chg->dev, "failed to route USB data lines: %d\n", ret);
  
@@ -346,7 +356,7 @@ index 3e6352f..d36dd50 100644
  		if (ret) {
  			dev_err(chg->dev, "failed to set OTG_CTRL mode: %d\n", ret);
  			return ret;
-@@ -1551,16 +1770,21 @@ static int max77705_charger_set_otg(struct max77705_charger_data *chg, bool enab
+@@ -1551,16 +1771,21 @@ static int max77705_charger_set_otg(struct max77705_charger_data *chg, bool enab
  			ret = usb_role_switch_set_role(chg->role_sw, USB_ROLE_HOST);
  			if (ret) {
  				dev_err(chg->dev, "failed to switch to host: %d\n", ret);
@@ -368,7 +378,7 @@ index 3e6352f..d36dd50 100644
  		if (ret)
  			dev_err(chg->dev, "failed to restore charger mode: %d\n", ret);
  
-@@ -2190,6 +2414,9 @@ static int max77705_charger_probe(struct i2c_client *i2c)
+@@ -2190,6 +2415,9 @@ static int max77705_charger_probe(struct i2c_client *i2c)
  		return -ENOMEM;
  
  	ret = devm_mutex_init(dev, &chg->port_lock);
@@ -378,7 +388,7 @@ index 3e6352f..d36dd50 100644
  	if (ret)
  		return ret;
  
-@@ -2292,6 +2519,17 @@ static int max77705_charger_probe(struct i2c_client *i2c)
+@@ -2292,6 +2520,17 @@ static int max77705_charger_probe(struct i2c_client *i2c)
  	if (ret)
  		return ret;
  

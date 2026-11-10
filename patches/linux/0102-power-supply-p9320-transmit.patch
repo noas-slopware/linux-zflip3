@@ -43,7 +43,7 @@ index 249bc14..c37016e 100644
    - compatible
    - reg
 diff --git a/drivers/power/supply/p9320_charger.c b/drivers/power/supply/p9320_charger.c
-index 007a9bf..d056ade 100644
+index 007a9bf..dc258c2 100644
 --- a/drivers/power/supply/p9320_charger.c
 +++ b/drivers/power/supply/p9320_charger.c
 @@ -11,6 +11,11 @@
@@ -74,7 +74,7 @@ index 007a9bf..d056ade 100644
  #define P9320_INT_CLEAR_L		0x26
  #define P9320_INT_CLEAR_H		0x27
  #define P9320_SYS_OP_MODE		0x2b
-@@ -44,23 +51,47 @@
+@@ -44,23 +51,42 @@
  #define P9320_ADC_VOUT			0x3c	/* mV */
  #define P9320_VOUT_SET			0x3e
  #define P9320_ADC_VRECT			0x40	/* mV */
@@ -114,15 +114,10 @@ index 007a9bf..d056ade 100644
 +#define P9320_STAT_TX_IEC_FOD		BIT(14)
 +#define P9320_STAT_TRX_DATA		BIT(15)
 +
-+#define P9320_TX_INTS		(P9320_STAT_TXCONFLICT | P9320_STAT_OVER_TEMP | \
-+				 P9320_STAT_VRECT | P9320_STAT_AC_MISSING | \
-+				 P9320_STAT_TX_CON_DISCON | P9320_STAT_TX_FOD | \
-+				 P9320_STAT_TX_RX_NOT_DET | P9320_STAT_TX_IEC_FOD | \
-+				 P9320_STAT_TRX_DATA)
  
  #define P9320_CMD_CLEAR_INT		BIT(5)
  
-@@ -79,6 +110,39 @@
+@@ -79,6 +105,39 @@
  /* comm modulation: CMA only */
  #define P9320_COMM_CMA			0x30
  
@@ -162,7 +157,7 @@ index 007a9bf..d056ade 100644
  #define P9320_FOD_LEN			12
  #define P9320_INT_LOOPS			10
  #define P9320_ATTACH_RETRIES		5
-@@ -101,6 +165,20 @@ struct p9320 {
+@@ -101,6 +160,20 @@ struct p9320 {
  	u32 rpp_scale;
  	u8 fod[P9320_FOD_LEN];
  	bool have_fod;
@@ -183,7 +178,16 @@ index 007a9bf..d056ade 100644
  };
  
  static const struct regmap_config p9320_regmap_config = {
-@@ -221,6 +299,10 @@ static void p9320_update(struct p9320 *chip)
+@@ -212,6 +285,8 @@ static int p9320_configure(struct p9320 *chip)
+ }
+ 
+ static void p9320_service_int(struct p9320 *chip);
++static const char *p9320_tx_int(struct p9320 *chip, unsigned int src,
++				unsigned int status);
+ 
+ static void p9320_update(struct p9320 *chip)
+ {
+@@ -221,6 +296,10 @@ static void p9320_update(struct p9320 *chip)
  
  	mutex_lock(&chip->lock);
  
@@ -194,7 +198,7 @@ index 007a9bf..d056ade 100644
  	if (!present) {
  		cancel_delayed_work(&chip->attach_work);
  		if (chip->online) {
-@@ -279,10 +361,298 @@ static irqreturn_t p9320_det_irq(int irq, void *data)
+@@ -279,10 +358,320 @@ static irqreturn_t p9320_det_irq(int irq, void *data)
  	return IRQ_HANDLED;
  }
  
@@ -261,6 +265,7 @@ index 007a9bf..d056ade 100644
 +static int p9320_tx_start(struct p9320 *chip)
 +{
 +	struct p9320_battery_check check = {};
++	unsigned int enables, status, mode;
 +	int ret;
 +
 +	power_supply_for_each_psy(&check, p9320_check_battery);
@@ -298,27 +303,48 @@ index 007a9bf..d056ade 100644
 +	if (!ret)
 +		ret = p9320_write16(chip, P9320_TX_IUNO_OFFSET,
 +				    P9320_TX_IUNO_OFFSET_MA);
-+	/*
-+	 * Stock never writes the enables and leaves the no-receiver timer
-+	 * off unless asked; here it is on, so a transmitter with nothing on
-+	 * it switches itself off instead of draining the battery.
-+	 */
 +	if (!ret)
-+		ret = regmap_set_bits(chip->regmap, P9320_INT_ENABLE_L,
-+				      P9320_TX_INTS & 0xff);
++		ret = p9320_read16(chip, P9320_INT_ENABLE_L, &enables);
 +	if (!ret)
-+		ret = regmap_set_bits(chip->regmap, P9320_INT_ENABLE_H,
-+				      P9320_TX_INTS >> 8);
++		ret = p9320_read16(chip, P9320_STATUS_L, &status);
++	if (!ret)
++		ret = regmap_read(chip->regmap, P9320_SYS_OP_MODE, &mode);
 +	if (ret) {
 +		dev_err(chip->dev, "cannot set up the transmitter: %d\n", ret);
 +		__p9320_tx_stop(chip, "chip not answering");
 +		goto out;
 +	}
++	dev_info(chip->dev, "transmitter on: enables 0x%04x status 0x%04x mode 0x%02x\n",
++		 enables, status, mode);
 +
-+	dev_info(chip->dev, "transmitter on\n");
++	/*
++	 * The other interrupt enables are left at the chip's defaults, as
++	 * stock leaves them. Stock turns the no-receiver timer on only when
++	 * asked; here it is always on, so a transmitter with nothing on it
++	 * switches itself off instead of draining the battery.
++	 */
++	ret = regmap_set_bits(chip->regmap, P9320_INT_ENABLE_H,
++			      P9320_STAT_TX_RX_NOT_DET >> 8);
++	if (ret) {
++		__p9320_tx_stop(chip, "chip not answering");
++		goto out;
++	}
++
 +	schedule_delayed_work(&chip->tx_duty_work,
 +			      msecs_to_jiffies(P9320_TX_DUTY_START_MS));
-+	/* the chip raises AC_MISSING as it comes up on UNO */
++
++	/*
++	 * The chip raises AC_MISSING as it comes up on UNO; it may have done
++	 * so before its interrupt was looked at, so the status decides.
++	 */
++	if (status & P9320_STAT_AC_MISSING) {
++		const char *stop = p9320_tx_int(chip, P9320_STAT_AC_MISSING, status);
++
++		if (stop) {
++			__p9320_tx_stop(chip, stop);
++			goto out;
++		}
++	}
 +	p9320_service_int(chip);
 +	power_supply_changed(chip->psy);
 +out:
@@ -494,7 +520,7 @@ index 007a9bf..d056ade 100644
   */
  static void p9320_service_int(struct p9320 *chip)
  {
-@@ -292,13 +662,29 @@ static void p9320_service_int(struct p9320 *chip)
+@@ -292,13 +681,29 @@ static void p9320_service_int(struct p9320 *chip)
  	lockdep_assert_held(&chip->lock);
  
  	for (loops = 0; loops < P9320_INT_LOOPS; loops++) {
@@ -525,7 +551,7 @@ index 007a9bf..d056ade 100644
  		if (src & P9320_STAT_OP_MODE)
  			dev_dbg(chip->dev, "op mode 0x%02x\n", status);
  		if (src & (P9320_STAT_OVER_TEMP | P9320_STAT_OVER_CURR |
-@@ -398,6 +784,83 @@ static int p9320_get_property(struct power_supply *psy,
+@@ -398,6 +803,83 @@ static int p9320_get_property(struct power_supply *psy,
  	return ret;
  }
  
@@ -609,7 +635,7 @@ index 007a9bf..d056ade 100644
  static const struct power_supply_desc p9320_psy_desc = {
  	.name = "p9320-wireless",
  	.type = POWER_SUPPLY_TYPE_WIRELESS,
-@@ -455,8 +918,19 @@ static int p9320_probe(struct i2c_client *client)
+@@ -455,8 +937,19 @@ static int p9320_probe(struct i2c_client *client)
  	else if (ret != -EINVAL)
  		dev_warn(dev, "idt,fod needs %d bytes, ignored\n", P9320_FOD_LEN);
  
@@ -629,7 +655,7 @@ index 007a9bf..d056ade 100644
  	chip->psy = devm_power_supply_register(dev, &p9320_psy_desc, &cfg);
  	if (IS_ERR(chip->psy))
  		return dev_err_probe(dev, PTR_ERR(chip->psy),
-@@ -468,6 +942,27 @@ static int p9320_probe(struct i2c_client *client)
+@@ -468,6 +961,27 @@ static int p9320_probe(struct i2c_client *client)
  	if (ret)
  		return ret;
  
