@@ -18,10 +18,15 @@ mkdir -p /dev/pts && mount -t devpts devpts /dev/pts
 
 echo "##### INIT REACHED (PID 1) #####" > /dev/tty0
 
-# Whatever the previous boot left in ramoops goes on screen first, then hold it there
-# long enough to photograph.
-if mount -t pstore pstore /sys/fs/pstore 2>/dev/null && [ -n "$(ls /sys/fs/pstore 2>/dev/null)" ]; then
-  for f in /sys/fs/pstore/*; do
+# A crash record of the previous boot (ramoops writes dmesg-ramoops-N on an oops or a
+# panic) goes on screen first, held there long enough to photograph. console-ramoops
+# is not one: ramoops keeps the console of every boot, and it survives a warm reboot
+# now and then. Holding for it painted the old console over the screen for a minute and
+# let the regulator cleanup, 30 s after boot, switch off rails whose drivers were still
+# on the root filesystem. systemd-pstore archives all of them either way.
+if mount -t pstore pstore /sys/fs/pstore 2>/dev/null &&
+   [ -n "$(ls /sys/fs/pstore/dmesg-* 2>/dev/null)" ]; then
+  for f in /sys/fs/pstore/dmesg-*; do
     echo "=== $f" > /dev/tty0
     tail -n 60 "$f" > /dev/tty0
   done
