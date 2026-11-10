@@ -1,0 +1,180 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] arm64: dts: qcom: sm8350-b2q: add the rear ultrawide camera
+
+Describe the rear ultrawide camera as stock's qcom,cam-sensor2 (dtbo entry
+3) wires it: CCI1 master 0, CSIPHY2, MCLK1 on gpio101 at 19.2 MHz and
+UWCAM_RST_N on gpio106, with its three S2MPB02 rails (L4 1.2 V cam_vdig,
+L10 1.8 V cam_vio, L12 2.7 V cam_vana). The pin states follow stock's
+cam_sensor_mclk1 and rst2 states. The CSIPHY supplies are L5B (0.88 V)
+and L6B (1.2 V), as on stock.
+
+Stock ships two sensor modules for this slot, a Sony IMX258 and a Samsung
+S5K3L6. The node assumes the IMX258, whose driver reads the chip ID at
+probe, so a unit with the other sensor fails to probe instead of being
+driven wrongly. The stock DT carries neither the I2C address nor the lane
+count (stock's userspace supplies both): 0x1a is the IMX258 default and
+four lanes is what the sensor provides. The link frequency is the
+driver's 633.6 MHz for a 19.2 MHz clock, inside the 505 to 646 MHz range
+stock programs for this module.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts |  126 +++++++++++++++++++++++
+ 1 file changed, 124 insertions(+), 2 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+index 287b433..eb3d6cd 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+@@ -481,8 +481,8 @@
+ 		/*
+ 		 * Stock's s2mpb02_pmic@59 (dtbo entry 3). Only the rails with a
+ 		 * consumer here, or that stock keeps always on, are described:
+-		 * the core switches off an unclaimed rail it manages. The camera
+-		 * rails stay undescribed until their consumers exist.
++		 * the core switches off an unclaimed rail it manages. Of the
++		 * camera rails only the ultrawide's are described so far.
+ 		 */
+ 		s2mpb02: pmic@59 {
+ 			compatible = "samsung,s2mpb02";
+@@ -504,6 +504,27 @@
+ 			};
+ 
+ 			regulators {
++				/* Stock's cam_vdig for the rear ultrawide, 1.2 V */
++				s2mpb02_l4: ldo4 {
++					regulator-name = "s2mpb02-l4";
++					regulator-min-microvolt = <1200000>;
++					regulator-max-microvolt = <1200000>;
++				};
++
++				/* Stock's cam_vio for the rear ultrawide, 1.8 V */
++				s2mpb02_l10: ldo10 {
++					regulator-name = "s2mpb02-l10";
++					regulator-min-microvolt = <1800000>;
++					regulator-max-microvolt = <1800000>;
++				};
++
++				/* Stock's cam_vana for the rear ultrawide, 2.7 V */
++				s2mpb02_l12: ldo12 {
++					regulator-name = "s2mpb02-l12";
++					regulator-min-microvolt = <2700000>;
++					regulator-max-microvolt = <2700000>;
++				};
++
+ 				/*
+ 				 * The cover panel's VCI. Stock's LDO range is 2.8 to
+ 				 * 3.3 V and its panel requests 3.3 V on it
+@@ -1541,6 +1562,40 @@
+ 			bias-pull-up;
+ 		};
+ 	};
++
++	/* Rear ultrawide: MCLK1 and UWCAM_RST_N, as stock's cam_sensor_mclk1 and rst2 states */
++	cam_uw_default: cam-uw-default-state {
++		mclk-pins {
++			pins = "gpio101";
++			function = "cam_mclk";
++			drive-strength = <2>;
++			bias-disable;
++		};
++
++		rst-pins {
++			pins = "gpio106";
++			function = "gpio";
++			drive-strength = <2>;
++			bias-disable;
++		};
++	};
++
++	cam_uw_suspend: cam-uw-suspend-state {
++		mclk-pins {
++			pins = "gpio101";
++			function = "cam_mclk";
++			drive-strength = <2>;
++			bias-pull-down;
++		};
++
++		rst-pins {
++			pins = "gpio106";
++			function = "gpio";
++			drive-strength = <2>;
++			bias-pull-down;
++			output-low;
++		};
++	};
+ };
+ 
+ // SoC I/O nodes
+@@ -2146,3 +2201,70 @@
+ 		};
+ 	};
+ };
++
++/*
++ * Cameras. Only the rear ultrawide for now: stock's qcom,cam-sensor2 (dtbo
++ * entry 3) on CCI1 master 0 and CSIPHY2, MCLK1 at 19.2 MHz, reset on
++ * gpio106. Stock ships two sensor modules for this slot (Sony IMX258 and
++ * Samsung S5K3L6); this node assumes the IMX258, whose driver checks the
++ * chip ID at probe. Neither the I2C address nor the lane count is in the
++ * stock DT (stock's userspace supplies them): 0x1a is the IMX258 default,
++ * and four lanes is what the sensor offers.
++ */
++&camss {
++	vdda-phy-supply = <&vreg_l5b_0p88>;
++	vdda-pll-supply = <&vreg_l6b_1p2>;
++
++	status = "okay";
++
++	ports {
++		#address-cells = <1>;
++		#size-cells = <0>;
++
++		/* The port index is the CSIPHY id */
++		port@2 {
++			reg = <2>;
++
++			csiphy2_ep: endpoint {
++				clock-lanes = <7>;
++				data-lanes = <0 1 2 3>;
++				remote-endpoint = <&cam_uw_ep>;
++			};
++		};
++	};
++};
++
++&cci1 {
++	status = "okay";
++};
++
++&cci1_i2c0 {
++	#address-cells = <1>;
++	#size-cells = <0>;
++
++	camera@1a {
++		compatible = "sony,imx258";
++		reg = <0x1a>;
++
++		reset-gpios = <&tlmm 106 GPIO_ACTIVE_LOW>;
++		pinctrl-0 = <&cam_uw_default>;
++		pinctrl-1 = <&cam_uw_suspend>;
++		pinctrl-names = "default", "sleep";
++
++		clocks = <&camcc CAM_CC_MCLK1_CLK>;
++		assigned-clocks = <&camcc CAM_CC_MCLK1_CLK>;
++		assigned-clock-rates = <19200000>;
++
++		vana-supply = <&s2mpb02_l12>;
++		vdig-supply = <&s2mpb02_l4>;
++		vif-supply = <&s2mpb02_l10>;
++
++		port {
++			cam_uw_ep: endpoint {
++				link-frequencies = /bits/ 64 <633600000>;
++				data-lanes = <1 2 3 4>;
++				remote-endpoint = <&csiphy2_ep>;
++			};
++		};
++	};
++};
