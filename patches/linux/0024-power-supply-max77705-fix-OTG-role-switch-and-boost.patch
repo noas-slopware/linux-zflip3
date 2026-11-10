@@ -1,0 +1,195 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] power: supply: max77705: fix OTG role switch and VBUS boost
+
+Two problems kept a USB-C peripheral from enumerating:
+
+The CONTROL1_WRITE opcode that routes D+/D- to the AP was sent from
+update_port(), which runs in the threaded USBC interrupt. The opcode
+mailbox waits for APCmdResI, and that interrupt cannot be delivered while
+the USBC interrupt thread is still running with IRQF_ONESHOT. Every call
+timed out after three seconds and the switch stayed open. Queue the OTG
+state change on the ordered workqueue instead.
+
+The boost mode was written as 0x0a (boost and OTG only) on top of the
+charger mode. Stock keeps the buck and charger bits and writes 0x0f from
+0x05 (buck and charger), 0x0e from 0x04 (buck only), and 0x0a only from an
+all-off charger. With 0x0a the buck path stayed off and VBUS did not come
+up. Restore the saved charger mode when OTG is turned off instead of
+writing 0.
+
+Also unmask CCIStat and CCPinStat next to CCStat, and run update_port() for
+them. The CC state can change without CCStat moving on some attaches.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+---
+ drivers/power/supply/max77705_charger.c | 75 +++++++++++++++++++++----
+ include/linux/power/max77705_charger.h  |  5 ++
+ 2 files changed, 70 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/power/supply/max77705_charger.c b/drivers/power/supply/max77705_charger.c
+index 78703948f..2fdf027cd 100644
+--- a/drivers/power/supply/max77705_charger.c
++++ b/drivers/power/supply/max77705_charger.c
+@@ -27,6 +27,7 @@ static const char *max77705_charger_model		= "max77705";
+ static const char *max77705_charger_manufacturer	= "Maxim Integrated";
+ 
+ static int max77705_charger_set_otg(struct max77705_charger_data *chg, bool enable);
++static void max77705_otg_work(struct work_struct *work);
+ 
+ static const struct regmap_config max77705_chg_regmap_config = {
+ 	.reg_base = MAX77705_CHG_REG_BASE,
+@@ -726,13 +727,18 @@ static int max77705_charger_update_port(struct max77705_charger_data *chg)
+ 		status, cc_status0, pd_status1);
+ 
+ 	if (cc_stat == MAX77705_CC_SOURCE || (data_role_host && !(status & MAX77705_USBC_BC_STATUS_VBUSDET))) {
+-		max77705_charger_set_otg(chg, true);
++		if (!chg->otg_requested) {
++			chg->otg_requested = true;
++			queue_work(chg->wqueue, &chg->otg_work);
++		}
+ 	} else if (cc_stat == MAX77705_CC_NO_CONN || (status & MAX77705_USBC_BC_STATUS_VBUSDET)) {
+-		if (chg->otg_on)
+-			max77705_charger_set_otg(chg, false);
++		if (chg->otg_requested) {
++			chg->otg_requested = false;
++			queue_work(chg->wqueue, &chg->otg_work);
++		}
+ 	}
+ 
+-	if (chg->otg_on)
++	if (chg->otg_on || chg->otg_requested)
+ 		return 0;
+ 
+ 	/*
+@@ -832,9 +838,19 @@ static int max77705_usbc_cmd(struct max77705_charger_data *chg, u8 opcode,
+ 	return ret;
+ }
+ 
++static void max77705_otg_work(struct work_struct *work)
++{
++	struct max77705_charger_data *chg =
++		container_of(work, struct max77705_charger_data, otg_work);
++
++	max77705_charger_set_otg(chg, chg->otg_requested);
++}
++
+ static int max77705_charger_set_otg(struct max77705_charger_data *chg, bool enable)
+ {
+ 	u8 sw_data = MAX77705_USBC_CONTROL1_USB;
++	unsigned int mode;
++	u8 target;
+ 	int ret;
+ 
+ 	if (chg->otg_on == enable)
+@@ -843,20 +859,52 @@ static int max77705_charger_set_otg(struct max77705_charger_data *chg, bool enab
+ 	dev_info(chg->dev, "setting USB OTG / host mode: %d\n", enable);
+ 
+ 	if (enable) {
+-		regmap_field_write(chg->rfield[MAX77705_OTG_ILIM], MAX77705_OTG_ILIM_1500);
++		ret = regmap_field_read(chg->rfield[MAX77705_MODE], &mode);
++		if (ret)
++			return ret;
++
++		chg->otg_prev_mode = mode;
+ 
+-		max77705_usbc_cmd(chg, MAX77705_USBC_OP_CONTROL1_WRITE, &sw_data, 1, NULL, 0);
++		/*
++		 * Stock keeps the buck and charger bits that are already on and
++		 * adds boost and OTG: 0x5 (buck and charger) becomes 0xF, 0x4
++		 * (buck only) becomes 0xE, and an all-off charger becomes 0xA.
++		 * Writing 0xA on top of a charger mode leaves the buck path off
++		 * and the boost does not come up.
++		 */
++		if (mode & MAX77705_BUCK_MASK)
++			target = mode | MAX77705_BOOST_MASK | MAX77705_OTG_MASK;
++		else
++			target = MAX77705_BOOST_MASK | MAX77705_OTG_MASK;
+ 
+-		ret = regmap_field_write(chg->rfield[MAX77705_MODE], MAX77705_OTG_CTRL);
++		regmap_field_write(chg->rfield[MAX77705_OTG_ILIM], MAX77705_OTG_ILIM_1500);
++
++		/*
++		 * This runs from the ordered workqueue, not from the threaded
++		 * USBC interrupt. The opcode mailbox waits for APCmdResI, and
++		 * that interrupt cannot be delivered while the USBC interrupt
++		 * thread is still running with IRQF_ONESHOT.
++		 */
++		ret = max77705_usbc_cmd(chg, MAX77705_USBC_OP_CONTROL1_WRITE,
++					&sw_data, 1, NULL, 0);
+ 		if (ret)
++			dev_warn(chg->dev, "failed to route USB data lines: %d\n", ret);
++
++		ret = regmap_field_write(chg->rfield[MAX77705_MODE], target);
++		if (ret) {
+ 			dev_err(chg->dev, "failed to set OTG_CTRL mode: %d\n", ret);
++			return ret;
++		}
+ 
+ 		if (chg->role_sw)
+ 			usb_role_switch_set_role(chg->role_sw, USB_ROLE_HOST);
+ 
+ 		chg->otg_on = true;
+ 	} else {
+-		regmap_field_write(chg->rfield[MAX77705_MODE], 0);
++		ret = regmap_field_write(chg->rfield[MAX77705_MODE],
++					 chg->otg_prev_mode);
++		if (ret)
++			dev_err(chg->dev, "failed to restore charger mode: %d\n", ret);
+ 
+ 		if (chg->role_sw)
+ 			usb_role_switch_set_role(chg->role_sw, USB_ROLE_DEVICE);
+@@ -1078,7 +1126,9 @@ static irqreturn_t max77705_charger_usbc_irq(int irq, void *data)
+ 
+ 	if ((int_status & (MAX77705_USBC_UIC_INT_VBUSDET |
+ 			   MAX77705_USBC_UIC_INT_CHGTYP)) ||
+-	    (cc_status & MAX77705_USBC_CC_INT_CCSTAT) ||
++	    (cc_status & (MAX77705_USBC_CC_INT_CCSTAT |
++			  MAX77705_USBC_CC_INT_CCISTAT |
++			  MAX77705_USBC_CC_INT_CCPINSTAT)) ||
+ 	    (pd_status & MAX77705_USBC_PD_INT_DATAROLE))
+ 		max77705_charger_update_port(chg);
+ 
+@@ -1135,7 +1185,9 @@ static int max77705_charger_setup_usbc(struct max77705_charger_data *chg)
+ 		return ret;
+ 
+ 	ret = regmap_update_bits(chg->regmap_muic, MAX77705_USBC_REG_CC_INT_M,
+-				 MAX77705_USBC_CC_INT_CCSTAT, 0);
++				 MAX77705_USBC_CC_INT_CCSTAT |
++				 MAX77705_USBC_CC_INT_CCISTAT |
++				 MAX77705_USBC_CC_INT_CCPINSTAT, 0);
+ 	if (ret)
+ 		return ret;
+ 
+@@ -1414,6 +1466,9 @@ static int max77705_charger_probe(struct i2c_client *i2c)
+ 	mutex_init(&chg->cmd_lock);
+ 	init_completion(&chg->cmd_done);
+ 	ret = devm_work_autocancel(dev, &chg->pd_work, max77705_pd_work);
++	if (ret)
++		return ret;
++	ret = devm_work_autocancel(dev, &chg->otg_work, max77705_otg_work);
+ 	if (ret)
+ 		return ret;
+ 	ret = devm_delayed_work_autocancel(dev, &chg->afc_work, max77705_afc_work);
+diff --git a/include/linux/power/max77705_charger.h b/include/linux/power/max77705_charger.h
+index 2c42dba22..8dabb5e6b 100644
+--- a/include/linux/power/max77705_charger.h
++++ b/include/linux/power/max77705_charger.h
+@@ -153,6 +153,8 @@
+ #define MAX77705_USBC_REG_PD_INT_M	0x10
+ 
+ #define MAX77705_USBC_CC_INT_CCSTAT	BIT(0)
++#define MAX77705_USBC_CC_INT_CCISTAT	BIT(2)
++#define MAX77705_USBC_CC_INT_CCPINSTAT	BIT(3)
+ #define MAX77705_USBC_CC_STATUS0_CCSTAT	GENMASK(2, 0)
+ #define MAX77705_CC_NO_CONN		0
+ #define MAX77705_CC_SINK		1
+@@ -261,6 +263,9 @@ struct max77705_charger_data {
+ 	struct power_supply	*psy_chg;
+ 	struct usb_role_switch	*role_sw;
+ 	bool			otg_on;
++	bool			otg_requested;
++	u8			otg_prev_mode;
++	struct work_struct	otg_work;
+ 	/* BC1.2 port currents, SDP/CDP/DCP, zero when not configured */
+ 	unsigned int		input_current_limit[MAX77705_NUM_PORT_TYPES];
+ 	unsigned int		charge_current_limit[MAX77705_NUM_PORT_TYPES];

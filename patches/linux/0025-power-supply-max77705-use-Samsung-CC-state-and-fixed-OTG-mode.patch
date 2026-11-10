@@ -1,0 +1,532 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] power: supply: max77705: use the Samsung CC state machine and a fixed OTG mode
+
+The mainline charger driver did not follow the Samsung MUIC behaviour:
+
+- It masked most CC and UIC interrupts and never sent the Samsung
+  factory-test opcode 0x54 that turns auto VBUS off. Stock leaves the
+  masks at UIC 0x04, CC 0x20, PD 0x1c, VDM 0xff and disables auto VBUS.
+- It waited for CCStat to become cc_SOURCE before enabling OTG. On this
+  MUIC a sink stays at CCStat 0 and only CCPinStat changes, so a USB-C
+  flash drive was never seen.
+- It derived the boost mode from CNFG_00. The charger block is at 0x00
+  here, which selected 0x0a and did not bring VBUS up. 0x0f (buck,
+  charger, boost, OTG) is the value that enumerated the drive.
+
+Mirror the stock masks and auto VBUS opcode, trigger OTG on CCPinStat
+when VBUS is absent, and latch OTG until the CC pins are released. While
+OTG is latched its own boost sets VBUSDET, so VBUSDET must not turn it
+off again or the driver toggles forever.
+
+A charger, laptop or other source reports CCStat = SINK. Sink always
+wins: it clears the OTG latch and keeps the phone a device, even while
+the latch was set. This matters when the phone boots with a laptop
+attached, where the CC pins are active before VBUS settles.
+
+A pin-only attach is ambiguous: a source that is being plugged in shows
+the same state until its VBUS comes up, at most tCCDebounce (200 ms) plus
+tVBUSON (275 ms) later. Stock never sees this, because it waits for
+CCStat = cc_SOURCE, which the MUIC firmware debounces itself. Take a
+pin-only attach for a sink only after it has held, with the same
+CC_STATUS0 and no VBUS, for 500 ms. A CC change restarts the window, and
+VBUS, SINK or released pins cancel it. This covers hot-plug, which a
+probe-time delay alone never did.
+
+Do not enable OTG for the first three seconds after probe either. With a
+source attached at boot VBUSDET can still be clear while it negotiates,
+and starting the boost then fights the source and can leave Plasma
+Mobile without power. Nothing reports when that has settled, so the hold
+stays time-based until the cause is found.
+
+With the CC handling and the probe hold, a SanDisk 3.2Gen1 on the port
+enumerated automatically after a hotplug, and a laptop or charger kept the
+phone in device mode and charging (verified before the attach debounce
+was added).
+
+Serialize the port state: update_port() runs from the USB-C interrupt
+thread, from the ordered workqueue and from the probe delay, so it now
+takes port_lock, and the probe delay is queued on the ordered workqueue
+instead of system_wq. A failed CC or PD status read leaves the state
+alone instead of reading as a detach, which dropped a live OTG session.
+If enabling OTG fails (current limit, mode or role switch), undo it and
+drop the request so the port goes back to sink handling.
+
+Take the role switch before the work items exist and put it through its
+own devm action, so it outlives the interrupts and the OTG work and is
+not leaked when probe fails later. On removal, forbid new OTG requests
+and flush the OTG work before switching the boost off.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/power/supply/max77705_charger.c | 294 ++++++++++++++++++++----
+ include/linux/power/max77705_charger.h  |   9 +
+ 2 files changed, 257 insertions(+), 46 deletions(-)
+
+diff --git a/drivers/power/supply/max77705_charger.c b/drivers/power/supply/max77705_charger.c
+index 2fdf027cd..b1ff54d3b 100644
+--- a/drivers/power/supply/max77705_charger.c
++++ b/drivers/power/supply/max77705_charger.c
+@@ -29,6 +29,24 @@ static const char *max77705_charger_manufacturer	= "Maxim Integrated";
+ static int max77705_charger_set_otg(struct max77705_charger_data *chg, bool enable);
+ static void max77705_otg_work(struct work_struct *work);
+ 
++/*
++ * How long a pin-only attach (CCPinStat set, CCStat still no connection,
++ * no VBUS) must hold before it is taken for a sink to power. A source
++ * that is being plugged in shows the same state first: it debounces its
++ * CC termination for tCCDebounce (100-200 ms) and then has tVBUSON (at
++ * most 275 ms) to drive VBUS (USB Type-C Specification, Release 2.x,
++ * section 4.11). 200 + 275 ms is the latest its VBUS can appear; 500 ms
++ * covers that with margin and is still well below what a user notices
++ * when plugging in a flash drive.
++ *
++ * Stock never needs this: it starts the boost on CCStat = cc_SOURCE
++ * (max77705_cc.c, max77705_vbus_turn_on_ctrl()), which the MAX77705
++ * firmware reports only after its own CC debounce. On this unit a sink
++ * never reaches cc_SOURCE, so the driver has to act on the undebounced
++ * CCPinStat and do the debounce itself.
++ */
++#define MAX77705_OTG_ATTACH_DEBOUNCE_MS	500
++
+ static const struct regmap_config max77705_chg_regmap_config = {
+ 	.reg_base = MAX77705_CHG_REG_BASE,
+ 	.reg_bits = 8,
+@@ -122,15 +140,34 @@ static int max77705_charger_enable(struct max77705_charger_data *chg)
+ 	return rv;
+ }
+ 
++static void max77705_charger_put_role_sw(void *data)
++{
++	struct max77705_charger_data *chg = data;
++
++	usb_role_switch_put(chg->role_sw);
++}
++
+ static void max77705_charger_disable(void *data)
+ {
+ 	struct max77705_charger_data *chg = data;
+ 	int rv;
+ 
++	/*
++	 * The USB-C interrupt is still live here (devm frees it after this
++	 * action). Forbid new OTG requests first, then flush the OTG work,
++	 * so nothing turns the boost back on after it is switched off.
++	 */
++	cancel_delayed_work_sync(&chg->otg_delay_work);
++	mutex_lock(&chg->port_lock);
++	chg->otg_allowed = false;
++	chg->otg_requested = false;
++	mutex_unlock(&chg->port_lock);
++	/* otg_allowed is false, so update_port() cannot re-arm it any more */
++	cancel_delayed_work_sync(&chg->otg_attach_work);
++	cancel_work_sync(&chg->otg_work);
++
+ 	if (chg->otg_on)
+ 		max77705_charger_set_otg(chg, false);
+-	if (chg->role_sw)
+-		usb_role_switch_put(chg->role_sw);
+ 
+ 	rv = regmap_field_write(chg->rfield[MAX77705_CHG_EN], MAX77705_CHG_DISABLE);
+ 	if (rv)
+@@ -700,44 +737,100 @@ static int max77705_charger_apply_port_current(struct max77705_charger_data *chg
+ 	return 0;
+ }
+ 
+-static int max77705_charger_update_port(struct max77705_charger_data *chg)
++/*
++ * Called from the USB-C interrupt thread and from the ordered workqueue, so
++ * the port state and the OTG request are serialized by port_lock. Nothing
++ * in here may issue a USB-C opcode: the opcode reply arrives through the
++ * same interrupt thread, which could be waiting for this lock.
++ */
++static int __max77705_charger_update_port(struct max77705_charger_data *chg)
+ {
+ 	unsigned int port, status;
+-	unsigned int cc_status0 = 0, pd_status1 = 0;
+-	u8 cc_stat;
+-	bool data_role_host;
++	unsigned int cc_status0, pd_status1;
++	u8 cc_stat, cc_pin;
+ 	int ret;
+ 
++	lockdep_assert_held(&chg->port_lock);
++
+ 	ret = regmap_read(chg->regmap_muic, MAX77705_USBC_REG_BC_STATUS, &status);
+ 	if (ret)
+ 		return ret;
+ 
++	/*
++	 * A failed read must not look like a detach: that would drop a live
++	 * OTG session. Keep the current state and wait for the next event.
++	 */
+ 	ret = regmap_read(chg->regmap_muic, MAX77705_USBC_REG_CC_STATUS0, &cc_status0);
+ 	if (ret)
+-		cc_status0 = 0;
++		return ret;
+ 
+ 	ret = regmap_read(chg->regmap_muic, MAX77705_USBC_REG_PD_STATUS1, &pd_status1);
+ 	if (ret)
+-		pd_status1 = 0;
++		return ret;
+ 
+ 	cc_stat = cc_status0 & MAX77705_USBC_CC_STATUS0_CCSTAT;
+-	data_role_host = !!(pd_status1 & MAX77705_USBC_PD_STATUS1_DATAROLE);
++	cc_pin = (cc_status0 & MAX77705_USBC_CC_STATUS0_CCPINSTAT) >>
++		 __ffs(MAX77705_USBC_CC_STATUS0_CCPINSTAT);
+ 
+ 	dev_dbg(chg->dev, "update_port: BC 0x%02x CC0 0x%02x PD1 0x%02x\n",
+ 		status, cc_status0, pd_status1);
+ 
+-	if (cc_stat == MAX77705_CC_SOURCE || (data_role_host && !(status & MAX77705_USBC_BC_STATUS_VBUSDET))) {
+-		if (!chg->otg_requested) {
+-			chg->otg_requested = true;
++	/*
++	 * A charger, laptop or other source reports CCStat = SINK. The phone
++	 * must stay a sink/device in that case, even if OTG was latched
++	 * before the source was detected. Only a source role or an open CC
++	 * pin pair with no VBUS starts OTG.
++	 */
++	if (cc_stat == MAX77705_CC_SINK) {
++		if (chg->otg_requested) {
++			chg->otg_requested = false;
+ 			queue_work(chg->wqueue, &chg->otg_work);
+ 		}
+-	} else if (cc_stat == MAX77705_CC_NO_CONN || (status & MAX77705_USBC_BC_STATUS_VBUSDET)) {
+-		if (chg->otg_requested) {
++	} else if (chg->otg_on || chg->otg_requested) {
++		/*
++		 * Our own OTG boost sets VBUSDET. Ignore VBUS while latched and
++		 * release only when the CC pins are gone.
++		 */
++		if (!cc_pin && cc_stat == MAX77705_CC_NO_CONN) {
+ 			chg->otg_requested = false;
+ 			queue_work(chg->wqueue, &chg->otg_work);
+ 		}
++	} else if (chg->otg_allowed && cc_stat == MAX77705_CC_SOURCE) {
++		/* the MUIC's own debounced verdict: power the sink now */
++		chg->otg_requested = true;
++		queue_work(chg->wqueue, &chg->otg_work);
++	} else if (chg->otg_allowed && cc_stat == MAX77705_CC_NO_CONN && cc_pin &&
++		   !(status & MAX77705_USBC_BC_STATUS_VBUSDET)) {
++		/*
++		 * A pin-only attach: a sink, or a source whose VBUS is not up
++		 * yet. Take it for a sink only once it has held for the whole
++		 * debounce. A change of CC_STATUS0 within it (the other pin, a
++		 * CCIStat step) restarts the window, also when it is only seen
++		 * at the end of the window (not every CC bit interrupts); an
++		 * interrupt that leaves the state as it was does not; anything
++		 * that is no longer a pin-only attach cancels it below.
++		 */
++		if (chg->otg_attach_settled && cc_status0 == chg->otg_attach_cc0) {
++			chg->otg_requested = true;
++			queue_work(chg->wqueue, &chg->otg_work);
++		} else if (!delayed_work_pending(&chg->otg_attach_work) ||
++			   cc_status0 != chg->otg_attach_cc0) {
++			chg->otg_attach_cc0 = cc_status0;
++			mod_delayed_work(chg->wqueue, &chg->otg_attach_work,
++					 msecs_to_jiffies(MAX77705_OTG_ATTACH_DEBOUNCE_MS));
++		}
+ 	}
+ 
++	/*
++	 * VBUS came up, the source resolved to SINK, the pins went away or
++	 * OTG is already on: no attach is waiting for its debounce. A run
++	 * that is already waiting for port_lock re-reads the state and does
++	 * nothing.
++	 */
++	if (chg->otg_on || chg->otg_requested || cc_stat != MAX77705_CC_NO_CONN ||
++	    !cc_pin || (status & MAX77705_USBC_BC_STATUS_VBUSDET))
++		cancel_delayed_work(&chg->otg_attach_work);
++
+ 	if (chg->otg_on || chg->otg_requested)
+ 		return 0;
+ 
+@@ -781,6 +874,17 @@ static int max77705_charger_update_port(struct max77705_charger_data *chg)
+ 	return 0;
+ }
+ 
++static int max77705_charger_update_port(struct max77705_charger_data *chg)
++{
++	int ret;
++
++	mutex_lock(&chg->port_lock);
++	ret = __max77705_charger_update_port(chg);
++	mutex_unlock(&chg->port_lock);
++
++	return ret;
++}
++
+ /*
+  * The USB-C block's opcode mailbox (Samsung max77705_i2c_opcode_write/read):
+  * the opcode and its data go to 0x21, 0x41 ends a short command, the block
+@@ -843,7 +947,69 @@ static void max77705_otg_work(struct work_struct *work)
+ 	struct max77705_charger_data *chg =
+ 		container_of(work, struct max77705_charger_data, otg_work);
+ 
+-	max77705_charger_set_otg(chg, chg->otg_requested);
++	bool enable;
++	int ret;
++
++	mutex_lock(&chg->port_lock);
++	enable = chg->otg_requested;
++	mutex_unlock(&chg->port_lock);
++
++	/* not under port_lock: set_otg() waits for a USB-C opcode reply */
++	ret = max77705_charger_set_otg(chg, enable);
++	if (ret) {
++		/*
++		 * Drop the request so update_port() applies the sink state
++		 * again; the next CC interrupt asks for OTG once more. Do not
++		 * call update_port() from here, or a persistent failure would
++		 * retry in a loop.
++		 */
++		dev_err(chg->dev, "failed to %s OTG: %d\n",
++			enable ? "enable" : "disable", ret);
++		mutex_lock(&chg->port_lock);
++		chg->otg_requested = chg->otg_on;
++		mutex_unlock(&chg->port_lock);
++		return;
++	}
++
++	/* apply the sink currents again once OTG has released the port */
++	if (!chg->otg_on)
++		max77705_charger_update_port(chg);
++}
++
++static void max77705_otg_delay_work(struct work_struct *work)
++{
++	struct max77705_charger_data *chg =
++		container_of(work, struct max77705_charger_data,
++			     otg_delay_work.work);
++
++	/*
++	 * Do not start OTG during the first seconds of probe. With a charger
++	 * plugged at boot, VBUSDET can be clear while the charger negotiates
++	 * (for how long was never measured), and enabling the boost then
++	 * fought the charger and left the phone without power. Neither this
++	 * driver nor stock reports an event for "the boot-time CC state has
++	 * settled" (stock has no such hold: it waits for cc_SOURCE), so this
++	 * stays the 3 s that was verified on the phone until that cause is
++	 * found. A pin-only attach still goes through the debounce after it.
++	 */
++	mutex_lock(&chg->port_lock);
++	chg->otg_allowed = true;
++	__max77705_charger_update_port(chg);
++	mutex_unlock(&chg->port_lock);
++}
++
++static void max77705_otg_attach_work(struct work_struct *work)
++{
++	struct max77705_charger_data *chg =
++		container_of(work, struct max77705_charger_data,
++			     otg_attach_work.work);
++
++	/* re-read the port: OTG starts only if the pin-only attach held */
++	mutex_lock(&chg->port_lock);
++	chg->otg_attach_settled = true;
++	__max77705_charger_update_port(chg);
++	chg->otg_attach_settled = false;
++	mutex_unlock(&chg->port_lock);
+ }
+ 
+ static int max77705_charger_set_otg(struct max77705_charger_data *chg, bool enable)
+@@ -866,18 +1032,19 @@ static int max77705_charger_set_otg(struct max77705_charger_data *chg, bool enab
+ 		chg->otg_prev_mode = mode;
+ 
+ 		/*
+-		 * Stock keeps the buck and charger bits that are already on and
+-		 * adds boost and OTG: 0x5 (buck and charger) becomes 0xF, 0x4
+-		 * (buck only) becomes 0xE, and an all-off charger becomes 0xA.
+-		 * Writing 0xA on top of a charger mode leaves the buck path off
+-		 * and the boost does not come up.
++		 * 0xF is the value the forced OTG test enumerated with:
++		 * buck, charger, boost and OTG all on. Do not derive it from
++		 * the current mode; the charger block can be at 0x00 here.
+ 		 */
+-		if (mode & MAX77705_BUCK_MASK)
+-			target = mode | MAX77705_BOOST_MASK | MAX77705_OTG_MASK;
+-		else
+-			target = MAX77705_BOOST_MASK | MAX77705_OTG_MASK;
++		target = MAX77705_CHG_MASK | MAX77705_BUCK_MASK |
++			 MAX77705_BOOST_MASK | MAX77705_OTG_MASK;
+ 
+-		regmap_field_write(chg->rfield[MAX77705_OTG_ILIM], MAX77705_OTG_ILIM_1500);
++		ret = regmap_field_write(chg->rfield[MAX77705_OTG_ILIM],
++					 MAX77705_OTG_ILIM_1500);
++		if (ret) {
++			dev_err(chg->dev, "failed to set the OTG current limit: %d\n", ret);
++			return ret;
++		}
+ 
+ 		/*
+ 		 * This runs from the ordered workqueue, not from the threaded
+@@ -896,8 +1063,15 @@ static int max77705_charger_set_otg(struct max77705_charger_data *chg, bool enab
+ 			return ret;
+ 		}
+ 
+-		if (chg->role_sw)
+-			usb_role_switch_set_role(chg->role_sw, USB_ROLE_HOST);
++		if (chg->role_sw) {
++			ret = usb_role_switch_set_role(chg->role_sw, USB_ROLE_HOST);
++			if (ret) {
++				dev_err(chg->dev, "failed to switch to host: %d\n", ret);
++				regmap_field_write(chg->rfield[MAX77705_MODE],
++						   chg->otg_prev_mode);
++				return ret;
++			}
++		}
+ 
+ 		chg->otg_on = true;
+ 	} else {
+@@ -1177,26 +1351,32 @@ static int max77705_charger_setup_usbc(struct max77705_charger_data *chg)
+ 	if (ret)
+ 		return ret;
+ 
+-	ret = regmap_update_bits(chg->regmap_muic, MAX77705_USBC_REG_UIC_INT_M,
+-				 MAX77705_USBC_UIC_INT_APCMDRES |
+-				 MAX77705_USBC_UIC_INT_VBUSDET |
+-				 MAX77705_USBC_UIC_INT_CHGTYP, 0);
++	ret = regmap_write(chg->regmap_muic, MAX77705_USBC_REG_UIC_INT_M, 0x04);
++	if (ret)
++		return ret;
++
++	ret = regmap_write(chg->regmap_muic, MAX77705_USBC_REG_CC_INT_M, 0x20);
+ 	if (ret)
+ 		return ret;
+ 
+-	ret = regmap_update_bits(chg->regmap_muic, MAX77705_USBC_REG_CC_INT_M,
+-				 MAX77705_USBC_CC_INT_CCSTAT |
+-				 MAX77705_USBC_CC_INT_CCISTAT |
+-				 MAX77705_USBC_CC_INT_CCPINSTAT, 0);
++	ret = regmap_write(chg->regmap_muic, MAX77705_USBC_REG_PD_INT_M, 0x1c);
+ 	if (ret)
+ 		return ret;
+ 
+-	ret = regmap_update_bits(chg->regmap_muic, MAX77705_USBC_REG_PD_INT_M,
+-				 MAX77705_USBC_PD_INT_DATAROLE |
+-				 (chg->pd_max_power_mw ? MAX77705_USBC_PD_INT_PSRDY : 0), 0);
++	ret = regmap_write(chg->regmap_muic, MAX77705_USBC_REG_VDM_INT_M, 0xff);
+ 	if (ret)
+ 		return ret;
+ 
++	/* stock max77705_init_opcode(): turn off the auto VBUS test mode */
++	{
++		u8 auto_vbus = 0;
++
++		ret = max77705_usbc_cmd(chg, MAX77705_OP_SAMSUNG_FACTORY_TEST,
++					&auto_vbus, 1, NULL, 0);
++		if (ret)
++			dev_warn(chg->dev, "failed to disable auto VBUS: %d\n", ret);
++	}
++
+ 	/* stock max77705_set_snkcap(): the sink caps it offers to sources */
+ 	if (chg->snkcap_len)
+ 		max77705_usbc_cmd(chg, MAX77705_OP_SET_SNKCAP, chg->snkcap,
+@@ -1211,6 +1391,8 @@ static int max77705_charger_setup_usbc(struct max77705_charger_data *chg)
+ 	if (chg->pd_max_power_mw)
+ 		queue_work(chg->wqueue, &chg->pd_work);
+ 
++	queue_delayed_work(chg->wqueue, &chg->otg_delay_work, msecs_to_jiffies(3000));
++
+ 	return 0;
+ }
+ 
+@@ -1459,6 +1641,26 @@ static int max77705_charger_probe(struct i2c_client *i2c)
+ 	if (!chg->wqueue)
+ 		return -ENOMEM;
+ 
++	ret = devm_mutex_init(dev, &chg->port_lock);
++	if (ret)
++		return ret;
++
++	/*
++	 * Get the role switch before the work items are set up, so devm puts
++	 * it only after the interrupts are freed and the works are cancelled.
++	 */
++	chg->role_sw = usb_role_switch_get(dev);
++	if (IS_ERR(chg->role_sw)) {
++		if (PTR_ERR(chg->role_sw) == -EPROBE_DEFER)
++			return -EPROBE_DEFER;
++		dev_warn(dev, "usb-role-switch not found: %ld\n", PTR_ERR(chg->role_sw));
++		chg->role_sw = NULL;
++	} else if (chg->role_sw) {
++		ret = devm_add_action_or_reset(dev, max77705_charger_put_role_sw, chg);
++		if (ret)
++			return ret;
++	}
++
+ 	ret = devm_work_autocancel(dev, &chg->chgin_work, max77705_chgin_isr_work);
+ 	if (ret)
+ 		return dev_err_probe(dev, ret, "failed to initialize interrupt work\n");
+@@ -1469,6 +1671,14 @@ static int max77705_charger_probe(struct i2c_client *i2c)
+ 	if (ret)
+ 		return ret;
+ 	ret = devm_work_autocancel(dev, &chg->otg_work, max77705_otg_work);
++	if (ret)
++		return ret;
++	ret = devm_delayed_work_autocancel(dev, &chg->otg_delay_work,
++					   max77705_otg_delay_work);
++	if (ret)
++		return ret;
++	ret = devm_delayed_work_autocancel(dev, &chg->otg_attach_work,
++					   max77705_otg_attach_work);
+ 	if (ret)
+ 		return ret;
+ 	ret = devm_delayed_work_autocancel(dev, &chg->afc_work, max77705_afc_work);
+@@ -1479,14 +1689,6 @@ static int max77705_charger_probe(struct i2c_client *i2c)
+ 	if (ret)
+ 		return dev_err_probe(dev, ret, "failed to initialize charger IC\n");
+ 
+-	chg->role_sw = usb_role_switch_get(dev);
+-	if (IS_ERR(chg->role_sw)) {
+-		if (PTR_ERR(chg->role_sw) == -EPROBE_DEFER)
+-			return -EPROBE_DEFER;
+-		dev_warn(dev, "usb-role-switch not found: %ld\n", PTR_ERR(chg->role_sw));
+-		chg->role_sw = NULL;
+-	}
+-
+ 	ret = max77705_charger_setup_usbc(chg);
+ 	if (ret)
+ 		return dev_err_probe(dev, ret, "failed to set up cable detection\n");
+diff --git a/include/linux/power/max77705_charger.h b/include/linux/power/max77705_charger.h
+index 8dabb5e6b..4c7d6e600 100644
+--- a/include/linux/power/max77705_charger.h
++++ b/include/linux/power/max77705_charger.h
+@@ -151,11 +151,13 @@
+ #define MAX77705_USBC_REG_UIC_INT_M	0x0e
+ #define MAX77705_USBC_REG_CC_INT_M	0x0f
+ #define MAX77705_USBC_REG_PD_INT_M	0x10
++#define MAX77705_USBC_REG_VDM_INT_M	0x11
+ 
+ #define MAX77705_USBC_CC_INT_CCSTAT	BIT(0)
+ #define MAX77705_USBC_CC_INT_CCISTAT	BIT(2)
+ #define MAX77705_USBC_CC_INT_CCPINSTAT	BIT(3)
+ #define MAX77705_USBC_CC_STATUS0_CCSTAT	GENMASK(2, 0)
++#define MAX77705_USBC_CC_STATUS0_CCPINSTAT	GENMASK(7, 6)
+ #define MAX77705_CC_NO_CONN		0
+ #define MAX77705_CC_SINK		1
+ #define MAX77705_CC_SOURCE		2
+@@ -178,6 +180,7 @@
+ #define MAX77705_OP_BC_CTRL2_WRITE	0x04
+ #define MAX77705_USBC_OP_CONTROL1_WRITE	0x06
+ #define MAX77705_USBC_CONTROL1_USB	0x09
++#define MAX77705_OP_SAMSUNG_FACTORY_TEST	0x54
+ #define MAX77705_OP_AFC_RESULT_READ	0x21
+ #define MAX77705_OP_SET_SNKCAP		0x2e
+ #define MAX77705_OP_CURRENT_SRCCAP	0x30
+@@ -264,8 +267,14 @@ struct max77705_charger_data {
+ 	struct usb_role_switch	*role_sw;
+ 	bool			otg_on;
+ 	bool			otg_requested;
++	bool			otg_allowed;
++	bool			otg_attach_settled;	/* the debounce ran out */
++	u8			otg_attach_cc0;		/* CC_STATUS0 it is timing */
+ 	u8			otg_prev_mode;
++	struct mutex		port_lock;	/* update_port() and the OTG request */
+ 	struct work_struct	otg_work;
++	struct delayed_work	otg_delay_work;
++	struct delayed_work	otg_attach_work;
+ 	/* BC1.2 port currents, SDP/CDP/DCP, zero when not configured */
+ 	unsigned int		input_current_limit[MAX77705_NUM_PORT_TYPES];
+ 	unsigned int		charge_current_limit[MAX77705_NUM_PORT_TYPES];
