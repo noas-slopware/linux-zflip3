@@ -1,0 +1,69 @@
+From 439140cacfbf350690bf675af56a2b88deed9fed Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Tue, 10 Nov 2026 22:41:13 +0900
+Subject: [PATCH] libipa: camera_sensor_helper: Add IMX374 and IMX563 helpers
+
+Add sensor helpers for the Sony IMX374 and IMX563, the front and rear
+wide cameras of the Samsung Galaxy Z Flip3. Both have a black level of
+64 at 10 bits and an analogue gain of 1024 / (1024 - code), capped at
+896 (8x), as the phone's stock camera library programs them.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ src/ipa/libipa/camera_sensor_helper.cpp | 32 +++++++++++++++++++++++++
+ 1 file changed, 32 insertions(+)
+
+diff --git a/src/ipa/libipa/camera_sensor_helper.cpp b/src/ipa/libipa/camera_sensor_helper.cpp
+index 9457d62..1ba0578 100644
+--- a/src/ipa/libipa/camera_sensor_helper.cpp
++++ b/src/ipa/libipa/camera_sensor_helper.cpp
+@@ -617,6 +617,22 @@ public:
+ };
+ REGISTER_CAMERA_SENSOR_HELPER("imx335", CameraSensorHelperImx335)
+ 
++class CameraSensorHelperImx374 : public CameraSensorHelper
++{
++public:
++	CameraSensorHelperImx374()
++	{
++		/* 64 at 10 bits, the black level of the stock sensor module. */
++		blackLevel_ = 4096;
++		/*
++		 * The stock camera library writes reg = 1024 - 1024 / gain,
++		 * capped at 896 (8x).
++		 */
++		gain_ = AnalogueGainLinear{ 0, 1024, -1, 1024 };
++	}
++};
++REGISTER_CAMERA_SENSOR_HELPER("imx374", CameraSensorHelperImx374)
++
+ class CameraSensorHelperImx415 : public CameraSensorHelper
+ {
+ public:
+@@ -642,6 +658,22 @@ public:
+ };
+ REGISTER_CAMERA_SENSOR_HELPER("imx477", CameraSensorHelperImx477)
+ 
++class CameraSensorHelperImx563 : public CameraSensorHelper
++{
++public:
++	CameraSensorHelperImx563()
++	{
++		/* 64 at 10 bits, the black level of the stock sensor module. */
++		blackLevel_ = 4096;
++		/*
++		 * The stock camera library writes reg = 1024 - 1024 / gain,
++		 * capped at 896 (8x).
++		 */
++		gain_ = AnalogueGainLinear{ 0, 1024, -1, 1024 };
++	}
++};
++REGISTER_CAMERA_SENSOR_HELPER("imx563", CameraSensorHelperImx563)
++
+ class CameraSensorHelperImx678 : public CameraSensorHelper
+ {
+ public:
+-- 
+2.56.0
+
