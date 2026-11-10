@@ -1,0 +1,40 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] power: supply: samsung-dual-battery: link to the supplies it holds
+
+The driver holds its charger, fuel gauge and limiter power supplies for
+as long as it is bound and polls them. Nothing ties its lifetime to
+theirs: unbinding one of them, or unloading its module, left this driver
+with a power supply whose callbacks were gone, and the next poll called
+into freed code. Add a managed device link to each supply's device, so
+the driver core unbinds this driver first and probes it again once the
+supply is back.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/power/supply/samsung-dual-battery.c |   11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+
+diff --git a/drivers/power/supply/samsung-dual-battery.c b/drivers/power/supply/samsung-dual-battery.c
+index f18cf6f..79f4730 100644
+--- a/drivers/power/supply/samsung-dual-battery.c
++++ b/drivers/power/supply/samsung-dual-battery.c
+@@ -327,6 +327,17 @@ static int sdb_get_psy(struct device *dev, const char *prop,
+ 		return dev_err_probe(dev, PTR_ERR(*psy), "%s\n", prop);
+ 	if (!*psy)
+ 		return -EPROBE_DEFER;
++
++	/*
++	 * The supply is held and polled for as long as this driver is bound.
++	 * A managed link unbinds this driver before the supply's driver goes
++	 * away and probes it again once it is back, so the reference never
++	 * outlives the callbacks behind it (unloading the charger module
++	 * otherwise left this driver calling into freed code).
++	 */
++	if (!device_link_add(dev, (*psy)->dev.parent, DL_FLAG_AUTOPROBE_CONSUMER))
++		return dev_err_probe(dev, -EINVAL, "no device link to %s\n",
++				     dev_name((*psy)->dev.parent));
+ 	return 0;
+ }
+ 
