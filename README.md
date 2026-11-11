@@ -35,7 +35,7 @@ unlockable.
 | Cover display | 1.9" 260x512, DSI1 |
 | Wi-Fi / Bluetooth | QCA6390 over PCIe (`ath11k`), Bluetooth over UART |
 | Battery | 3300 mAh, dual cell |
-| Cellular | SM8350 modem (mpss) over QRTR/IPA. LG U+ never ran 3G, so calls and SMS are IMS only: VoLTE and SMS over IMS through our own userspace IMS stack (`userspace/imsd`) |
+| Cellular | SM8350 modem (mpss) over QRTR/IPA. LG U+ never ran 3G, so calls and SMS are IMS only: VoLTE and SMS over IMS through our own userspace IMS stack, [IMSroha](https://github.com/noas-slopware/imsroha) |
 | Boot chain | Stock Samsung ABL, unlockable. Non-A/B, 96 MB `boot` **and** `recovery`, Android boot header v2 with appended DTB |
 
 ## What works
@@ -58,7 +58,7 @@ unlockable.
 | SMS send and receive, received while ModemManager or the phone was down | verified |
 | MMS send and receive (Spacebar) | verified |
 | VoLTE calls in and out, to and from other networks, AMR-WB / AMR-NB | verified |
-| DTMF in calls | verified (ModemManager 1.24.2-11 with `patches/modemmanager/0004-*`) |
+| DTMF in calls | verified (ModemManager 1.24.2-11 with IMSroha's `modemmanager/0004-*`) |
 | Incoming call or SMS waking the phone from suspend | verified |
 | USB host/OTG (Type-C peripherals: YubiKey, USB-C audio/DAC, flash drives) | verified |
 | Hardware video decode (qcom-iris via qcom-va-driver) | verified: VP9 and H.264 in Firefox 159; H.264 with B-frames and HEVC decode bit-exact against software ([`VIDEO-DECODE.md`](VIDEO-DECODE.md)) |
@@ -143,8 +143,9 @@ everything, cellular included, works:
   plasma-settings qmlkonsole bluedevil kscreen firefox feedbackd evtest i2c-tools plasma-dialer geoclue
   polkit-kde-agent` (without it nothing can answer fprintd's `auth_self_keep` enroll prompt, and Settings gets "Not Authorized"),
   (plus the Adreno zap shader),
-- the cellular stack built on the phone: `b2q-imsd` from `userspace/imsd/packaging`,
-  ModemManager 1.24.2-11 with `patches/modemmanager/` (0001, 0003, 0004), Spacebar from `userspace/spacebar` with
+- the cellular stack built on the phone: `imsroha` from
+  [IMSroha](https://github.com/noas-slopware/imsroha)'s `packaging/`, ModemManager 1.24.2 from its
+  `modemmanager/` (0001, 0003-0006), Spacebar from `userspace/spacebar` with
   `patches/spacebar/`, and `opencore-amr` plus `vo-amrwbenc` for the call codecs,
 - hardware video decode (not a pacman package): `qcom-va-driver 1.1.1` from
   `github.com/nyanmisaka/libva-v4l2-qcom` at `~/src/qcom-va-driver`, built with
@@ -154,8 +155,9 @@ everything, cellular included, works:
   the UCM files under `userspace/rootfs/usr/share/alsa/ucm2/`, the WirePlumber drop-in
   under `userspace/rootfs/etc/wireplumber/`, and the CS35L41 module once the 15 ms
   mailbox build is final,
-- the IMS runtime directories: `/var/lib/b2q-imsd/inbox` and `/run/b2q-imsd` for the
-  durable SMS inbox and the call audio socket,
+- IMSroha's device settings for this phone in `userspace/rootfs/etc/imsroha/imsroha.conf`
+  (its units create `/var/lib/imsroha/inbox` and `/run/imsroha`; an inbox left in
+  `/var/lib/b2q-imsd` is moved over once),
 - the sensors: `tools/extract-qcom-firmware.sh ... slpi` and
   `tools/extract-sensor-files.sh` output (the DSP skels, sensor configs and
   `sns_reg.conf` under `/usr/share/qcom/sm8350/Samsung/b2q/`), `hexagonrpcd` from
@@ -199,7 +201,6 @@ everything, cellular included, works:
 ```
 patches/linux/           numbered series against sources.lock's LINUX_VERSION
 patches/u-boot/          SM8350 and b2q support for U-Boot
-patches/modemmanager/    b2q-imsd backend for voice and messaging
 patches/spacebar/        MMS send, own number and duplicate fixes
 patches/qcom-va-driver/  local patch for the qcom-va-driver V4L2 backend
 patches/plasma-keyboard/ Korean composition, content types
@@ -207,7 +208,6 @@ tools/                   host-side: extract firmware, build, pack, flash and ins
 VIDEO-DECODE.md          the hardware decode stack, measurements and caveats
 userspace/installer/     bring-up initramfs and installer
 userspace/rootfs/        files the rootfs carries on top of the distribution
-userspace/imsd/          IMS bearer, IMS daemon (VoLTE, SMS, MMS) and the call audio bridge
 userspace/hexagonrpcd/   FastRPC filesystem daemon for the sensor hub
 userspace/iio-sensor-proxy/ iio-sensor-proxy with the SSC claim-race fix
 userspace/neard/         Linux NFC daemon and nfctool for the NCI stack

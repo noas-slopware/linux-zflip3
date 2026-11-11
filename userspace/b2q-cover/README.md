@@ -46,7 +46,7 @@ dismisses the notification card it lands on and restarts the 8 seconds; it
 never turns the main panel on. A call holds the display on until imsd reports
 it idle or terminated (imsd's states 0, 6 or 7). Opening the lid sleeps it
 again. Backlight is 160/255 while awake. It reads `LidClosed` from logind,
-calls from `org.b2q.Imsd` on the system bus, and notifications from Plasma's
+calls from IMSroha (`codes.noa.IMSroha`) on the system bus, and notifications from Plasma's
 `org.kde.NotificationWatcher.Notify` calls through a GDBus monitor connection
 on the session bus (`BecomeMonitor`), parsed from the message body.
 

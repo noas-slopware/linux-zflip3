@@ -165,8 +165,8 @@ chroot_run systemctl enable systemd-networkd NetworkManager b2q-wifi-mac bluetoo
   serial-getty@ttyGS0
 # What the phone runs, for the units the overlay and --packages brought in: the
 # modem's file servers, the sensor hub's, IMS, the session.
-for unit in rmtfs tqftpserv hexagonrpcd-sdsp ModemManager 81voltd b2q-spud b2q-imsd \
-            b2q-ims-bearer b2q-sim-provision b2q-vss b2q-sensors-tree plasmalogin \
+for unit in rmtfs tqftpserv hexagonrpcd-sdsp ModemManager 81voltd b2q-spud imsroha \
+            imsroha-bearer b2q-sim-provision imsroha-vss-samsung b2q-sensors-tree plasmalogin \
             systemd-resolved systemd-timesyncd; do
   if [ -e "$DEST/usr/lib/systemd/system/$unit.service" ]; then
     chroot_run systemctl enable "$unit.service"

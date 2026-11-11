@@ -1020,7 +1020,7 @@ static void on_imsd_signal(GDBusConnection *connection, const gchar *sender,
 		} else if (state == 0 || state == 6 || state == 7) {
 			/*
 			 * imsd's own numbering, not ModemManager's enum
-			 * (map_imsd_call_state() in patches/modemmanager/0001
+			 * (map_imsd_call_state() in IMSroha's modemmanager/0001
 			 * translates): 0 is idle, and 6 and 7 both map to
 			 * terminated. imsd emits 6 on every hangup path
 			 * (local BYE, remote BYE, CANCEL). 5 is held, which
@@ -1049,9 +1049,9 @@ static void setup_system_bus(struct daemon *d)
 		return;
 	}
 	d->imsd_sub = g_dbus_connection_signal_subscribe(d->system_bus, NULL,
-							 "org.b2q.Imsd",
+							 "codes.noa.IMSroha",
 							 NULL,
-							 "/org/b2q/Imsd",
+							 "/codes/noa/IMSroha",
 							 NULL,
 							 G_DBUS_SIGNAL_FLAGS_NONE,
 							 on_imsd_signal, d,
