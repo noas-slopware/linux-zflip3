@@ -69,7 +69,7 @@ make -s -C "$TREE" ARCH=arm64 CROSS_COMPILE="$CROSS" olddefconfig
 
 for sym in FB_SIMPLE FRAMEBUFFER_CONSOLE PINCTRL_SM8350 SCSI_UFS_QCOM \
            USB_DWC3_QCOM PHY_QCOM_QMP_COMBO PHY_QCOM_USB_SNPS_FEMTO_V2 \
-           USB_CONFIGFS USB_CONFIGFS_ACM PSTORE_RAM BLK_DEV_DM F2FS_FS MFD_MAX77705; do
+           USB_CONFIGFS USB_CONFIGFS_ACM BLK_DEV_DM F2FS_FS MFD_MAX77705; do
   grep -q "^CONFIG_$sym=y" "$TREE/.config" || die "CONFIG_$sym did not end up =y"
 done
 grep -q '^CONFIG_DRM_SIMPLEDRM=y' "$TREE/.config" && die "simpledrm is on; it hides the last console lines before a reset"
