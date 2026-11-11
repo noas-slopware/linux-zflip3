@@ -1,0 +1,136 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] drm/bridge: panel: pass a panel's variable refresh capability to the connector
+
+A command mode DSI panel refreshes itself from its own frame memory and
+takes a new frame on any TE, so the source can send frames at irregular
+intervals, and some panels also lower their own refresh rate while no
+frame comes. Compositors only use adaptive sync on connectors that have
+"vrr_capable" set, which panel bridge and bridge connectors never attach.
+
+Add drm_panel.vrr_capable, and drm_panel_bridge_set_vrr_capable() to
+attach and set "vrr_capable" for such a panel, called next to the
+orientation in panel_bridge_attach() and drm_bridge_connector_init().
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+
+diff --git a/drivers/gpu/drm/bridge/panel.c b/drivers/gpu/drm/bridge/panel.c
+index 02388a3..067401b 100644
+--- a/drivers/gpu/drm/bridge/panel.c
++++ b/drivers/gpu/drm/bridge/panel.c
+@@ -81,6 +81,7 @@ static int panel_bridge_attach(struct drm_bridge *bridge,
+ 	}
+ 
+ 	drm_panel_bridge_set_orientation(connector, bridge);
++	drm_panel_bridge_set_vrr_capable(connector, bridge);
+ 
+ 	drm_connector_attach_encoder(&panel_bridge->connector,
+ 					  encoder);
+@@ -357,6 +358,39 @@ int drm_panel_bridge_set_orientation(struct drm_connector *connector,
+ }
+ EXPORT_SYMBOL(drm_panel_bridge_set_orientation);
+ 
++/**
++ * drm_panel_bridge_set_vrr_capable - Pass the panel's variable refresh
++ * capability to the connector, from the bridge that can be transformed to
++ * panel bridge.
++ *
++ * @connector: The connector to get the "vrr_capable" property.
++ * @bridge: The drm_bridge to be transformed to panel bridge.
++ *
++ * Attaches "vrr_capable" to @connector and sets it to true when the panel has
++ * &drm_panel.vrr_capable set; does nothing otherwise. Call it before the
++ * connector is registered.
++ *
++ * Returns 0 on success, negative errno on failure.
++ */
++int drm_panel_bridge_set_vrr_capable(struct drm_connector *connector,
++				     struct drm_bridge *bridge)
++{
++	struct panel_bridge *panel_bridge = drm_bridge_to_panel_bridge(bridge);
++	int ret;
++
++	if (!panel_bridge->panel->vrr_capable)
++		return 0;
++
++	ret = drm_connector_attach_vrr_capable_property(connector);
++	if (ret)
++		return ret;
++
++	drm_connector_set_vrr_capable_property(connector, true);
++
++	return 0;
++}
++EXPORT_SYMBOL(drm_panel_bridge_set_vrr_capable);
++
+ static void devm_drm_panel_bridge_release(struct device *dev, void *res)
+ {
+ 	struct drm_bridge *bridge = *(struct drm_bridge **)res;
+diff --git a/drivers/gpu/drm/display/drm_bridge_connector.c b/drivers/gpu/drm/display/drm_bridge_connector.c
+index 8b54069..9a726af 100644
+--- a/drivers/gpu/drm/display/drm_bridge_connector.c
++++ b/drivers/gpu/drm/display/drm_bridge_connector.c
+@@ -1082,9 +1082,14 @@ struct drm_connector *drm_bridge_connector_init(struct drm_device *drm,
+ 		connector->polled = DRM_CONNECTOR_POLL_CONNECT
+ 				  | DRM_CONNECTOR_POLL_DISCONNECT;
+ 
+-	if (panel_bridge)
++	if (panel_bridge) {
+ 		drm_panel_bridge_set_orientation(connector, panel_bridge);
+ 
++		ret = drm_panel_bridge_set_vrr_capable(connector, panel_bridge);
++		if (ret)
++			return ERR_PTR(ret);
++	}
++
+ 	if (support_hdcp && IS_REACHABLE(CONFIG_DRM_DISPLAY_HELPER) &&
+ 	    IS_ENABLED(CONFIG_DRM_DISPLAY_HDCP_HELPER))
+ 		drm_connector_attach_content_protection_property(connector, true);
+diff --git a/include/drm/drm_bridge.h b/include/drm/drm_bridge.h
+index 58fff04..2ce1a69 100644
+--- a/include/drm/drm_bridge.h
++++ b/include/drm/drm_bridge.h
+@@ -1481,6 +1481,8 @@ struct drm_bridge *drm_panel_bridge_add_typed(struct drm_panel *panel,
+ void drm_panel_bridge_remove(struct drm_bridge *bridge);
+ int drm_panel_bridge_set_orientation(struct drm_connector *connector,
+ 				     struct drm_bridge *bridge);
++int drm_panel_bridge_set_vrr_capable(struct drm_connector *connector,
++				     struct drm_bridge *bridge);
+ struct drm_bridge *devm_drm_panel_bridge_add(struct device *dev,
+ 					     struct drm_panel *panel);
+ struct drm_bridge *devm_drm_panel_bridge_add_typed(struct device *dev,
+@@ -1500,6 +1502,12 @@ static inline int drm_panel_bridge_set_orientation(struct drm_connector *connect
+ {
+ 	return -EINVAL;
+ }
++
++static inline int drm_panel_bridge_set_vrr_capable(struct drm_connector *connector,
++						   struct drm_bridge *bridge)
++{
++	return 0;
++}
+ #endif
+ 
+ #if defined(CONFIG_OF) && defined(CONFIG_DRM_PANEL_BRIDGE)
+diff --git a/include/drm/drm_panel.h b/include/drm/drm_panel.h
+index b873234..bc33c19 100644
+--- a/include/drm/drm_panel.h
++++ b/include/drm/drm_panel.h
+@@ -268,6 +268,16 @@ struct drm_panel {
+ 	 */
+ 	bool prepare_prev_first;
+ 
++	/**
++	 * @vrr_capable:
++	 *
++	 * The panel refreshes itself from its own frame memory and takes a new
++	 * frame whenever the source sends one, so frames can come at irregular
++	 * intervals, as with a command mode DSI panel. The connector gets the
++	 * "vrr_capable" property, set to true.
++	 */
++	bool vrr_capable;
++
+ 	/**
+ 	 * @prepared:
+ 	 *

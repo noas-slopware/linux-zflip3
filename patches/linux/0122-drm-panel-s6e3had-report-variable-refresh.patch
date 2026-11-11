@@ -1,0 +1,44 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] drm/panel: s6e3had: report variable refresh
+
+The S6E3HAD runs in command mode, and with stock's LFD settings it lowers
+its own refresh rate while no frame comes: to 10 Hz at 120HS and 60HS,
+12 Hz at 96HS and 48HS, 30 Hz at 60NS. Set vrr_capable so that compositors
+can present at the content's rate, and report 10-120 Hz as the
+connector's monitor range.
+
+VRR_ENABLED changes nothing on the panel side. Stock has no such state
+and always runs LFD with its default range; a frame still goes out on
+the next TE either way.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+
+diff --git a/drivers/gpu/drm/panel/panel-samsung-s6e3had.c b/drivers/gpu/drm/panel/panel-samsung-s6e3had.c
+index 6601d22..a95d5fc 100644
+--- a/drivers/gpu/drm/panel/panel-samsung-s6e3had.c
++++ b/drivers/gpu/drm/panel/panel-samsung-s6e3had.c
+@@ -1491,6 +1491,9 @@ static int s6e3had_get_modes(struct drm_panel *panel, struct drm_connector *conn
+ 
+ 	connector->display_info.width_mm = s6e3had_timings[0].mode.width_mm;
+ 	connector->display_info.height_mm = s6e3had_timings[0].mode.height_mm;
++	/* The LFD range of fhd120hs, the widest of the stock timings */
++	connector->display_info.monitor_range.min_vfreq = 10;
++	connector->display_info.monitor_range.max_vfreq = 120;
+ 	ctx->connector = connector;
+ 
+ 	return ARRAY_SIZE(s6e3had_timings);
+@@ -1556,6 +1559,12 @@ static int s6e3had_probe(struct mipi_dsi_device *dsi)
+ 	dsi->mode_flags = MIPI_DSI_CLOCK_NON_CONTINUOUS | MIPI_DSI_MODE_LPM;
+ 
+ 	ctx->panel.prepare_prev_first = true;
++	/*
++	 * Command mode: the DDI scans out of its own frame memory and takes a
++	 * frame at any TE. With LFD it also slows its refresh when no frame
++	 * comes, down to 10 Hz at 120HS, as stock runs it.
++	 */
++	ctx->panel.vrr_capable = true;
+ 
+ 	ctx->panel.backlight = devm_backlight_device_register(dev, dev_name(dev), dev, ctx,
+ 							       &s6e3had_bl_ops, &props);
