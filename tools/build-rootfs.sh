@@ -166,7 +166,7 @@ chroot_run systemctl enable systemd-networkd NetworkManager akari-wifi bluetooth
 # What the phone runs, for the units the overlay and --packages brought in: the
 # modem's file servers, the sensor hub's, IMS, the session.
 for unit in rmtfs tqftpserv hexagonrpcd-sdsp ModemManager 81voltd claire imsroha \
-            imsroha-bearer simamura imsroha-vss-samsung renge plasmalogin \
+            imsroha-bearer imsroha-rcs simamura imsroha-vss-samsung renge plasmalogin \
             systemd-resolved systemd-timesyncd; do
   if [ -e "$DEST/usr/lib/systemd/system/$unit.service" ]; then
     chroot_run systemctl enable "$unit.service"
