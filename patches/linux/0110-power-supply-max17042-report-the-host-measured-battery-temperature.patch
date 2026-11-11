@@ -1,0 +1,174 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] power: supply: max17042: write the host's battery temperature
+
+With Config.TEx set the gauge does not measure the battery temperature:
+the host writes it to the Temperature register and the gauge's model
+uses it. Nothing wrote it, so on the Galaxy Z Flip3's MAX77705 gauge it
+stayed at its power-on 30.0 C, and the capacity model and the reported
+temperature assumed 30 C whatever the battery's. Samsung's stock driver
+writes sec_battery's thermistor reading there on every monitor cycle.
+
+Take an optional IIO channel, "temp", for the battery thermistor, and
+when Config.TEx is set write its reading to the Temperature register at
+probe, whenever the temperature is read, and on every gauge interrupt.
+Describe it for the b2q: wpc_thm, stock's adc-temp.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+
+diff --git a/Documentation/devicetree/bindings/power/supply/maxim,max17042.yaml b/Documentation/devicetree/bindings/power/supply/maxim,max17042.yaml
+index 2d9bad1..674143e 100644
+--- a/Documentation/devicetree/bindings/power/supply/maxim,max17042.yaml
++++ b/Documentation/devicetree/bindings/power/supply/maxim,max17042.yaml
+@@ -43,6 +43,16 @@ properties:
+       Resistance of rsns resistor in micro Ohms (datasheet-recommended value is 10000).
+       Defining this property enables current-sense functionality.
+ 
++  io-channels:
++    maxItems: 1
++    description:
++      The battery thermistor. With Config.TEx set the gauge takes the battery
++      temperature from the host, which writes this channel's reading to its
++      Temperature register.
++
++  io-channel-names:
++    const: temp
++
+   maxim,cold-temp:
+     $ref: /schemas/types.yaml#/definitions/int32
+     description:
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+index eda5cd6..27ee9ca 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+@@ -2420,6 +2420,13 @@
+ 		reg = <0x36>;
+ 		maxim,rsns-microohm = <2000>;
+ 		power-supplies = <&max77705_charger>;
++		/*
++		 * The gauge runs with Config.TEx: the host reports the battery
++		 * temperature, which stock's sec_battery reads on wpc_thm (its
++		 * adc-temp) and writes to the gauge's Temperature register.
++		 */
++		io-channels = <&pmk8350_vadc PM8350_ADC7_GPIO2_100K_PU(1)>;
++		io-channel-names = "temp";
+ 		interrupt-parent = <&max77705>;
+ 		interrupts = <2>;
+ 	};
+diff --git a/drivers/power/supply/Kconfig b/drivers/power/supply/Kconfig
+index ad6ee8b..7a7bfa1 100644
+--- a/drivers/power/supply/Kconfig
++++ b/drivers/power/supply/Kconfig
+@@ -447,6 +447,7 @@ config BATTERY_MAX17040
+ config BATTERY_MAX17042
+ 	tristate "Maxim MAX17042/17047/17050/8997/8966 family Fuel Gauge"
+ 	depends on I2C
++	depends on IIO || !IIO
+ 	select REGMAP_I2C
+ 	help
+ 	  MAX17042 is fuel-gauge systems for lithium-ion (Li+) batteries
+diff --git a/drivers/power/supply/max17042_battery.c b/drivers/power/supply/max17042_battery.c
+index 35504a2..6da4eeb 100644
+--- a/drivers/power/supply/max17042_battery.c
++++ b/drivers/power/supply/max17042_battery.c
+@@ -16,6 +16,7 @@
+ #include <linux/i2c.h>
+ #include <linux/delay.h>
+ #include <linux/interrupt.h>
++#include <linux/iio/consumer.h>
+ #include <linux/platform_device.h>
+ #include <linux/pm.h>
+ #include <linux/power_supply.h>
+@@ -38,6 +39,7 @@
+ 
+ /* Interrupt mask bits */
+ #define CFG_ALRT_BIT_ENBL	(1 << 2)
++#define CFG_TEX_BIT		(1 << 8)
+ #define CFG2_DSOCI_BIT_ENBL	(1 << 7)
+ 
+ #define VFSOC0_LOCK		0x0000
+@@ -92,6 +94,7 @@ struct max17042_chip {
+ 	unsigned int r_sns;
+ 	int    vmin;	/* in millivolts */
+ 	int    vmax;	/* in millivolts */
++	struct iio_channel *temp_chan;	/* the battery thermistor, if the host reports it */
+ 	int    temp_min;	/* in tenths of degree Celsius */
+ 	int    temp_max;	/* in tenths of degree Celsius */
+ };
+@@ -127,12 +130,37 @@ static enum power_supply_property max17042_battery_props[] = {
+ 	POWER_SUPPLY_PROP_CURRENT_AVG,
+ };
+ 
++/*
++ * With Config.TEx set the gauge does not measure the battery temperature: the
++ * host writes it to the Temperature register, and the gauge's model uses it.
++ * Report the board's battery thermistor there.
++ */
++static void max17042_write_host_temperature(struct max17042_chip *chip)
++{
++	int ret, mdegc;
++
++	if (!chip->temp_chan)
++		return;
++
++	ret = iio_read_channel_processed(chip->temp_chan, &mdegc);
++	if (ret < 0) {
++		dev_dbg(chip->dev, "battery temperature: %d\n", ret);
++		return;
++	}
++
++	/* 1/256 C, two's complement */
++	regmap_write(chip->regmap, MAX17042_TEMP,
++		     (u16)DIV_ROUND_CLOSEST(mdegc * 256, 1000));
++}
++
+ static int max17042_get_temperature(struct max17042_chip *chip, int *temp)
+ {
+ 	int ret;
+ 	u32 data;
+ 	struct regmap *map = chip->regmap;
+ 
++	max17042_write_host_temperature(chip);
++
+ 	ret = regmap_read(map, MAX17042_TEMP, &data);
+ 	if (ret < 0)
+ 		return ret;
+@@ -1174,6 +1202,8 @@ static irqreturn_t max17042_thread_handler(int id, void *dev)
+ 	regmap_clear_bits(chip->regmap, MAX17042_STATUS,
+ 			  0xFFFF & ~(STATUS_POR_BIT | STATUS_BST_BIT));
+ 
++	max17042_write_host_temperature(chip);
++
+ 	power_supply_changed(chip->battery);
+ 	return IRQ_HANDLED;
+ }
+@@ -1503,6 +1533,23 @@ static int max17042_probe(struct i2c_client *client, struct device *dev, int irq
+ 		regmap_write(chip->regmap, MAX17042_LearnCFG, 0x0007);
+ 	}
+ 
++	chip->temp_chan = devm_iio_channel_get(dev, "temp");
++	if (IS_ERR(chip->temp_chan)) {
++		ret = PTR_ERR(chip->temp_chan);
++		if (ret != -ENODEV)
++			return dev_err_probe(dev, ret, "battery temperature channel\n");
++		chip->temp_chan = NULL;
++	} else {
++		ret = regmap_read(chip->regmap, MAX17042_CONFIG, &val);
++		if (ret)
++			return dev_err_probe(dev, ret, "failed to read config\n");
++		if (!(val & CFG_TEX_BIT)) {
++			dev_warn(dev, "Config.TEx is clear: the gauge measures, not using the channel\n");
++			chip->temp_chan = NULL;
++		}
++		max17042_write_host_temperature(chip);
++	}
++
+ 	chip->task_period = MAX17042_DEFAULT_TASK_PERIOD;
+ 	if (chip->chip_type == MAXIM_DEVICE_TYPE_MAX77759) {
+ 		ret = regmap_read(chip->regmap, MAX17042_TaskPeriod, &val);
+@@ -1754,3 +1801,4 @@ module_exit(max17042_exit);
+ MODULE_AUTHOR("MyungJoo Ham <myungjoo.ham@samsung.com>");
+ MODULE_DESCRIPTION("MAX17042 Fuel Gauge");
+ MODULE_LICENSE("GPL");
++MODULE_IMPORT_NS("IIO_CONSUMER");

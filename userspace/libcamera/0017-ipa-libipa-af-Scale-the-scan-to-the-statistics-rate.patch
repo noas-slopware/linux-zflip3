@@ -1,0 +1,215 @@
+From 699dc42f9728eccaff8f0ba58d924bfd602c7a97 Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Wed, 11 Nov 2026 13:23:06 +0900
+Subject: [PATCH] ipa: libipa: af: Scale the scan to the statistics rate and
+ the coarse step
+
+The algorithm comes from IPU3, which measures every frame. Under the
+software ISP, statistics come every kStatPerNumFrames (4) frames, and
+two of its numbers assumed one measurement per frame:
+
+- the lens settle time after a reset, kIgnoreFrame frames, was counted
+  in measurements, 40 frames under the software ISP. Count it in frames:
+  setFramesPerMeasurement() converts it, and the simple IPA's Af passes
+  the gap between frames with statistics.
+- the fine scan covered 5 % of the lens position on either side of the
+  coarse peak in steps of one (scaled to the lens range): 43
+  measurements at position 3600 on a 4095-step lens, and less than one
+  coarse step near position 0, where it could miss the peak. The peak
+  is within one coarse step of the coarse best, so scan that, in eighths
+  of a coarse step.
+
+On a host model of the IMX563's 4095-step lens with statistics every
+fourth frame, a scene peaked at 2500 settles at 2505 after 48
+measurements instead of 2376 after 68, and a peak at the far end after
+48 instead of 95.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ src/ipa/libipa/af.cpp            | 40 +++++++++++++++++++++++---------
+ src/ipa/libipa/af.h              |  3 +++
+ src/ipa/simple/algorithms/af.cpp | 12 +++++++++-
+ src/ipa/simple/algorithms/af.h   |  5 ++++
+ 4 files changed, 48 insertions(+), 12 deletions(-)
+
+diff --git a/src/ipa/libipa/af.cpp b/src/ipa/libipa/af.cpp
+index 18395770..08d2e403 100644
+--- a/src/ipa/libipa/af.cpp
++++ b/src/ipa/libipa/af.cpp
+@@ -49,20 +49,24 @@ namespace af {
+ static constexpr uint32_t kMaxFocusSteps = 1023;
+ 
+ /*
+- * Minimum focus step for searching appropriate focus, for a lens with
+- * kMaxFocusSteps steps. Lenses with a different range scale them.
++ * Coarse focus step for a lens with kMaxFocusSteps steps, scaled for lenses
++ * with a different range, and the smallest fine step.
+  */
+ static constexpr uint32_t kCoarseSearchStep = 30;
+ static constexpr uint32_t kFineSearchStep = 1;
+ 
++/*
++ * The fine scan covers one coarse step on either side of the coarse peak, in
++ * kFineScanDivisions steps per coarse step.
++ */
++static constexpr uint32_t kFineScanDivisions = 8;
++
+ /* Max ratio of variance change, 0.0 < kMaxChange < 1.0 */
+ static constexpr double kMaxChange = 0.5;
+ 
+ /* The numbers of frame to be ignored, before performing focus scan. */
+ static constexpr uint32_t kIgnoreFrame = 10;
+ 
+-/* Fine scan range 0 < kFineRange < 1 */
+-static constexpr double kFineRange = 0.05;
+ 
+ /* A scan has passed the peak once the variance is this far below it */
+ static constexpr double kPeakDrop = 0.1;
+@@ -124,12 +128,11 @@ void AfAlgorithm::afCoarseScan(af::ActiveState &state)
+ 		state.maxVariance = 0;
+ 		scanVarianceSum_ = 0.0;
+ 		scanSamples_ = 0;
+-		focus_ = state.focus -
+-			 (state.focus * kFineRange);
++		/* The peak is within one coarse step of the best position. */
++		focus_ = state.focus > coarseStep_ ? state.focus - coarseStep_ : 0;
+ 		state.focus = focus_;
+ 		previousVariance_ = 0;
+-		maxStep_ = std::clamp(focus_ + static_cast<uint32_t>((focus_ * kFineRange)),
+-				      0U, initMaxStep_);
++		maxStep_ = std::min(bestFocus_ + coarseStep_, initMaxStep_);
+ 	}
+ }
+ 
+@@ -170,7 +173,7 @@ void AfAlgorithm::afReset(af::ActiveState &state)
+ 	state.stable = false;
+ 	scanVarianceSum_ = 0.0;
+ 	scanSamples_ = 0;
+-	ignoreCounter_ = kIgnoreFrame;
++	ignoreCounter_ = ignoreMeasurements_;
+ 	previousVariance_ = 0.0;
+ 	coarseCompleted_ = false;
+ 	fineCompleted_ = false;
+@@ -233,7 +236,7 @@ bool AfAlgorithm::afNeedIgnoreFrame()
+  */
+ void AfAlgorithm::afIgnoreFrameReset()
+ {
+-	ignoreCounter_ = kIgnoreFrame;
++	ignoreCounter_ = ignoreMeasurements_;
+ }
+ 
+ /**
+@@ -263,6 +266,21 @@ bool AfAlgorithm::afIsOutOfFocus(af::ActiveState &state)
+ 		return false;
+ }
+ 
++/**
++ * \brief Set how many frames each measurement passed to process() spans
++ * \param[in] frames The number of frames between two measurements
++ *
++ * The lens needs kIgnoreFrame frames to settle after a reset. When statistics
++ * come only every few frames, as with the software ISP, that is fewer
++ * measurements. The default is one measurement per frame.
++ */
++void AfAlgorithm::setFramesPerMeasurement(unsigned int frames)
++{
++	frames = std::max(1U, frames);
++	ignoreMeasurements_ = (kIgnoreFrame + frames - 1) / frames;
++	ignoreCounter_ = std::min(ignoreCounter_, ignoreMeasurements_);
++}
++
+ /**
+  * \brief Configure the algorithm and \a state
+  * \param[in] state The autofocus state
+@@ -305,7 +323,7 @@ void AfAlgorithm::configure(af::ActiveState &state, const ControlInfoMap &lensCo
+ 	coarseCompleted_ = false;
+ 	fineCompleted_ = false;
+ 	coarseStep_ = std::max(1U, kCoarseSearchStep * initMaxStep_ / kMaxFocusSteps);
+-	fineStep_ = std::max(1U, kFineSearchStep * initMaxStep_ / kMaxFocusSteps);
++	fineStep_ = std::max(kFineSearchStep, coarseStep_ / kFineScanDivisions);
+ 
+ 	LOG(Af, Debug) << "Configured focus parameters: max=" << initMaxStep_
+ 		       << " steps=" << coarseStep_ << "/" << fineStep_
+diff --git a/src/ipa/libipa/af.h b/src/ipa/libipa/af.h
+index 10d552df..fac44d79 100644
+--- a/src/ipa/libipa/af.h
++++ b/src/ipa/libipa/af.h
+@@ -41,6 +41,7 @@ public:
+ 	AfAlgorithm();
+ 
+ 	void configure(af::ActiveState &state, const ControlInfoMap &lensControls);
++	void setFramesPerMeasurement(unsigned int frames);
+ 	void process(af::ActiveState &state, double variance);
+ 	bool coarseCompleted() { return coarseCompleted_; }
+ 
+@@ -76,6 +77,8 @@ private:
+ 	/* Coarse and fine scan steps, scaled to the lens range */
+ 	uint32_t coarseStep_ = 30;
+ 	uint32_t fineStep_ = 1;
++	/* Measurements to ignore after the lens moved, from kIgnoreFrame frames */
++	uint32_t ignoreMeasurements_ = 10;
+ 	/* If the coarse scan completes, it is set to true. */
+ 	bool coarseCompleted_;
+ 	/* If the fine scan completes, it is set to true. */
+diff --git a/src/ipa/simple/algorithms/af.cpp b/src/ipa/simple/algorithms/af.cpp
+index d4f025dc..cd25491f 100644
+--- a/src/ipa/simple/algorithms/af.cpp
++++ b/src/ipa/simple/algorithms/af.cpp
+@@ -30,12 +30,14 @@ int Af::init(IPAContext &context, [[maybe_unused]] const ValueNode &tuningData)
+ int Af::configure(IPAContext &context, const IPAConfigInfo &configInfo)
+ {
+ 	afAlgo_.configure(context.activeState.af, configInfo.lensControls);
++	lastStatsFrame_.reset();
++	framesPerMeasurement_ = 1;
+ 
+ 	return 0;
+ }
+ 
+ void Af::process(IPAContext &context,
+-		 [[maybe_unused]] const uint32_t frame,
++		 const uint32_t frame,
+ 		 [[maybe_unused]] IPAFrameContext &frameContext,
+ 		 const SwIspStats *stats,
+ 		 [[maybe_unused]] ControlList &metadata)
+@@ -44,6 +46,14 @@ void Af::process(IPAContext &context,
+ 	if (!stats->valid)
+ 		return;
+ 
++	/* The lens settles in frames, the algorithm counts measurements. */
++	if (lastStatsFrame_ && frame > *lastStatsFrame_ &&
++	    frame - *lastStatsFrame_ != framesPerMeasurement_) {
++		framesPerMeasurement_ = frame - *lastStatsFrame_;
++		afAlgo_.setFramesPerMeasurement(framesPerMeasurement_);
++	}
++	lastStatsFrame_ = frame;
++
+ 	const double variance = stats->variance;
+ 	LOG(IPASoftIspAf, Debug) << "Focus stats: " << variance;
+ 	afAlgo_.process(context.activeState.af, variance);
+diff --git a/src/ipa/simple/algorithms/af.h b/src/ipa/simple/algorithms/af.h
+index 9b04ad2c..c6280bdc 100644
+--- a/src/ipa/simple/algorithms/af.h
++++ b/src/ipa/simple/algorithms/af.h
+@@ -7,6 +7,8 @@
+ 
+ #pragma once
+ 
++#include <optional>
++
+ #include "libipa/af.h"
+ 
+ #include "algorithm.h"
+@@ -32,6 +34,9 @@ public:
+ 
+ private:
+ 	AfAlgorithm afAlgo_;
++	/* Frame number of the last statistics, and frames between two of them */
++	std::optional<uint32_t> lastStatsFrame_;
++	unsigned int framesPerMeasurement_ = 1;
+ };
+ 
+ } /* namespace ipa::soft::algorithms */
+-- 
+2.56.0
+

@@ -1,0 +1,30 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] power: supply: p9320: no thermal zone on the die temperature
+
+The P9320 reports its die temperature only while a pad powers it; off a
+pad the property returns -ENODATA. The power supply core still
+registered a thermal zone on it, which failed its first read at boot,
+was rechecked with growing delays and disabled after about four
+minutes. Nothing uses the zone. Do not register it.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+
+diff --git a/drivers/power/supply/p9320_charger.c b/drivers/power/supply/p9320_charger.c
+index dc258c2..69a6714 100644
+--- a/drivers/power/supply/p9320_charger.c
++++ b/drivers/power/supply/p9320_charger.c
+@@ -886,6 +886,12 @@ static const struct power_supply_desc p9320_psy_desc = {
+ 	.properties = p9320_props,
+ 	.num_properties = ARRAY_SIZE(p9320_props),
+ 	.get_property = p9320_get_property,
++	/*
++	 * The die temperature exists only while a pad powers the receiver:
++	 * a thermal zone on it would be polled for data until the core gives
++	 * up and disables it.
++	 */
++	.no_thermal = true,
+ };
+ 
+ static int p9320_probe(struct i2c_client *client)

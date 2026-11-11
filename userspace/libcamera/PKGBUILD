@@ -25,7 +25,7 @@ pkgname=(
   python-libcamera
 )
 pkgver=0.7.2
-pkgrel=8
+pkgrel=9
 pkgdesc="A complex camera support library for Linux, Android, and ChromeOS"
 arch=(x86_64 aarch64)
 url="https://libcamera.org/"
@@ -72,6 +72,7 @@ source=(
   0014-libcamera-pipeline-simple-Power-the-lens-only-while-.patch
   0015-ipa-simple-af-Skip-frames-without-statistics.patch
   0016-ipa-libipa-af-Scan-for-the-real-peak-rest-on-a-flat-.patch
+  0017-ipa-libipa-af-Scale-the-scan-to-the-statistics-rate.patch
 )
 sha512sums=('a5656356617a01a7e8feb535380869d38b7c58139c7f99385af355629d3e1927bbd8847f7bec755c753c72f6b065df76de53c15f9af2e5901e83e7a144a2ddcd'
             '8b54cbdf6ed767ae8d52a14480a4653f4f3a1c2187c4ccf7ceb65eaa60c819cce514122591d6e0c2dfc39d7482739f8fdd4090dbaf63701445510eefc88fb19f'
@@ -90,7 +91,8 @@ sha512sums=('a5656356617a01a7e8feb535380869d38b7c58139c7f99385af355629d3e1927bbd
             'da4d5fd80ff463c8c1c34a581d3c56358a64e97917e9ac7410abcb0af613501df107fa8eca86e501743785d2cb2116f93bf0cc6e8ae4f380922bc7c17300f395'
             '511aa5a2072b1b360f11e203c854505ecaf9bb8b8df69d58d573c5a1da593422847ecd38029c6aa30a39dfcd644ae45dc03b2f05980b088583b820f6f7e7494a'
             'cc9a51769d72d2c70896fc2c644e64d6688980c407f5eeda1eb977653dfab12d38332be9ca347f0073b3a8449845bbf93c2640de9d1083c5700794c40efeba3e'
-            '3a7d4066f835e65a79e44e0637b0d3341efedc51d72e27d718096c4c78d48550b6fb6bd6fcccf6bcc21809d5dc131f7d0288198a998fde452e7d95f95ff26895')
+            '3a7d4066f835e65a79e44e0637b0d3341efedc51d72e27d718096c4c78d48550b6fb6bd6fcccf6bcc21809d5dc131f7d0288198a998fde452e7d95f95ff26895'
+            'a00cc953ac14763a98a4000d46b532c6955ded13f8c62d33601c67a9402e67597fa5f4e6074c376988f34eaa14816a843764db4fbc3405104bb21d141aad0025')
 b2sums=('1dbd3f78f8d9a2484331798b18b871d7585b5928988e91d586366049d85e3f126e7cfc58494400e69feeec99a77894252d582f0d8f183508e5d1b8220e70f3d5'
         '4a0e24feed22d32b83b0ec49c9a7616b77deb26cae82c17a38b54a81a0468e982852147bc2d5e3b611ba014ddbd7647acfe2e68591542420da73945ba1c0d6c2'
         'ee1c045ae34976b25f131457f239da36cee70a9854e6510aa657663ead310f19ed963d6c7399492ca40faf51b8d938dca1b6712af742e1dcef4ea3403e4a6570'
@@ -108,7 +110,8 @@ b2sums=('1dbd3f78f8d9a2484331798b18b871d7585b5928988e91d586366049d85e3f126e7cfc5
         '8826a874351445d21118df9f8a908b9f473582ae1ea8211ccdd7b3e782bb261f74f19d1fc2363a0d1f628b2b6e1904fbecd5ccd1c2826376cc634dc0d7f52eaa'
         '59d246216c61a252002fa8b9395de38d00c84d15caf297ef2abd8354a7c2798c3c00cae57b8ded0f19f1060740e10c0d395d276df3315949b4f4b4507a389b55'
         '7211ea03d263b723fc76d56241d2eed98c0d89249dbbdf3c2b0b524aa7ff1ebf3104b0b36597042831be730ab9ab251866665285b44616bccc019fcba5bf9050'
-        '9dec3457bd059321cfaca143403c4f92a9084c540d8ece5ca183d7f8cad6dd95c3a241247b1177d687db5ed75578ec488b50d618fc021f6baaf5c7c8946d9a62')
+        '9dec3457bd059321cfaca143403c4f92a9084c540d8ece5ca183d7f8cad6dd95c3a241247b1177d687db5ed75578ec488b50d618fc021f6baaf5c7c8946d9a62'
+        '74306bc28fe6ab967c040022b124129b7a603c1850322db4e5c3a0bb69b275f411c10e6117e94723351ec0019a456e18b2ad58e31bf82d76f1d047ab9abf6d26')
 
 _pick() {
   local p="$1" f d; shift
@@ -139,6 +142,7 @@ prepare() {
   patch -Np1 < ../0014-libcamera-pipeline-simple-Power-the-lens-only-while-.patch
   patch -Np1 < ../0015-ipa-simple-af-Skip-frames-without-statistics.patch
   patch -Np1 < ../0016-ipa-libipa-af-Scan-for-the-real-peak-rest-on-a-flat-.patch
+  patch -Np1 < ../0017-ipa-libipa-af-Scale-the-scan-to-the-statistics-rate.patch
 
   # add version, so that utils/gen-version.sh may rely on it
   printf "%s\n" "$pkgver" > .tarball-version
