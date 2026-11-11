@@ -94,6 +94,13 @@ CONFIG_BATTERY_SAMSUNG_DUAL=m
 CONFIG_ETHERNET=y
 CONFIG_NET_VENDOR_QUALCOMM=y
 CONFIG_RMNET=m
+# IMS on SKT and KT: imsroha's sec-agree puts the SIP signalling in IPsec ESP
+# transport SAs, installed over XFRM netlink (ip xfrm). The base config has
+# neither; without them SA setup fails and imsroha registers without IPsec,
+# which those networks may refuse. Both modules load on demand.
+CONFIG_XFRM_USER=m
+CONFIG_INET6_ESP=m
+CONFIG_INET_ESP=m
 # Audio: the sm8350 LPASS LPI pin controller lives in the sc7280 driver. Without
 # it lpass_tlmm has no driver and the DMIC pins never leave GPIO mode.
 CONFIG_PINCTRL_SC7280_LPASS_LPI=y
