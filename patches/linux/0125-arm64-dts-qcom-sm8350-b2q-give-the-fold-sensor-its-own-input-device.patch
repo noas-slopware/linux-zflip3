@@ -1,0 +1,43 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] arm64: dts: qcom: sm8350-b2q: give the fold sensor its own input device
+
+The fold hall sensor (SW_LID) sat in the same gpio-keys node as Volume Up,
+so both came out as one input device. A client that grabs the volume keys
+(EVIOCGRAB, to turn Volume Up + Volume Down into a screenshot chord) then
+hid the fold from logind and upower: logind kept the lid state it read
+before the grab, reported LidClosed with the phone open, and the main
+display went off at every power key press.
+
+Stock keeps them apart (gpio_keys for the volume key, hall_ic for the
+fold), so do the same: Volume Up stays alone in gpio-keys, the fold
+sensor moves to its own gpio-keys node, labelled "Fold".
+
+Assisted-by: Claude:claude-opus-5-5
+---
+--- a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+@@ -78,12 +78,19 @@
+ 			debounce-interval = <15>;
+ 			linux,can-disable;
+ 		};
++	};
++
++	/*
++	 * The fold hall sensor, stock hall_ic "flip" (SW_FOLDER, which is
++	 * SW_LID): low when the phone is closed, 50 ms debounce. Only opening
++	 * wakes the phone. Its own input device, as stock's hall_ic is, so the
++	 * volume key device carries nothing but the volume key: a client that
++	 * grabs the volume keys would otherwise hide the fold from everyone.
++	 */
++	hall-sensor {
++		compatible = "gpio-keys";
++		label = "Fold";
+ 
+-		/*
+-		 * The fold hall sensor, stock hall_ic "flip" (SW_FOLDER, which is
+-		 * SW_LID): low when the phone is closed, 50 ms debounce. Only
+-		 * opening wakes the phone.
+-		 */
+ 		switch-fold {
+ 			label = "Fold";
+ 			linux,input-type = <EV_SW>;
