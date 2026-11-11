@@ -163,6 +163,12 @@ install -d -m700 "$DEST/root/.ssh"
 install -m600 "$KEYS" "$DEST/root/.ssh/authorized_keys"
 chroot_run systemctl enable systemd-networkd NetworkManager akari-wifi bluetooth sshd \
   serial-getty@ttyGS0
+# networkd runs only usb0, which never decides whether the phone is online, so
+# its wait-online (enabled above through systemd-networkd's Also=) can only time
+# out, holding network-online.target, and imsroha-rcs, for 2 minutes per boot.
+# NetworkManager owns the network; its wait-online is the one that counts.
+chroot_run systemctl disable systemd-networkd-wait-online.service
+chroot_run systemctl enable NetworkManager-wait-online.service
 # What the phone runs, for the units the overlay and --packages brought in: the
 # modem's file servers, the sensor hub's, IMS, the session.
 for unit in rmtfs tqftpserv hexagonrpcd-sdsp ModemManager 81voltd claire imsroha \
