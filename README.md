@@ -145,8 +145,8 @@ everything, cellular included, works:
   (plus the Adreno zap shader),
 - the cellular stack built on the phone: `imsroha` from
   [IMSroha](https://github.com/noas-slopware/imsroha)'s `packaging/`, ModemManager 1.24.2 from its
-  `modemmanager/` (0001, 0003-0006), Spacebar from `userspace/spacebar` with
-  `patches/spacebar/`, and `opencore-amr` plus `vo-amrwbenc` for the call codecs,
+  `modemmanager/` (0001, 0003-0007), Spacebar 6.3.4 from its `spacebar/` (MMS fixes,
+  RCS chat and file transfer), and `opencore-amr` plus `vo-amrwbenc` for the call codecs,
 - hardware video decode (not a pacman package): `qcom-va-driver 1.1.1` from
   `github.com/nyanmisaka/libva-v4l2-qcom` at `~/src/qcom-va-driver`, built with
   `tools/build-qcom-va-driver.sh` after the local patch; it installs
@@ -201,7 +201,6 @@ everything, cellular included, works:
 ```
 patches/linux/           numbered series against sources.lock's LINUX_VERSION
 patches/u-boot/          SM8350 and b2q support for U-Boot
-patches/spacebar/        MMS send, own number and duplicate fixes
 patches/qcom-va-driver/  local patch for the qcom-va-driver V4L2 backend
 patches/plasma-keyboard/ Korean composition, content types
 tools/                   host-side: extract firmware, build, pack, flash and install images
@@ -211,7 +210,6 @@ userspace/rootfs/        files the rootfs carries on top of the distribution
 userspace/hexagonrpcd/   FastRPC filesystem daemon for the sensor hub
 userspace/iio-sensor-proxy/ iio-sensor-proxy with the SSC claim-race fix
 userspace/neard/         Linux NFC daemon and nfctool for the NCI stack
-userspace/spacebar/      PKGBUILD for the patched Spacebar
 ```
 
 ## Quickstart
