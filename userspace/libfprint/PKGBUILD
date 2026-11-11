@@ -3,11 +3,13 @@
 # Contributor: Thomas Baechler <thomas@archlinux.org>
 # b2q: Arch PKGBUILD plus 0001 (misc character devices for udev drivers) and
 # 0002 (samsung_securefp driver for Samsung's TrustZone fingerprint TA), and the
-# fprintd sandbox drop-in that lets fprintd open /dev/qsee-app and the GPIO chips.
+# fprintd drop-in: it lets fprintd open /dev/qsee-app and the GPIO chips, gives
+# the driver /var/lib/samsung-securefp for the TA's calibration, runs fprintd
+# with --no-timeout and switches the sensor off when fprintd stops.
 
 pkgname=libfprint
 pkgver=1.94.100
-pkgrel=5
+pkgrel=6
 pkgdesc="Library for fingerprint readers"
 url="https://fprint.freedesktop.org/"
 arch=(x86_64 aarch64)
@@ -43,8 +45,8 @@ source=("git+https://gitlab.freedesktop.org/libfprint/libfprint.git?signed#tag=v
         fprintd-samsung-securefp.conf)
 b2sums=('56cbe62a6d4b98d1de90f45bae8de605418802d1b4d8d5dc55a8557a65045b115df51daf8385decdebd8aea79c86103467d5a327cbd461030d450f0e15466d08'
         'b0bac4907a0e58ffb4c63831010abc6c190bc0bc8858370fef4394d40f83378952d6c884d82fcab3e7c709317dd60aadcacd45786da36c1e72096ec52aa10a63'
-        '70e600c27355059e0740ad3c7d9397c5e48697546a979b9fda740708959a1bcc0cad408d269acf8667d0a38279a423982a37dd1cb7c632a3ee932a912ea20a10'
-        '9903a4adb5b5f0442979e5f49a2551a0103815f748522cbe896fa1e79ac4afef83a9157adede5e88ad93de18c70cd9361714cb25ebf06e9b52607609e4fdf670')
+        '6ba288020259f4713e23d4f5df18149aa0c89a5069b969672c6b629344e030516e9fe68f25c8e5d1570d58bb0b1a28f9837ae1d79d8bbf6482f6e9f68e08746c'
+        'b3fcb6ac0528f912c2e517583bf628dd6926db42d005a6ca6c8f9449ac1c5c8034fa8f19c725a3a1536b505e1722f5dd1833d836d8d834c70cc9f1d200368f28')
 validpgpkeys=(
   D4C501DA48EB797A081750939449C2F50996635F # Marco Trevisan (Treviño) <mail@3v1n0.net>
 )

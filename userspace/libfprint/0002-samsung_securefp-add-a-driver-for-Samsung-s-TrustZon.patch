@@ -1,4 +1,4 @@
-From edc9c233a60c5c63b5d8e020846ce2c57312a865 Mon Sep 17 00:00:00 2001
+From 41dda235b89a4e0fb543d76c96eadeb57f120fe8 Mon Sep 17 00:00:00 2001
 From: Noa Himesaka <himesaka@noa.codes>
 Date: Tue, 10 Nov 2026 16:19:31 +0900
 Subject: [PATCH 2/2] samsung_securefp: add a driver for Samsung's TrustZone
@@ -14,11 +14,26 @@ Samsung's Android HAL (libbauthserver) does.
 The driver does the same through the kernel's /dev/qsee-app interface,
 found through the misc udev subtype. Each TA command is repeated with the
 HAL's "op" word until the TA reports it done; in between, the driver
-serves the TA's requests (wait for the interrupt, sleep, reset). The
-interrupt and reset lines are found by their DT line names, power is the
-"fingerprint-power" regulator-output, and the board (TA path, sensor type)
-comes from a table keyed by the DT compatible. Templates are stored by
-fprintd inside the FpPrint.
+serves the TA's requests (wait for the interrupt, sleep, reset). A finger
+wait that times out is not a failure: as in the HAL, the command is
+called again and the TA decides. The interrupt and reset lines are found
+by their DT line names, power is the "fingerprint-power" regulator-output,
+and the board (TA path, sensor type) comes from a table keyed by the DT
+compatible. Templates are stored by fprintd inside the FpPrint.
+
+The session follows the HAL. A cold open powers the sensor (rail off,
+then on, then reset high, 11 ms apart, as the stock kernel driver does)
+and loads the TA. The first operation runs Prepare with the calibration
+the TA handed out last time, kept in /var/lib/samsung-securefp/calib.dat:
+op 1 with the blob, or op 2 (first call) without one or when the TA
+cannot open it (status 0x1c). Without its calibration the TA measures a
+new sensor base on every Prepare, also with a finger on the sensor; with
+it, it only does so when the finger is up. Later operations on the open
+session skip Prepare and go straight to their Init. Closing the device
+keeps the session for 10 s, so a lock screen that restarts its PAM
+conversation finds it warm; then the driver sends the HAL's cleanup
+control op, keeps the calibration it returns, unloads the TA and powers
+the sensor off.
 
 Operations run in a worker thread; progress and finger status are posted
 back to the device's main context.
@@ -28,20 +43,20 @@ Supported so far: Galaxy Z Flip3 (samsung,b2q, Goodix GW36T1).
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01L5scTQJJDo2PTt6GBeDFah
 ---
- libfprint/drivers/samsung_securefp/securefp.c | 1279 +++++++++++++++++
- libfprint/drivers/samsung_securefp/securefp.h |   49 +
+ libfprint/drivers/samsung_securefp/securefp.c | 1630 +++++++++++++++++
+ libfprint/drivers/samsung_securefp/securefp.h |   53 +
  libfprint/meson.build                         |    1 +
  meson.build                                   |    1 +
- 4 files changed, 1330 insertions(+)
+ 4 files changed, 1685 insertions(+)
  create mode 100644 libfprint/drivers/samsung_securefp/securefp.c
  create mode 100644 libfprint/drivers/samsung_securefp/securefp.h
 
 diff --git a/libfprint/drivers/samsung_securefp/securefp.c b/libfprint/drivers/samsung_securefp/securefp.c
 new file mode 100644
-index 0000000..408ac91
+index 0000000..8b22a4a
 --- /dev/null
 +++ b/libfprint/drivers/samsung_securefp/securefp.c
-@@ -0,0 +1,1279 @@
+@@ -0,0 +1,1630 @@
 +/*
 + * Samsung securefp: fingerprint sensors run by Samsung's TrustZone TA
 + *
@@ -77,7 +92,17 @@ index 0000000..408ac91
 + * command is done.
 + *
 + * Templates are stored by fprintd inside the FpPrint, as the HAL stores them
-+ * in /data/vendor/biometrics.
++ * in /data/vendor/biometrics. The TA's calibration blob, which the HAL keeps
++ * in calib.dat and hands back on every cold Prepare, lives in
++ * /var/lib/samsung-securefp.
++ *
++ * Session lifetime follows the HAL. A cold open powers the sensor and loads
++ * the TA; the first operation after that runs Prepare with the stored
++ * calibration. Later operations on the open session go straight to their
++ * Init, as the HAL's warm path does. Closing the device keeps the session for
++ * SECUREFP_LINGER_MS, so a lock screen that restarts its PAM conversation finds
++ * it warm; after that, the real close hands the calibration back (Control_OP
++ * cleanup), unloads the TA and powers the sensor off.
 + *
 + * Board specifics (where the TA lives, the sensor type) come from a table
 + * keyed by the device tree compatible. Power is a regulator-output named
@@ -144,6 +169,37 @@ index 0000000..408ac91
 +#define SECUREFP_ST_BAD_QUALITY      0x27
 +#define SECUREFP_ST_ENROLL_FAIL      0x29
 +#define SECUREFP_ST_IDENTIFY_FAIL    0x20
++/* Prepare: the TA could not open the stored calibration */
++#define SECUREFP_ST_HMAC             0x1c
++
++/*
++ * The op word Prepare starts with (common_prepare): FIRST_CALL measures a
++ * new base and returns calibration for the normal world to keep; CALIB loads
++ * the stored calibration and only refreshes the base when the finger is up.
++ */
++#define SECUREFP_PREP_CALIB          0x01
++#define SECUREFP_PREP_FIRST_CALL     0x02
++
++/* Control_OP sub-command the HAL sends before closing the session */
++#define SECUREFP_CTL_CLEANUP         0x1e
++
++#define SECUREFP_CALIB_DIR           "/var/lib/samsung-securefp"
++#define SECUREFP_CALIB_PATH          SECUREFP_CALIB_DIR "/calib.dat"
++#define SECUREFP_CALIB_MAX           0xa000
++
++/*
++ * How long a closed device keeps the TA loaded and the sensor powered. Stock
++ * closes at the first 1 s tick after an operation, but its lock screen never
++ * releases the reader. Ours does: pam_fprintd gives up after its 30 s timeout
++ * and kscreenlocker starts the next run, and the Release to Claim gap
++ * measured on the phone was 1.8 to 4.3 s. 10 s is about twice the longest
++ * gap seen (three samples, and the phone runs hot and slow at times), so a
++ * restart is warm, while an unlock still powers the sensor off soon after.
++ */
++#define SECUREFP_LINGER_MS           10000
++
++/* Stock's gw3x_hw_power_enable: rail on, 11 ms, reset high; reverse to power off */
++#define SECUREFP_POWER_DELAY_US      11000
 +
 +/* Enroll_Do reply: quality flags the TA sets (finger_image_quality_map) */
 +#define SECUREFP_Q_PARTIAL           0x08000000
@@ -180,6 +236,12 @@ index 0000000..408ac91
 +  guint8              *rsp;
 +  /* every stored print, from fprintd's duplicate check before an enroll */
 +  GPtrArray           *known;
++  /* Prepare ran since the TA was loaded and the sensor powered */
++  gboolean             prepared;
++  /* an operation failed: the next close is a real one, the next open cold */
++  gboolean             broken;
++  /* the device is closed but the session is kept (SECUREFP_LINGER_MS) */
++  guint                linger_id;
 +};
 +
 +G_DEFINE_TYPE (FpiDeviceSamsungSecurefp, fpi_device_samsung_securefp, FP_TYPE_DEVICE)
@@ -324,20 +386,28 @@ index 0000000..408ac91
 +  g_usleep (60000);
 +}
 +
++/*
++ * Stock's gw3x_hw_power_enable. Off: reset low, 11 ms, rail off. On: rail on,
++ * 11 ms, reset high. Powering on always starts from off: a cold open cannot
++ * know what state an earlier process left the rail in (it is a sysfs file,
++ * not tied to any descriptor).
++ */
 +static gboolean
 +securefp_power (FpiDeviceSamsungSecurefp *self, gboolean on, GError **error)
 +{
-+  if (!on)
-+    {
-+      securefp_set_rst (self, FALSE);
-+      return securefp_write_file (SECUREFP_POWER_STATE, "disabled", error);
-+    }
-+
 +  securefp_set_rst (self, FALSE);
++  g_usleep (SECUREFP_POWER_DELAY_US);
++  if (!securefp_write_file (SECUREFP_POWER_STATE, "disabled", error))
++    return FALSE;
++  if (!on)
++    return TRUE;
++
++  g_usleep (SECUREFP_POWER_DELAY_US);
 +  if (!securefp_write_file (SECUREFP_POWER_STATE, "enabled", error))
 +    return FALSE;
-+  g_usleep (5000);
-+  securefp_reset (self);
++  g_usleep (SECUREFP_POWER_DELAY_US);
++  securefp_set_rst (self, TRUE);
++  g_usleep (60000);
 +  return TRUE;
 +}
 +
@@ -426,11 +496,18 @@ index 0000000..408ac91
 +  memcpy (b + off, &v, sizeof (v));
 +}
 +
-+/* Build requests in self->req, read the reply from self->rsp */
++/*
++ * Build requests in self->req, read the reply from self->rsp. The reply
++ * buffer is cleared too, as the HAL clears the whole shared buffer: the
++ * kernel copies it in before the call, and a length the TA does not write
++ * (Prepare's calibration length, for one) must read back as 0, not as
++ * whatever the previous reply left there.
++ */
 +static guint8 *
 +securefp_req (FpiDeviceSamsungSecurefp *self, guint32 opcode, gsize len)
 +{
 +  memset (self->req, 0, len);
++  memset (self->rsp, 0, SECUREFP_RSP_MAX);
 +  wr32 (self->req, 0, opcode);
 +  return self->req;
 +}
@@ -466,10 +543,16 @@ index 0000000..408ac91
 +  SECUREFP_STEP_AGAIN,
 +  SECUREFP_STEP_DONE,
 +  SECUREFP_STEP_STATUS,     /* the TA returned a non-zero status */
-+  SECUREFP_STEP_NO_FINGER,  /* a finger wait timed out */
 +  SECUREFP_STEP_CANCELLED,
 +  SECUREFP_STEP_ERROR,
 +} SecurefpStep;
++
++/* Which part of a command a request belongs to; check_opcode's "stage" */
++typedef enum {
++  SECUREFP_STAGE_INIT,      /* Prepare and the *_Init commands */
++  SECUREFP_STAGE_DO,
++  SECUREFP_STAGE_FINAL,
++} SecurefpStage;
 +
 +typedef gboolean (*SecurefpCmd) (FpiDeviceSamsungSecurefp *self, guint32 op, gpointer data,
 +                                 SecurefpReply *r, GError **error);
@@ -492,9 +575,12 @@ index 0000000..408ac91
 +
 +static void securefp_report_finger (SecurefpOp *op, FpFingerStatusFlags status);
 +
-+/* check_opcode() of the HAL, for what a type 6 sensor asks for */
++/*
++ * check_opcode() of the HAL, for what a type 6 sensor asks for. It may
++ * rewrite r->op to the op word the command is to be called with next.
++ */
 +static SecurefpStep
-+securefp_serve (SecurefpOp *op, const SecurefpReply *r)
++securefp_serve (SecurefpOp *op, SecurefpReply *r, SecurefpStage stage)
 +{
 +  FpiDeviceSamsungSecurefp *self = op->self;
 +  gint timeout = (gint32) r->info;
@@ -513,8 +599,17 @@ index 0000000..408ac91
 +          return SECUREFP_STEP_CANCELLED;
 +        if (w == SECUREFP_WAIT_IRQ && r->op == SECUREFP_REQ_WAIT_INTERRUPT)
 +          securefp_report_finger (op, FP_FINGER_STATUS_PRESENT);
++        /*
++         * A wait that times out is not a failure: the HAL calls the command
++         * again and lets the TA decide (check_opcode maps 0x203 to "again").
++         * In Prepare and the Init commands it does so with op 0x28.
++         */
 +        if (w == SECUREFP_WAIT_TIMEOUT && r->op == SECUREFP_REQ_WAIT_INTERRUPT && timeout != 0)
-+          return SECUREFP_STEP_NO_FINGER;
++          {
++            fp_dbg ("op 4 wait timed out after %d ms: calling again", timeout);
++            if (stage == SECUREFP_STAGE_INIT)
++              r->op = SECUREFP_REQ_KEEP_OP;
++          }
 +        return SECUREFP_STEP_AGAIN;
 +      }
 +
@@ -544,16 +639,24 @@ index 0000000..408ac91
 +    }
 +}
 +
-+/* Call a TA command until it is done, serving its requests in between */
++/* Finger waits do not count: the TA may ask for as many as it likes */
++#define SECUREFP_STEPS_MAX 1000
++
++/*
++ * Call a TA command until it is done, serving its requests in between. Every
++ * call after the first passes op 1, or the op the TA asked to keep (4, 0x28).
++ */
 +static SecurefpStep
 +securefp_run (SecurefpOp *op, const gchar *name, SecurefpCmd cmd, gpointer data,
-+              SecurefpReply *r, GError **error)
++              SecurefpStage stage, SecurefpReply *r, GError **error)
 +{
 +  guint32 opw = 1;
++  guint steps = 0;
 +
-+  for (guint i = 0; i < 1000; i++)
++  while (steps < SECUREFP_STEPS_MAX)
 +    {
 +      SecurefpStep step;
++      gboolean wait;
 +
 +      if (!cmd (op->self, opw, data, r, error))
 +        return SECUREFP_STEP_ERROR;
@@ -561,7 +664,8 @@ index 0000000..408ac91
 +      if (r->status != 0)
 +        return SECUREFP_STEP_STATUS;
 +
-+      step = securefp_serve (op, r);
++      wait = r->op == SECUREFP_REQ_WAIT_INTERRUPT || r->op == SECUREFP_REQ_REMOVE_FINGER;
++      step = securefp_serve (op, r, stage);
 +      if (step != SECUREFP_STEP_AGAIN)
 +        {
 +          if (step == SECUREFP_STEP_ERROR)
@@ -569,6 +673,8 @@ index 0000000..408ac91
 +                         "%s: unexpected request %#x from the TA", name, r->op);
 +          return step;
 +        }
++      if (!wait)
++        steps++;
 +      opw = (r->op == SECUREFP_REQ_WAIT_INTERRUPT || r->op == SECUREFP_REQ_KEEP_OP) ? r->op : 1;
 +    }
 +
@@ -600,13 +706,51 @@ index 0000000..408ac91
 +  return TRUE;
 +}
 +
++/*
++ * BAuth_Prepare: the stored calibration goes in at +0x0c with its length at
++ * +0xa00c; the TA's calibration comes back the same way in the reply.
++ */
 +static gboolean
 +cmd_prepare (FpiDeviceSamsungSecurefp *self, guint32 op, gpointer data, SecurefpReply *r, GError **error)
 +{
++  GBytes *calib = data;
 +  guint8 *q = securefp_req (self, SECUREFP_OP_PREPARE, 0xa040);
 +
 +  wr32 (q, 8, op);
++  if (calib)
++    {
++      gsize len;
++      const guint8 *d = g_bytes_get_data (calib, &len);
++
++      memcpy (q + 0x0c, d, len);
++      wr32 (q, 0xa00c, len);
++    }
 +  return securefp_reply (self, 0xa040, 0xa040, 8, r, error);
++}
++
++/*
++ * BAuth_Control_OP(SECUREFP_CTL_CLEANUP), which the HAL sends before closing
++ * the session (fpSessionClose): the stored calibration goes in at +0x10c
++ * with its length at +0xfa10c. The reply carries the TA's calibration at
++ * +0x0c, with its length at +0xfa00c, where the caller also puts the room it
++ * has before the call.
++ */
++static gboolean
++cmd_cleanup (FpiDeviceSamsungSecurefp *self, GBytes *calib, SecurefpReply *r, GError **error)
++{
++  guint8 *q = securefp_req (self, SECUREFP_OP_CONTROL, SECUREFP_CTL_REQ_LEN);
++
++  wr32 (q, 8, SECUREFP_CTL_CLEANUP);
++  if (calib)
++    {
++      gsize len;
++      const guint8 *d = g_bytes_get_data (calib, &len);
++
++      memcpy (q + 0x10c, d, len);
++      wr32 (q, 0xfa10c, len);
++    }
++  wr32 (self->rsp, 0xfa00c, SECUREFP_CALIB_MAX);
++  return securefp_reply (self, SECUREFP_CTL_REQ_LEN, SECUREFP_CTL_RSP_LEN, 8, r, error);
 +}
 +
 +static gboolean
@@ -774,9 +918,6 @@ index 0000000..408ac91
 +    case SECUREFP_STEP_CANCELLED:
 +      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_CANCELLED, "Cancelled");
 +      break;
-+    case SECUREFP_STEP_NO_FINGER:
-+      g_set_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_GENERAL, "%s: no finger", what);
-+      break;
 +    case SECUREFP_STEP_STATUS:
 +      g_set_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_GENERAL,
 +                   "%s failed with TA status %#x", what, r->status);
@@ -800,14 +941,135 @@ index 0000000..408ac91
 +    fp_dbg ("cancel: %s", err->message);
 +}
 +
++/* ---- calibration (the HAL's calib.dat) ----------------------------------- */
++
++static GBytes *
++securefp_calib_load (void)
++{
++  g_autoptr(GError) err = NULL;
++  gchar *data = NULL;
++  gsize len = 0;
++
++  if (!g_file_get_contents (SECUREFP_CALIB_PATH, &data, &len, &err))
++    {
++      if (!g_error_matches (err, G_FILE_ERROR, G_FILE_ERROR_NOENT))
++        fp_warn ("reading %s: %s", SECUREFP_CALIB_PATH, err->message);
++      return NULL;
++    }
++  if (len == 0 || len > SECUREFP_CALIB_MAX)
++    {
++      fp_warn ("%s: %zu bytes, ignoring it", SECUREFP_CALIB_PATH, len);
++      g_free (data);
++      return NULL;
++    }
++  return g_bytes_new_take (data, len);
++}
++
++/* Keep what the TA returned, as updateCalib does: status 0 and a non-empty blob */
++static void
++securefp_calib_store (const gchar *from, const guint8 *data, guint32 len)
++{
++  g_autoptr(GError) err = NULL;
++
++  if (len == 0)
++    return;
++  if (len > SECUREFP_CALIB_MAX)
++    {
++      fp_warn ("%s: TA returned %u bytes of calibration, not keeping it", from, len);
++      return;
++    }
++  if (!g_file_set_contents_full (SECUREFP_CALIB_PATH, (const gchar *) data, len,
++                                 G_FILE_SET_CONTENTS_CONSISTENT | G_FILE_SET_CONTENTS_DURABLE,
++                                 0600, &err))
++    {
++      fp_warn ("%s: storing calibration: %s", from, err->message);
++      return;
++    }
++  fp_dbg ("%s: calibration saved (%u bytes)", from, len);
++}
++
++/*
++ * common_prepare: Prepare starts with op 1 and the stored calibration, or
++ * with op 2 (first call) when there is none, and goes back to that op after
++ * every request that is not 4 or 0x28. Status 0x1c means the TA could not
++ * open the calibration: drop it and start over with op 2. The calibration in
++ * the last reply is kept.
++ */
 +static gboolean
 +securefp_prepare (SecurefpOp *op, GError **error)
 +{
++  FpiDeviceSamsungSecurefp *self = op->self;
++  g_autoptr(GBytes) calib = securefp_calib_load ();
++  guint32 first = calib ? SECUREFP_PREP_CALIB : SECUREFP_PREP_FIRST_CALL;
++  guint32 opw = first;
++  guint steps = 0;
 +  SecurefpReply r;
-+  SecurefpStep step = securefp_run (op, "prepare", cmd_prepare, NULL, &r, error);
 +
-+  if (step != SECUREFP_STEP_DONE)
-+    return securefp_step_error (step, "prepare", &r, error);
++  fp_dbg ("prepare: op %#x, %s", first,
++          calib ? "with the stored calibration" : "no stored calibration (first call)");
++
++  while (steps < SECUREFP_STEPS_MAX)
++    {
++      SecurefpStep step;
++      gboolean wait;
++
++      if (!cmd_prepare (self, opw, calib, &r, error))
++        return FALSE;
++      fp_dbg ("prepare(op %#x) -> op %#x status %#x info %#x", opw, r.op, r.status, r.info);
++
++      if (r.status == SECUREFP_ST_HMAC && calib)
++        {
++          fp_warn ("prepare: the TA rejected the stored calibration (status %#x), preparing without it",
++                   r.status);
++          g_clear_pointer (&calib, g_bytes_unref);
++          first = opw = SECUREFP_PREP_FIRST_CALL;
++          steps++;
++          continue;
++        }
++      if (r.status != 0)
++        return securefp_step_error (SECUREFP_STEP_STATUS, "prepare", &r, error);
++
++      wait = r.op == SECUREFP_REQ_WAIT_INTERRUPT || r.op == SECUREFP_REQ_REMOVE_FINGER;
++      step = securefp_serve (op, &r, SECUREFP_STAGE_INIT);
++      if (step == SECUREFP_STEP_DONE)
++        {
++          securefp_calib_store ("prepare", self->rsp + 0x0c, rd32 (self->rsp, 0xa00c));
++          return TRUE;
++        }
++      if (step != SECUREFP_STEP_AGAIN)
++        {
++          if (step == SECUREFP_STEP_ERROR)
++            g_set_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO,
++                         "prepare: unexpected request %#x from the TA", r.op);
++          return securefp_step_error (step, "prepare", &r, error);
++        }
++      if (!wait)
++        steps++;
++      opw = (r.op == SECUREFP_REQ_WAIT_INTERRUPT || r.op == SECUREFP_REQ_KEEP_OP) ? r.op : first;
++    }
++
++  g_set_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO, "prepare never finished");
++  return FALSE;
++}
++
++/*
++ * Prepare once per power-up and TA load, as the HAL does on its cold path.
++ * On an open session it skips Prepare ("BAuthSessionOpen Skip") and goes
++ * straight to the command's Init.
++ */
++static gboolean
++securefp_ensure_prepared (SecurefpOp *op, GError **error)
++{
++  FpiDeviceSamsungSecurefp *self = op->self;
++
++  if (self->prepared)
++    {
++      fp_dbg ("warm: session open and prepared, skipping Prepare");
++      return TRUE;
++    }
++  if (!securefp_prepare (op, error))
++    return FALSE;
++  self->prepared = TRUE;
 +  return TRUE;
 +}
 +
@@ -821,24 +1083,25 @@ index 0000000..408ac91
 +  SecurefpStep step;
 +  gint stages = 0;
 +
-+  if (!securefp_prepare (op, error))
++  if (!securefp_ensure_prepared (op, error))
 +    return FALSE;
 +
 +  for (guint touch = 0; touch < SECUREFP_TOUCHES_MAX && progress < 100; touch++)
 +    {
 +      guint32 flags, len;
 +
-+      step = securefp_run (op, "enroll_init", cmd_enroll_init, GUINT_TO_POINTER (op->idx), &r, error);
++      step = securefp_run (op, "enroll_init", cmd_enroll_init, GUINT_TO_POINTER (op->idx),
++                           SECUREFP_STAGE_INIT, &r, error);
 +      if (step != SECUREFP_STEP_DONE)
 +        return securefp_step_error (step, "enroll_init", &r, error);
 +
-+      step = securefp_run (op, "enroll_do", cmd_enroll_do, NULL, &r, error);
++      step = securefp_run (op, "enroll_do", cmd_enroll_do, NULL, SECUREFP_STAGE_DO, &r, error);
 +      if (step == SECUREFP_STEP_CANCELLED)
 +        {
 +          securefp_abort (op);
 +          return securefp_step_error (step, "enroll", &r, error);
 +        }
-+      if (step == SECUREFP_STEP_ERROR || step == SECUREFP_STEP_NO_FINGER)
++      if (step == SECUREFP_STEP_ERROR)
 +        return securefp_step_error (step, "enroll_do", &r, error);
 +
 +      flags = rd32 (self->rsp, 0x0c);
@@ -856,7 +1119,8 @@ index 0000000..408ac91
 +          r.status != SECUREFP_ST_BAD_QUALITY && r.status != SECUREFP_ST_ENROLL_FAIL)
 +        return securefp_step_error (step, "enroll_do", &r, error);
 +
-+      step = securefp_run (op, "enroll_final", cmd_final, GUINT_TO_POINTER (SECUREFP_OP_ENROLL_FINAL), &r, error);
++      step = securefp_run (op, "enroll_final", cmd_final, GUINT_TO_POINTER (SECUREFP_OP_ENROLL_FINAL),
++                           SECUREFP_STAGE_FINAL, &r, error);
 +      if (step == SECUREFP_STEP_ERROR || step == SECUREFP_STEP_CANCELLED)
 +        return securefp_step_error (step, "enroll_final", &r, error);
 +
@@ -915,10 +1179,11 @@ index 0000000..408ac91
 +  SecurefpReply r;
 +  SecurefpStep step;
 +
-+  if (!securefp_prepare (op, error))
++  if (!securefp_ensure_prepared (op, error))
 +    return FALSE;
 +
-+  step = securefp_run (op, "identify_init", cmd_identify_init, op->gallery_blob, &r, error);
++  step = securefp_run (op, "identify_init", cmd_identify_init, op->gallery_blob,
++                       SECUREFP_STAGE_INIT, &r, error);
 +  if (step != SECUREFP_STEP_DONE)
 +    return securefp_step_error (step, "identify_init", &r, error);
 +
@@ -926,13 +1191,13 @@ index 0000000..408ac91
 +    {
 +      guint32 o1_0, o1_1, v2;
 +
-+      step = securefp_run (op, "identify_do", cmd_identify_do, NULL, &r, error);
++      step = securefp_run (op, "identify_do", cmd_identify_do, NULL, SECUREFP_STAGE_DO, &r, error);
 +      if (step == SECUREFP_STEP_CANCELLED)
 +        {
 +          securefp_abort (op);
 +          return securefp_step_error (step, "identify", &r, error);
 +        }
-+      if (step == SECUREFP_STEP_ERROR || step == SECUREFP_STEP_NO_FINGER)
++      if (step == SECUREFP_STEP_ERROR)
 +        return securefp_step_error (step, "identify_do", &r, error);
 +
 +      v2 = rd32 (self->rsp, 0x0c);
@@ -977,7 +1242,8 @@ index 0000000..408ac91
 +    }
 +  while (FALSE);
 +
-+  step = securefp_run (op, "identify_final", cmd_final, GUINT_TO_POINTER (SECUREFP_OP_IDENTIFY_FINAL), &r, error);
++  step = securefp_run (op, "identify_final", cmd_final, GUINT_TO_POINTER (SECUREFP_OP_IDENTIFY_FINAL),
++                       SECUREFP_STAGE_FINAL, &r, error);
 +  if (step == SECUREFP_STEP_ERROR)
 +    return securefp_step_error (step, "identify_final", &r, error);
 +  g_clear_error (error);
@@ -997,9 +1263,22 @@ index 0000000..408ac91
 +    ok = securefp_do_identify (op, &error);
 +
 +  if (ok)
-+    g_task_return_boolean (task, TRUE);
-+  else
-+    g_task_return_error (task, error);
++    {
++      g_task_return_boolean (task, TRUE);
++      return;
++    }
++
++  /*
++   * A cancelled operation leaves the TA idle (BAuth_Cancel), and the HAL goes
++   * on using the session. Anything else may have left it in a state we do
++   * not know: start the next open from scratch.
++   */
++  if (!g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
++    {
++      fp_dbg ("operation failed (%s): the session ends at close", error->message);
++      op->self->broken = TRUE;
++    }
++  g_task_return_error (task, error);
 +}
 +
 +static void
@@ -1201,25 +1480,67 @@ index 0000000..408ac91
 +  fpi_device_probe_complete (dev, self->board->id, NULL, NULL);
 +}
 +
++/*
++ * The HAL's fpSessionClose: Control_OP cleanup with the stored calibration
++ * (the TA hands back what it wants kept), then BAuth_SessionClose, which
++ * unloads the TA, then the sensor's power off.
++ */
++static void
++securefp_cleanup (FpiDeviceSamsungSecurefp *self)
++{
++  g_autoptr(GBytes) calib = securefp_calib_load ();
++  g_autoptr(GError) err = NULL;
++  SecurefpReply r;
++
++  if (!cmd_cleanup (self, calib, &r, &err))
++    {
++      fp_warn ("cleanup: %s", err->message);
++      return;
++    }
++  fp_dbg ("cleanup(%#x) -> op %#x status %#x", SECUREFP_CTL_CLEANUP, r.op, r.status);
++  if (r.status == 0)
++    securefp_calib_store ("cleanup", self->rsp + 0x0c, rd32 (self->rsp, 0xfa00c));
++}
++
 +static void
 +securefp_close_hw (FpiDeviceSamsungSecurefp *self)
 +{
++  if (self->linger_id)
++    {
++      g_source_remove (self->linger_id);
++      self->linger_id = 0;
++    }
++  if (self->qsee_fd >= 0 && self->prepared && !self->broken)
++    securefp_cleanup (self);
++  if (self->qsee_fd >= 0)
++    close (self->qsee_fd);     /* unloads the TA */
 +  if (self->rst_fd >= 0)
 +    {
 +      g_autoptr(GError) err = NULL;
 +      if (!securefp_power (self, FALSE, &err))
 +        g_warning ("securefp: power off: %s", err->message);
 +    }
-+  if (self->qsee_fd >= 0)
-+    close (self->qsee_fd);     /* unloads the TA */
 +  if (self->int_fd >= 0)
 +    close (self->int_fd);
 +  if (self->rst_fd >= 0)
 +    close (self->rst_fd);
 +  self->qsee_fd = self->int_fd = self->rst_fd = -1;
++  self->prepared = FALSE;
++  self->broken = FALSE;
 +  g_clear_pointer (&self->req, g_free);
 +  g_clear_pointer (&self->rsp, g_free);
 +  g_clear_pointer (&self->known, g_ptr_array_unref);
++}
++
++static gboolean
++securefp_linger_cb (gpointer user_data)
++{
++  FpiDeviceSamsungSecurefp *self = user_data;
++
++  self->linger_id = 0;
++  fp_dbg ("linger expired: closing the session (cleanup, TA unload, power off)");
++  securefp_close_hw (self);
++  return G_SOURCE_REMOVE;
 +}
 +
 +static void
@@ -1230,6 +1551,23 @@ index 0000000..408ac91
 +  struct qsee_app_load load = { .sbuf_size = SECUREFP_SBUF_ALLOC };
 +  GError *error = NULL;
 +  guint32 type = 0;
++
++  if (self->linger_id)
++    {
++      g_source_remove (self->linger_id);
++      self->linger_id = 0;
++    }
++  if (self->qsee_fd >= 0 && !self->broken)
++    {
++      fp_dbg ("warm open: TA still loaded and sensor powered (%s)",
++              self->prepared ? "prepared" : "not prepared yet");
++      fpi_device_open_complete (dev, NULL);
++      return;
++    }
++  if (self->qsee_fd >= 0)
++    securefp_close_hw (self);
++
++  fp_dbg ("cold open: powering the sensor and loading the TA");
 +
 +  self->rst_fd = securefp_request_line (SECUREFP_LINE_RST, GPIO_V2_LINE_FLAG_OUTPUT, FALSE, &error);
 +  if (self->rst_fd < 0)
@@ -1274,6 +1612,9 @@ index 0000000..408ac91
 +      goto err;
 +    }
 +
++  /* Prepare runs at the start of the first operation, as on the HAL's cold path */
++  self->prepared = FALSE;
++  self->broken = FALSE;
 +  fpi_device_open_complete (dev, NULL);
 +  return;
 +
@@ -1282,11 +1623,33 @@ index 0000000..408ac91
 +  fpi_device_open_complete (dev, error);
 +}
 +
++/*
++ * Keep the session for a while: the lock screen releases the reader at the
++ * end of every PAM run and claims it again a few seconds later.
++ */
 +static void
 +securefp_close (FpDevice *dev)
 +{
-+  securefp_close_hw (FPI_DEVICE_SAMSUNG_SECUREFP (dev));
++  FpiDeviceSamsungSecurefp *self = FPI_DEVICE_SAMSUNG_SECUREFP (dev);
++
++  g_clear_pointer (&self->known, g_ptr_array_unref);
++  if (self->qsee_fd >= 0 && !self->broken)
++    {
++      fp_dbg ("close: keeping the session for %u ms", SECUREFP_LINGER_MS);
++      self->linger_id = g_timeout_add (SECUREFP_LINGER_MS, securefp_linger_cb, self);
++    }
++  else
++    {
++      securefp_close_hw (self);
++    }
 +  fpi_device_close_complete (dev, NULL);
++}
++
++static void
++securefp_dispose (GObject *object)
++{
++  securefp_close_hw (FPI_DEVICE_SAMSUNG_SECUREFP (object));
++  G_OBJECT_CLASS (fpi_device_samsung_securefp_parent_class)->dispose (object);
 +}
 +
 +static void
@@ -1304,6 +1667,9 @@ index 0000000..408ac91
 +fpi_device_samsung_securefp_class_init (FpiDeviceSamsungSecurefpClass *klass)
 +{
 +  FpDeviceClass *dev_class = FP_DEVICE_CLASS (klass);
++  GObjectClass *object_class = G_OBJECT_CLASS (klass);
++
++  object_class->dispose = securefp_dispose;
 +
 +  dev_class->id = FP_COMPONENT;
 +  dev_class->full_name = "Samsung securefp (TrustZone) fingerprint sensor";
@@ -1323,10 +1689,10 @@ index 0000000..408ac91
 +}
 diff --git a/libfprint/drivers/samsung_securefp/securefp.h b/libfprint/drivers/samsung_securefp/securefp.h
 new file mode 100644
-index 0000000..a3a5bab
+index 0000000..e259b73
 --- /dev/null
 +++ b/libfprint/drivers/samsung_securefp/securefp.h
-@@ -0,0 +1,49 @@
+@@ -0,0 +1,53 @@
 +/*
 + * Samsung securefp: fingerprint sensors run by Samsung's TrustZone TA
 + *
@@ -1357,9 +1723,12 @@ index 0000000..a3a5bab
 +#define SECUREFP_SBUF_SIZE        0x1f4140
 +/* libQSEEComAPI rounds it up to a page; Control_OP needs 0x1f4180 */
 +#define SECUREFP_SBUF_ALLOC       0x1f5000
-+/* Largest request (Identify_Init) and reply (Identify_Do) we send */
-+#define SECUREFP_REQ_MAX          0x965c0
-+#define SECUREFP_RSP_MAX          0xa00c0
++/* BAuth_Control_OP's fixed request and reply sizes */
++#define SECUREFP_CTL_REQ_LEN      0xfa140
++#define SECUREFP_CTL_RSP_LEN      0xfa040
++/* Largest request and reply we send: Control_OP's */
++#define SECUREFP_REQ_MAX          SECUREFP_CTL_REQ_LEN
++#define SECUREFP_RSP_MAX          SECUREFP_CTL_RSP_LEN
 +#define SECUREFP_TA_PATH          "qcom/sm8350/Samsung/b2q/securefp"
 +
 +/* TA opcodes (first word of every request), from libbauthtzcommon.so */
@@ -1371,6 +1740,7 @@ index 0000000..a3a5bab
 +#define SECUREFP_OP_IDENTIFY_DO     0x06
 +#define SECUREFP_OP_IDENTIFY_FINAL  0x07
 +#define SECUREFP_OP_CANCEL          0x0a
++#define SECUREFP_OP_CONTROL         0x0c
 +#define SECUREFP_OP_TYPE_CHECK      0x10
 +
 +/* What stock's HAL passes for and expects from a Goodix GW36T1 */
