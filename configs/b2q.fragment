@@ -142,3 +142,8 @@ CONFIG_QCOM_QMI_TS=m
 # No ramoops: its records never survived a reset on this phone, and it garbled the
 # kernel console at startup (2026-11-11). The DT node is disabled too (0123).
 # CONFIG_PSTORE_RAM is not set
+
+# Tailscale marks its packets for the rp_filter workaround (2026-11-11).
+CONFIG_NETFILTER_XT_CONNMARK=m
+CONFIG_NETFILTER_XT_TARGET_CONNMARK=m
+CONFIG_NETFILTER_XT_MATCH_CONNMARK=m
