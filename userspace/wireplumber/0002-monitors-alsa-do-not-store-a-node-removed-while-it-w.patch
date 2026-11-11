@@ -1,0 +1,159 @@
+From 23704b60733b93a53314b968023b81204172439c Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Wed, 11 Nov 2026 23:59:08 +0900
+Subject: [PATCH] monitors/alsa: do not store a node removed while it was being
+ created
+
+createNode() activates the node asynchronously and stores it in the
+activation callback. When the device removes or replaces the object
+before that (two profile changes in a row), removeNode() finds nothing
+stored, and the callback then stores the node anyway: it outlives its
+object as a stale sink or source until another object takes the id.
+
+- track the node being created per device and id
+- in the activation callback, store the node only if it is still the
+  one being created for the id; otherwise destroy it
+- removeNode() cancels a pending creation; createNode() for an id whose
+  creation is pending removes it first, as WpSpaDevice does for an
+  object that was stored
+- same for the SplitPCM HW node
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/scripts/monitors/alsa.lua | 67 +++++++++++++++++++++++------------
+ 1 file changed, 45 insertions(+), 22 deletions(-)
+
+diff --git a/src/scripts/monitors/alsa.lua b/src/scripts/monitors/alsa.lua
+index 2a591b2a..edcd53a4 100644
+--- a/src/scripts/monitors/alsa.lua
++++ b/src/scripts/monitors/alsa.lua
+@@ -23,6 +23,9 @@ node_names_table = nil
+ -- SPA ids to node names: name = id_name_table[device_id][node_id]
+ id_name_table = nil
+ 
++-- nodes still being created: node = creating_nodes_table[device_id][node_id]
++creating_nodes_table = nil
++
+ -- node error recovery state: recovery = device_recovery_table[device_name]
+ RECOVERY_MAX_ATTEMPTS = 3
+ RECOVERY_DELAY_MSEC = 1000
+@@ -350,10 +353,44 @@ function monitorNodeError (node)
+   end)
+ end
+ 
++-- Node creation is asynchronous, and the device can remove or replace the
++-- object (on a profile change) before it finishes. A node stored after that
++-- would outlive its object, so only the creation still pending for the id is
++-- stored, and any other is destroyed.
++function activateNode(parent, parent_id, id, node, what)
++  creating_nodes_table[parent_id][id] = node
++  parent:set_managed_pending(id)
++  node:activate(Features.ALL, function (n, err)
++    local creating = creating_nodes_table[parent_id]
++    if creating == nil or creating[id] ~= node then
++      log:info ("ALSA " .. what .. " was removed while it was being created")
++      if not err then
++        n:request_destroy()
++      end
++      return
++    end
++    creating[id] = nil
++
++    if err then
++      log:warning ("Failed to create ALSA " .. what .. ": " .. tostring(err))
++      parent:store_managed_object(id, nil)
++    else
++      monitorNodeError (n)
++      parent:store_managed_object(id, n)
++    end
++  end)
++end
++
+ function createNode(parent, id, obj_type, factory, properties)
+   local dev_props = parent.properties
+   local parent_id = tonumber(dev_props["spa.object.id"])
+ 
++  -- the device replaces an object whose node is still being created: remove
++  -- it as the device does for one that was stored
++  if creating_nodes_table[parent_id][id] ~= nil then
++    removeNode(parent, id)
++  end
++
+   -- set the device id and spa factory name; REQUIRED, do not change
+   properties["device.id"] = parent["bound-id"]
+   properties["factory.name"] = factory
+@@ -513,17 +550,8 @@ function createNode(parent, id, obj_type, factory, properties)
+ 
+       local node = createSplitPCMHWNode(dev_props, orig_properties)
+       if node ~= nil then
+-        parent:set_managed_pending(SPLIT_PCM_PARENT_OFFSET + id)
+-        node:activate(Features.ALL, function (n, err)
+-          if err then
+-            log:warning ("Failed to create ALSA SplitPCM HW node " ..
+-                split_hw_node_name .. ": " .. tostring(err))
+-            parent:store_managed_object(SPLIT_PCM_PARENT_OFFSET + id, nil)
+-          else
+-            monitorNodeError (n)
+-            parent:store_managed_object(SPLIT_PCM_PARENT_OFFSET + id, n)
+-          end
+-        end)
++        activateNode(parent, parent_id, SPLIT_PCM_PARENT_OFFSET + id, node,
++            "SplitPCM HW node " .. split_hw_node_name)
+ 
+         node_names_table[split_hw_node_name] = true
+         id_name_table[parent_id][SPLIT_PCM_PARENT_OFFSET + id] = split_hw_node_name
+@@ -541,17 +569,8 @@ function createNode(parent, id, obj_type, factory, properties)
+ 
+   -- create the node
+   local node = Node("adapter", properties)
+-  parent:set_managed_pending(id)
+-  node:activate(Features.ALL, function (n, err)
+-      if err then
+-        log:warning ("Failed to create ALSA node " ..
+-            tostring (properties["node.name"]) .. ": " .. tostring(err))
+-        parent:store_managed_object(id, nil)
+-      else
+-        monitorNodeError (n)
+-        parent:store_managed_object(id, n)
+-      end
+-  end)
++  activateNode(parent, parent_id, id, node,
++      "node " .. tostring (properties["node.name"]))
+ end
+ 
+ function removeNode(parent, id)
+@@ -561,6 +580,7 @@ function removeNode(parent, id)
+   for _, j in pairs(ids) do
+     local node_name = id_name_table[parent_id][j]
+ 
++    creating_nodes_table[parent_id][j] = nil
+     parent:store_managed_object(j, nil)
+ 
+     if node_name ~= nil then
+@@ -573,6 +593,7 @@ end
+ 
+ function createDevice(parent, id, factory, properties)
+   id_name_table[id] = {}
++  creating_nodes_table[id] = {}
+   properties["spa.object.id"] = id
+   local device = SpaDevice(factory, properties)
+   if device then
+@@ -601,6 +622,7 @@ function removeDevice(parent, id)
+     end
+     id_name_table[id] = nil
+   end
++  creating_nodes_table[id] = nil
+ end
+ 
+ function prepareDevice(parent, id, obj_type, factory, properties)
+@@ -773,6 +795,7 @@ function createMonitor ()
+   device_names_table = {}
+   node_names_table = {}
+   id_name_table = {}
++  creating_nodes_table = {}
+   device_recovery_table = {}
+ 
+   -- activate monitor
+-- 
+2.56.0
+

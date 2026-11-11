@@ -9,7 +9,7 @@ pkgname=(
   wireplumber-system-services
 )
 pkgver=0.5.18
-pkgrel=2
+pkgrel=3
 pkgdesc="Session / policy manager implementation for PipeWire"
 url="https://pipewire.pages.freedesktop.org/wireplumber/"
 arch=(x86_64 aarch64)
@@ -38,15 +38,20 @@ checkdepends=(pipewire-audio)
 source=(
   "git+https://gitlab.freedesktop.org/pipewire/$pkgbase.git#tag=$pkgver"
   0001-device-keep-the-call-profile-the-user-picked-and-do-not-store-it.patch
+  0002-monitors-alsa-do-not-store-a-node-removed-while-it-w.patch
 )
 b2sums=('eea6a3e022c0b8918a72b56a9cdb1c02bca4411a9394fc2a8732faad2c0c71d1443b2a37b22e60467aaab62c154150d18b185b2690271d1d4830dee6513e2e8c'
-        'a8e59fccde5701b1fd234ac1d3156d3d4ca6956dda8b58cb3135d7608b0f81e240bb2055ecdc023db389bf08f033fb82992fbfc5d081d911269949d93dcc4cb4')
+        'a8e59fccde5701b1fd234ac1d3156d3d4ca6956dda8b58cb3135d7608b0f81e240bb2055ecdc023db389bf08f033fb82992fbfc5d081d911269949d93dcc4cb4'
+        '0ae4ae821ab77ac6c0b87da309f8bdbc736283aed0fda8ba5f20eeec469e9e8c0fef2a8b9c0769fb7a87ecef420c2d81eee6fa52908a8897f2c5052c582db809')
 
 prepare() {
   cd $pkgbase
 
   # b2q: keep the Voice Call profile picked during a call, never store it
   git apply ../0001-device-keep-the-call-profile-the-user-picked-and-do-not-store-it.patch
+
+  # b2q: two profile changes in a row left a stale ALSA node behind
+  git apply ../0002-monitors-alsa-do-not-store-a-node-removed-while-it-w.patch
 }
 
 build() {
