@@ -22,14 +22,20 @@ it as stock does, without any help from userspace:
   actuator driver passes it) goes to CAAFPOSM1 on every change, through
   a control notifier on the sensor's lens-focus.
 - The gyro zero offsets come from stock's factory calibration, which
-  the HAL reads from /efs/FactoryApp/camera_ois_gyro_cal ("x,y,z" in
-  degrees per second) and the kernel scales by 114/1000. The same text
-  goes into the gyro_calibration attribute. Like stock, Z is written as
-  0.
+  the HAL reads from /efs/FactoryApp/camera_ois_gyro_cal (comma-separated
+  degrees per second with three decimals; it drops the dots and takes
+  the first three fields as x, y and z) and the kernel scales by
+  114/1000 at power-up. The same text goes into the gyro_calibration
+  attribute and applies at the next power-up. Like stock, Z is written
+  as 0.
 - Like stock, a failed start is logged and the sensor still streams,
   and power-down turns no servo off.
 
-The probe powers the MCU once and logs its firmware version.
+The probe powers the MCU once and logs its firmware version. The status
+attribute shows the status and error registers and, with the servo on,
+the gyro targets and hall positions as stock's
+cam_ois_read_hall_position() reads them. System sleep powers it down
+through runtime PM.
 
 Signed-off-by: Noa Himesaka <himesaka@noa.codes>
 Assisted-by: Claude:claude-opus-5-5
@@ -37,10 +43,10 @@ Assisted-by: Claude:claude-opus-5-5
 
 diff --git a/Documentation/ABI/testing/sysfs-bus-i2c-devices-samsung-ois-mcu b/Documentation/ABI/testing/sysfs-bus-i2c-devices-samsung-ois-mcu
 new file mode 100644
-index 0000000..b8243cc
+index 0000000..7123341
 --- /dev/null
 +++ b/Documentation/ABI/testing/sysfs-bus-i2c-devices-samsung-ois-mcu
-@@ -0,0 +1,41 @@
+@@ -0,0 +1,44 @@
 +What:		/sys/bus/i2c/devices/.../mode
 +Date:		November 2026
 +KernelVersion:	7.3
@@ -58,11 +64,12 @@ index 0000000..b8243cc
 +Contact:	Noa Himesaka <himesaka@noa.codes>
 +Description:
 +		(RW) The gyro zero offsets of this phone, in the format of
-+		Samsung's /efs/FactoryApp/camera_ois_gyro_cal: "x,y,z", each
-+		in degrees per second with three decimals, as Samsung's
-+		factory calibration measures them. X and Y are written to the
-+		MCU at every power-up, Z is kept but not used (Samsung's
-+		driver writes 0). Defaults to 0,0,0.
++		Samsung's /efs/FactoryApp/camera_ois_gyro_cal as Samsung's
++		camera HAL reads it: "x,y" or "x,y,z", each in degrees per
++		second with three decimals, as Samsung's factory calibration
++		measures them. X and Y are written to the MCU at its next
++		power-up, Z is kept but not used (Samsung's driver writes 0).
++		Defaults to 0.000,0.000,0.000.
 +
 +What:		/sys/bus/i2c/devices/.../status
 +Date:		November 2026
@@ -72,7 +79,9 @@ index 0000000..b8243cc
 +		(RO) "off" while the MCU is powered down; while it is on, its
 +		status and error registers, whether the servo is on, the mode
 +		register, the 8-bit focus position last passed to it (-1 if
-+		none yet) and the lens hall centre it reported.
++		none yet) and the lens hall centre it reported. With the
++		servo on, also the X and Y gyro targets and hall positions,
++		read once (this takes about 105 ms).
 +
 +What:		/sys/bus/i2c/devices/.../firmware_version
 +Date:		November 2026
@@ -139,10 +148,10 @@ index f58fc64..fe9e557 100644
  obj-$(CONFIG_VIDEO_S5K6A3) += s5k6a3.o
 diff --git a/drivers/media/i2c/samsung-ois-mcu.c b/drivers/media/i2c/samsung-ois-mcu.c
 new file mode 100644
-index 0000000..61906a5
+index 0000000..46cfbc5
 --- /dev/null
 +++ b/drivers/media/i2c/samsung-ois-mcu.c
-@@ -0,0 +1,900 @@
+@@ -0,0 +1,948 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Samsung optical image stabilisation MCU (STM32G0 with Samsung firmware)
@@ -188,6 +197,11 @@ index 0000000..61906a5
 +#define OIS_REG_CACTRL		0x0039	/* centre shift compensation on */
 +#define OIS_REG_CAAFPOSM1	0x003a	/* module 1 focus position, 8 bits */
 +#define OIS_REG_VDRINFO		0x007c	/* 4 bytes */
++#define OIS_REG_FWINFO_CTRL	0x0080	/* internal information update on */
++#define OIS_REG_X_GYRO_CALC_M1	0x0086	/* X target, 16 bits */
++#define OIS_REG_Y_GYRO_CALC_M1	0x0088
++#define OIS_REG_HAX_OUT_M1	0x008e	/* X hall, 16 bits */
++#define OIS_REG_HAY_OUT_M1	0x0090
 +#define OIS_REG_OISSEL		0x00be	/* driver output select, a module mask */
 +#define OIS_REG_HWVER		0x00f8	/* 4 bytes */
 +#define OIS_REG_XCENTER_M1	0x021a
@@ -212,6 +226,8 @@ index 0000000..61906a5
 +
 +/* Gyro zero offset register LSB per raw unit of the calibration, x1000 */
 +#define OIS_GYRO_SCALE		114
++/* The largest calibration that fits the 16-bit offset registers */
++#define OIS_GYRO_RAW_MAX	(S16_MAX * 1000 / OIS_GYRO_SCALE)
 +
 +/* The OIS block of the module EEPROM (stock ADDR_M_OIS) */
 +#define OIS_CAL_XYGG		0x10
@@ -333,6 +349,30 @@ index 0000000..61906a5
 +	return -EBUSY;
 +}
 +
++/*
++ * After power-up: status 0x01 (idle) or 0x13, 20 reads 5 ms apart, as in
++ * stock's cam_ois_init()
++ */
++static int ois_wait_ready(struct samsung_ois *ois)
++{
++	unsigned int sts = 0;
++	int retries;
++	int ret;
++
++	for (retries = 20; ; retries--) {
++		ret = ois_read_status(ois, &sts);
++		if (!ret && (sts == OIS_STS_IDLE || sts == OIS_STS_INIT_DONE))
++			return 0;
++		if (!retries)
++			break;
++		usleep_range(5000, 5050);
++	}
++
++	dev_err(ois->dev, "not ready after power-up: status 0x%02x, %d\n",
++		sts, ret);
++	return ret ?: -EBUSY;
++}
++
 +static int ois_power_on(struct samsung_ois *ois)
 +{
 +	unsigned int i;
@@ -410,28 +450,13 @@ index 0000000..61906a5
 +	static const u8 angle_comp[4] = { 0x06, 0x81, 0x55, 0x3f };
 +	unsigned int sts = 0;
 +	u16 err = 0;
-+	int retries;
 +	int ret;
 +
 +	/* The OIS thread waits 10 ms before cam_ois_init() */
 +	usleep_range(10000, 11000);
 +
-+	/*
-+	 * Status 0x01 (idle) or 0x13, 20 reads 5 ms apart. Stock goes on
-+	 * after a timeout as well.
-+	 */
-+	for (retries = 20; ; retries--) {
-+		ret = ois_read_status(ois, &sts);
-+		if (!ret && (sts == OIS_STS_IDLE || sts == OIS_STS_INIT_DONE))
-+			break;
-+		if (!retries) {
-+			dev_err(ois->dev,
-+				"not ready after power-up: status 0x%02x, %d\n",
-+				sts, ret);
-+			break;
-+		}
-+		usleep_range(5000, 5050);
-+	}
++	/* Stock goes on when the MCU does not become ready */
++	ois_wait_ready(ois);
 +
 +	/* Stock cam_ois_mcu_init(): gains, gyro orientation, gyro offsets */
 +	if (ois->have_xygg) {
@@ -664,28 +689,32 @@ index 0000000..61906a5
 +	struct samsung_ois *ois = dev_get_drvdata(dev);
 +	s32 raw[3] = { 0, 0, 0 };
 +	const char *p = buf;
-+	int i, ret;
++	int i, n, ret;
 +
-+	for (i = 0; i < ARRAY_SIZE(raw); i++) {
++	/* "x,y" or "x,y,z": the HAL needs a comma and takes three fields */
++	n = 0;
++	while (1) {
 +		size_t len = strcspn(p, ",");
 +
-+		ret = ois_parse_milli(p, len, &raw[i]);
++		if (n == ARRAY_SIZE(raw))
++			return -EINVAL;
++		ret = ois_parse_milli(p, len, &raw[n++]);
 +		if (ret)
 +			return ret;
 +		if (p[len] != ',')
 +			break;
 +		p += len + 1;
 +	}
-+	/* X and Y at least, as the HAL needs a comma */
-+	if (i == 0)
++	if (n < 2)
 +		return -EINVAL;
 +
++	for (i = 0; i < ARRAY_SIZE(raw); i++)
++		if (raw[i] < -OIS_GYRO_RAW_MAX || raw[i] > OIS_GYRO_RAW_MAX)
++			return -ERANGE;
++
++	/* Stock writes the offsets only at power-up, before the servo runs */
 +	mutex_lock(&ois->lock);
 +	memcpy(ois->gyro_raw, raw, sizeof(raw));
-+	if (ois->powered) {
-+		ois_write_le16(ois, OIS_REG_XGZERO, ois_gyro_zero(raw[0]));
-+		ois_write_le16(ois, OIS_REG_YGZERO, ois_gyro_zero(raw[1]));
-+	}
 +	mutex_unlock(&ois->lock);
 +
 +	return count;
@@ -716,9 +745,35 @@ index 0000000..61906a5
 +	}
 +
 +	len = sysfs_emit(buf,
-+			 "status 0x%02x error 0x%04x servo %s mode 0x%02x focus %d centre %u %u\n",
++			 "status 0x%02x error 0x%04x servo %s mode 0x%02x focus %d centre %u %u",
 +			 sts, err, str_on_off(ois->servo_on), ois->cur_mode,
 +			 ois->af_pos, ois->x_center, ois->y_center);
++
++	/*
++	 * The gyro targets and hall positions, as stock's
++	 * cam_ois_read_hall_position() reads them with the servo on.
++	 */
++	if (ois->servo_on) {
++		u16 tx = 0, ty = 0, hx = 0, hy = 0;
++
++		ret = ois_write(ois, OIS_REG_FWINFO_CTRL, 1);
++		if (!ret) {
++			msleep(100);
++			usleep_range(5000, 5100);
++			ret = ois_read_le16(ois, OIS_REG_X_GYRO_CALC_M1, &tx);
++			if (!ret)
++				ret = ois_read_le16(ois, OIS_REG_Y_GYRO_CALC_M1, &ty);
++			if (!ret)
++				ret = ois_read_le16(ois, OIS_REG_HAX_OUT_M1, &hx);
++			if (!ret)
++				ret = ois_read_le16(ois, OIS_REG_HAY_OUT_M1, &hy);
++			ois_write(ois, OIS_REG_FWINFO_CTRL, 0);
++		}
++		if (!ret)
++			len += sysfs_emit_at(buf, len, " target %u %u hall %u %u",
++					     tx, ty, hx, hy);
++	}
++	len += sysfs_emit_at(buf, len, "\n");
 +out:
 +	mutex_unlock(&ois->lock);
 +	return len;
@@ -995,7 +1050,8 @@ index 0000000..61906a5
 +	ret = ois_power_on(ois);
 +	if (ret)
 +		return ret;
-+	ret = ois_wait_idle(ois, 20);
++	usleep_range(10000, 11000);
++	ret = ois_wait_ready(ois);
 +	if (!ret || ret == -EBUSY)
 +		ret = ois_read_version(ois);
 +	ois_power_off(ois);
@@ -1020,6 +1076,7 @@ index 0000000..61906a5
 +}
 +
 +static const struct dev_pm_ops ois_pm_ops = {
++	SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend, pm_runtime_force_resume)
 +	RUNTIME_PM_OPS(ois_runtime_suspend, ois_runtime_resume, NULL)
 +};
 +
