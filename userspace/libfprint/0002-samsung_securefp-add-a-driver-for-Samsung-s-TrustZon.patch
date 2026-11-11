@@ -1,4 +1,4 @@
-From 41dda235b89a4e0fb543d76c96eadeb57f120fe8 Mon Sep 17 00:00:00 2001
+From 4deb7af7c1ed69dd85fa2923ae7d34eb8b148468 Mon Sep 17 00:00:00 2001
 From: Noa Himesaka <himesaka@noa.codes>
 Date: Tue, 10 Nov 2026 16:19:31 +0900
 Subject: [PATCH 2/2] samsung_securefp: add a driver for Samsung's TrustZone
@@ -35,6 +35,18 @@ conversation finds it warm; then the driver sends the HAL's cleanup
 control op, keeps the calibration it returns, unloads the TA and powers
 the sensor off.
 
+After a match the TA returns the template it updated with that capture,
+and the HAL stores it over the matched one, so the templates follow how the
+finger is really put on the key. libfprint cannot rewrite a print fprintd
+stores, so the driver keeps the update in
+/var/lib/samsung-securefp/templates, one file per user and bio index, tied
+to the enrolled template it was made from by a hash; it is sent in place
+of the print's template, and is dropped when that print changes, when the
+slot is enrolled again or when Identify_Init refuses it. Like the
+templates in fprintd's prints, it is the TA's own sealed blob, stored as
+it comes. Identify_Do, Enroll_Do and the Final commands always pass op 1,
+as the HAL does.
+
 Operations run in a worker thread; progress and finger status are posted
 back to the device's main context.
 
@@ -43,20 +55,20 @@ Supported so far: Galaxy Z Flip3 (samsung,b2q, Goodix GW36T1).
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01L5scTQJJDo2PTt6GBeDFah
 ---
- libfprint/drivers/samsung_securefp/securefp.c | 1630 +++++++++++++++++
+ libfprint/drivers/samsung_securefp/securefp.c | 1896 +++++++++++++++++
  libfprint/drivers/samsung_securefp/securefp.h |   53 +
  libfprint/meson.build                         |    1 +
  meson.build                                   |    1 +
- 4 files changed, 1685 insertions(+)
+ 4 files changed, 1951 insertions(+)
  create mode 100644 libfprint/drivers/samsung_securefp/securefp.c
  create mode 100644 libfprint/drivers/samsung_securefp/securefp.h
 
 diff --git a/libfprint/drivers/samsung_securefp/securefp.c b/libfprint/drivers/samsung_securefp/securefp.c
 new file mode 100644
-index 0000000..8b22a4a
+index 0000000..d363e9a
 --- /dev/null
 +++ b/libfprint/drivers/samsung_securefp/securefp.c
-@@ -0,0 +1,1630 @@
+@@ -0,0 +1,1896 @@
 +/*
 + * Samsung securefp: fingerprint sensors run by Samsung's TrustZone TA
 + *
@@ -114,6 +126,7 @@ index 0000000..8b22a4a
 +
 +#include <errno.h>
 +#include <fcntl.h>
++#include <glib/gstdio.h>
 +#include <linux/gpio.h>
 +#include <poll.h>
 +#include <string.h>
@@ -186,6 +199,16 @@ index 0000000..8b22a4a
 +#define SECUREFP_CALIB_DIR           "/var/lib/samsung-securefp"
 +#define SECUREFP_CALIB_PATH          SECUREFP_CALIB_DIR "/calib.dat"
 +#define SECUREFP_CALIB_MAX           0xa000
++
++/*
++ * Templates the TA updated after a match, which the HAL writes back over the
++ * stored one (storeTemplate). Each file is keyed to the enrolled template it
++ * came from, so a deleted or re-enrolled finger never gets an old update.
++ */
++#define SECUREFP_UPDATE_DIR          SECUREFP_CALIB_DIR "/templates"
++#define SECUREFP_UPDATE_MAGIC        0x55544653  /* "SFTU" */
++#define SECUREFP_UPDATE_VERSION      1
++#define SECUREFP_UPDATE_HDR          (4 + 4 + 4 + 32)
 +
 +/*
 + * How long a closed device keeps the TA loaded and the sensor powered. Stock
@@ -567,6 +590,7 @@ index 0000000..8b22a4a
 +  GPtrArray         *gallery;        /* identify */
 +  FpPrint           *match;          /* identify: result */
 +  GBytes            *gallery_blob;
++  GPtrArray         *updates_used;   /* identify: update files sent in gallery_blob */
 +  GError            *retry;          /* identify: retry instead of a decision */
 +  guint32            idx;
 +  gint               stages;
@@ -574,6 +598,7 @@ index 0000000..8b22a4a
 +} SecurefpOp;
 +
 +static void securefp_report_finger (SecurefpOp *op, FpFingerStatusFlags status);
++static gchar *securefp_update_path (FpPrint *print, guint32 idx);
 +
 +/*
 + * check_opcode() of the HAL, for what a type 6 sensor asks for. It may
@@ -643,8 +668,11 @@ index 0000000..8b22a4a
 +#define SECUREFP_STEPS_MAX 1000
 +
 +/*
-+ * Call a TA command until it is done, serving its requests in between. Every
-+ * call after the first passes op 1, or the op the TA asked to keep (4, 0x28).
++ * Call a TA command until it is done, serving its requests in between. The
++ * HAL passes op 1 on every call, except that Prepare and the Init commands
++ * keep the op the TA asked for when it is 4 or 0x28; Identify_Do,
++ * Enroll_Do and the Final commands always get op 1 (identify 0x5b2e8,
++ * enroll 0x57b50).
 + */
 +static SecurefpStep
 +securefp_run (SecurefpOp *op, const gchar *name, SecurefpCmd cmd, gpointer data,
@@ -675,7 +703,10 @@ index 0000000..8b22a4a
 +        }
 +      if (!wait)
 +        steps++;
-+      opw = (r->op == SECUREFP_REQ_WAIT_INTERRUPT || r->op == SECUREFP_REQ_KEEP_OP) ? r->op : 1;
++      opw = 1;
++      if (stage == SECUREFP_STAGE_INIT &&
++          (r->op == SECUREFP_REQ_WAIT_INTERRUPT || r->op == SECUREFP_REQ_KEEP_OP))
++        opw = r->op;
 +    }
 +
 +  g_set_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO, "%s never finished", name);
@@ -904,6 +935,7 @@ index 0000000..8b22a4a
 +  g_clear_object (&op->enroll_print);
 +  g_clear_pointer (&op->gallery, g_ptr_array_unref);
 +  g_clear_pointer (&op->gallery_blob, g_bytes_unref);
++  g_clear_pointer (&op->updates_used, g_ptr_array_unref);
 +  g_clear_error (&op->retry);
 +  g_free (op);
 +}
@@ -1156,6 +1188,14 @@ index 0000000..8b22a4a
 +                g_variant_new ("(u@ay)", op->idx,
 +                               g_variant_new_from_bytes (G_VARIANT_TYPE_BYTESTRING, tmpl, TRUE)),
 +                NULL);
++
++  /* A new enrollment in this slot: an update of the template it replaces is stale */
++  {
++    g_autofree gchar *path = securefp_update_path (op->enroll_print, op->idx);
++
++    if (g_unlink (path) == 0)
++      fp_dbg ("template update for finger %u is stale (finger enrolled again): dropped", op->idx);
++  }
 +  return TRUE;
 +}
 +
@@ -1172,6 +1212,206 @@ index 0000000..8b22a4a
 +  return g_variant_get_data_as_bytes (blob);
 +}
 +
++/* ---- template updates (the HAL's storeTemplate after a match) ------------ */
++
++/*
++ * check_file_size() of the HAL: a template is version 3 ("FPV3" at the start
++ * and 0xfe in one of the last two bytes) with its length minus 10 in big
++ * endian at +8, or version 2 with its length minus 0x74 at +0.
++ */
++static gboolean
++securefp_template_valid (const guint8 *t, gsize len)
++{
++  guint32 v;
++
++  if (len < 10)
++    return FALSE;
++  if ((t[len - 1] == 0xfe || t[len - 2] == 0xfe) && rd32 (t, 0) == 0x33565046)
++    {
++      memcpy (&v, t + 8, 4);
++      return GUINT32_FROM_BE (v) == len - 10;
++    }
++  memcpy (&v, t, 4);
++  return GUINT32_FROM_BE (v) + 0x74 == len;
++}
++
++static void
++securefp_template_hash (GBytes *tmpl, guint8 out[32])
++{
++  g_autoptr(GChecksum) sum = g_checksum_new (G_CHECKSUM_SHA256);
++  gsize len = 32;
++
++  g_checksum_update (sum, g_bytes_get_data (tmpl, NULL), g_bytes_get_size (tmpl));
++  g_checksum_get_digest (sum, out, &len);
++}
++
++/* One file per user and bio index: the slot the TA's template lives in */
++static gchar *
++securefp_update_path (FpPrint *print, guint32 idx)
++{
++  const gchar *user = fp_print_get_username (print);
++  g_autofree gchar *name = NULL;
++
++  if (!user || !*user)
++    user = "unknown";
++  for (const gchar *c = user; *c; c++)
++    if (!g_ascii_isalnum (*c) && *c != '_' && *c != '-' && *c != '.')
++      {
++        g_autofree gchar *h = g_compute_checksum_for_string (G_CHECKSUM_SHA256, user, -1);
++
++        name = g_strdup_printf ("%.16s-%u.dat", h, idx);
++        return g_build_filename (SECUREFP_UPDATE_DIR, name, NULL);
++      }
++  name = g_strdup_printf ("%s-%u.dat", user, idx);
++  return g_build_filename (SECUREFP_UPDATE_DIR, name, NULL);
++}
++
++/*
++ * The update stored for this print's slot, if it was made from this very
++ * enrolled template. A file made from another template (the finger was
++ * deleted and the slot enrolled again) is stale and removed.
++ */
++static GBytes *
++securefp_update_load (FpPrint *print, guint32 idx, GBytes *enrolled, gchar **path_out)
++{
++  g_autofree gchar *path = securefp_update_path (print, idx);
++  g_autofree gchar *data = NULL;
++  g_autoptr(GError) err = NULL;
++  guint8 hash[32];
++  gsize len = 0;
++
++  if (!g_file_get_contents (path, &data, &len, &err))
++    {
++      if (!g_error_matches (err, G_FILE_ERROR, G_FILE_ERROR_NOENT))
++        fp_warn ("reading %s: %s", path, err->message);
++      return NULL;
++    }
++
++  securefp_template_hash (enrolled, hash);
++  if (len <= SECUREFP_UPDATE_HDR ||
++      rd32 ((guint8 *) data, 0) != SECUREFP_UPDATE_MAGIC ||
++      rd32 ((guint8 *) data, 4) != SECUREFP_UPDATE_VERSION ||
++      rd32 ((guint8 *) data, 8) != idx ||
++      memcmp (data + 12, hash, 32) != 0 ||
++      !securefp_template_valid ((guint8 *) data + SECUREFP_UPDATE_HDR, len - SECUREFP_UPDATE_HDR))
++    {
++      fp_dbg ("template update for finger %u is stale (not made from this enrollment): dropped", idx);
++      if (g_unlink (path) < 0 && errno != ENOENT)
++        fp_warn ("removing %s: %s", path, g_strerror (errno));
++      return NULL;
++    }
++
++  *path_out = g_steal_pointer (&path);
++  return g_bytes_new (data + SECUREFP_UPDATE_HDR, len - SECUREFP_UPDATE_HDR);
++}
++
++static void
++securefp_update_store (FpPrint *print, guint32 idx, const guint8 *t, guint32 len)
++{
++  g_autoptr(GBytes) enrolled = NULL;
++  g_autoptr(GByteArray) file = g_byte_array_sized_new (SECUREFP_UPDATE_HDR + len);
++  g_autofree gchar *path = NULL;
++  g_autoptr(GError) err = NULL;
++  guint32 tidx = 0;
++  guint8 hdr[SECUREFP_UPDATE_HDR];
++
++  enrolled = securefp_print_template (print, &tidx);
++  if (!enrolled || tidx != idx)
++    return;
++  if (len == 0 || len > SECUREFP_TMPL_MAX || !securefp_template_valid (t, len))
++    {
++      fp_dbg ("template update for finger %u: %u bytes that do not look like a template, not kept",
++              idx, len);
++      return;
++    }
++
++  wr32 (hdr, 0, SECUREFP_UPDATE_MAGIC);
++  wr32 (hdr, 4, SECUREFP_UPDATE_VERSION);
++  wr32 (hdr, 8, idx);
++  securefp_template_hash (enrolled, hdr + 12);
++  g_byte_array_append (file, hdr, sizeof (hdr));
++  g_byte_array_append (file, t, len);
++
++  if (g_mkdir_with_parents (SECUREFP_UPDATE_DIR, 0700) < 0)
++    {
++      fp_warn ("creating %s: %s", SECUREFP_UPDATE_DIR, g_strerror (errno));
++      return;
++    }
++  path = securefp_update_path (print, idx);
++  if (!g_file_set_contents_full (path, (const gchar *) file->data, file->len,
++                                 G_FILE_SET_CONTENTS_CONSISTENT | G_FILE_SET_CONTENTS_DURABLE,
++                                 0600, &err))
++    {
++      fp_warn ("storing the template update for finger %u: %s", idx, err->message);
++      return;
++    }
++  fp_dbg ("template update stored for finger %u (%u bytes)", idx, len);
++}
++
++/*
++ * The HAL hands the TA all templates back to back (retrieveAllTemplates),
++ * each one the latest it stored for that slot. Here that is the TA's update
++ * when there is one made from this print, else the print's own template.
++ */
++static GBytes *
++securefp_gallery_blob (SecurefpOp *op, gboolean use_updates)
++{
++  g_autoptr(GByteArray) blob = g_byte_array_new ();
++
++  g_clear_pointer (&op->updates_used, g_ptr_array_unref);
++  op->updates_used = g_ptr_array_new_with_free_func (g_free);
++
++  for (guint i = 0; i < op->gallery->len; i++)
++    {
++      FpPrint *print = g_ptr_array_index (op->gallery, i);
++      g_autoptr(GBytes) t = NULL;
++      g_autoptr(GBytes) upd = NULL;
++      g_autofree gchar *upd_path = NULL;
++      guint32 idx = 0;
++      GBytes *use;
++
++      t = securefp_print_template (print, &idx);
++      if (!t)
++        continue;
++      if (use_updates)
++        upd = securefp_update_load (print, idx, t, &upd_path);
++      use = t;
++      if (upd && blob->len + g_bytes_get_size (upd) <= SECUREFP_TMPL_MAX)
++        {
++          fp_dbg ("identify_init: using the updated template for finger %u (%zu bytes, enrolled %zu)",
++                  idx, g_bytes_get_size (upd), g_bytes_get_size (t));
++          use = upd;
++          g_ptr_array_add (op->updates_used, g_steal_pointer (&upd_path));
++        }
++      else if (upd)
++        {
++          fp_dbg ("identify_init: the updated template for finger %u does not fit, using the enrolled one",
++                  idx);
++        }
++      if (blob->len + g_bytes_get_size (use) > SECUREFP_TMPL_MAX)
++        {
++          fp_warn ("identify_init: templates beyond %u bytes left out", SECUREFP_TMPL_MAX);
++          break;
++        }
++      g_byte_array_append (blob, g_bytes_get_data (use, NULL), g_bytes_get_size (use));
++    }
++
++  if (blob->len == 0)
++    return NULL;
++  return g_byte_array_free_to_bytes (g_steal_pointer (&blob));
++}
++
++/* check_nomatch_reason() for a type 6 sensor: what stock reports with a no-match */
++static guint32
++securefp_nomatch_code (guint32 reason)
++{
++  if (reason == 0xffffffff)
++    return 49999;
++  if (reason == 0)
++    return 0;
++  return reason + 44000;
++}
++
 +static gboolean
 +securefp_do_identify (SecurefpOp *op, GError **error)
 +{
@@ -1182,14 +1422,47 @@ index 0000000..8b22a4a
 +  if (!securefp_ensure_prepared (op, error))
 +    return FALSE;
 +
++  op->gallery_blob = securefp_gallery_blob (op, TRUE);
++  if (!op->gallery_blob)
++    {
++      g_set_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_DATA_INVALID, "No usable templates");
++      return FALSE;
++    }
++
 +  step = securefp_run (op, "identify_init", cmd_identify_init, op->gallery_blob,
 +                       SECUREFP_STAGE_INIT, &r, error);
++  if (step == SECUREFP_STEP_STATUS && op->updates_used->len > 0)
++    {
++      /*
++       * Only the updates differ from what the TA accepted before. Which one it
++       * refused cannot be told apart when there are several, so all go.
++       */
++      fp_warn ("identify_init rejected the gallery with %u updated template(s) (status %#x): dropped, retrying with the enrolled templates",
++               op->updates_used->len, r.status);
++      for (guint i = 0; i < op->updates_used->len; i++)
++        {
++          const gchar *path = g_ptr_array_index (op->updates_used, i);
++
++          if (g_unlink (path) < 0 && errno != ENOENT)
++            fp_warn ("removing %s: %s", path, g_strerror (errno));
++        }
++      securefp_abort (op);
++      g_clear_pointer (&op->gallery_blob, g_bytes_unref);
++      op->gallery_blob = securefp_gallery_blob (op, FALSE);
++      if (!op->gallery_blob)
++        {
++          g_set_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_DATA_INVALID, "No usable templates");
++          return FALSE;
++        }
++      step = securefp_run (op, "identify_init", cmd_identify_init, op->gallery_blob,
++                           SECUREFP_STAGE_INIT, &r, error);
++    }
 +  if (step != SECUREFP_STEP_DONE)
 +    return securefp_step_error (step, "identify_init", &r, error);
 +
 +  do
 +    {
-+      guint32 o1_0, o1_1, v2;
++      guint32 o1_0, o1_1, v2, upd_len;
 +
 +      step = securefp_run (op, "identify_do", cmd_identify_do, NULL, SECUREFP_STAGE_DO, &r, error);
 +      if (step == SECUREFP_STEP_CANCELLED)
@@ -1203,8 +1476,10 @@ index 0000000..8b22a4a
 +      v2 = rd32 (self->rsp, 0x0c);
 +      o1_0 = rd32 (self->rsp, 0x10);
 +      o1_1 = rd32 (self->rsp, 0x14);
-+      fp_dbg ("identify_do: status %#x op %#x v2 %#x o1 %#x %#x hat %u",
-+              r.status, r.op, v2, o1_0, o1_1, rd32 (self->rsp, 0xa0085));
++      /* BAuth_Identify_Do: the TA's updated template at +0x38, its length at +0x96038 */
++      upd_len = rd32 (self->rsp, 0x96038);
++      fp_dbg ("identify_do: status %#x op %#x v2 %#x o1 %#x %#x hat %u update %u bytes",
++              r.status, r.op, v2, o1_0, o1_1, rd32 (self->rsp, 0xa0085), upd_len);
 +
 +      if (step == SECUREFP_STEP_STATUS && r.status == SECUREFP_ST_BAD_QUALITY)
 +        {
@@ -1219,8 +1494,10 @@ index 0000000..8b22a4a
 +           * It is a no-match, not a retry: fprintd's duplicate check before
 +           * enrolling another finger restarts on every retry, so a new finger
 +           * would never get past it. Any other decision ends the same way.
++           * o1[0] is the TA's reason, which stock reports as a vendor code.
 +           */
-+          fp_dbg ("no match (status %#x)", r.status);
++          fp_dbg ("no match (status %#x): reason %#x, stock's vendor code %u",
++                  r.status, o1_0, securefp_nomatch_code (o1_0));
 +        }
 +      else
 +        {
@@ -1238,6 +1515,12 @@ index 0000000..8b22a4a
 +                  break;
 +                }
 +            }
++          /*
++           * The HAL keeps the template the TA updated with this capture over
++           * the matched one (identify, storeTemplate after Identify_Do).
++           */
++          if (op->match && upd_len > 0)
++            securefp_update_store (op->match, o1_1, self->rsp + 0x38, upd_len);
 +        }
 +    }
 +  while (FALSE);
@@ -1402,7 +1685,6 @@ index 0000000..8b22a4a
 +{
 +  FpiDeviceSamsungSecurefp *self = FPI_DEVICE_SAMSUNG_SECUREFP (dev);
 +  SecurefpOp *op = g_new0 (SecurefpOp, 1);
-+  g_autoptr(GByteArray) blob = g_byte_array_new ();
 +  GPtrArray *prints = NULL;
 +
 +  fpi_device_get_identify_data (dev, &prints);
@@ -1423,29 +1705,25 @@ index 0000000..8b22a4a
 +  op->action = FPI_DEVICE_ACTION_IDENTIFY;
 +  op->gallery = g_ptr_array_ref (prints);
 +
-+  /* The HAL hands the TA all templates back to back (retrieveAllTemplates) */
-+  for (guint i = 0; i < prints->len; i++)
-+    {
-+      guint32 idx;
-+      g_autoptr(GBytes) t = securefp_print_template (g_ptr_array_index (prints, i), &idx);
-+      gsize len;
-+      const guint8 *d;
++  /* The gallery blob is built in the worker thread, with the stored template updates */
++  {
++    gboolean any = FALSE;
 +
-+      if (!t)
-+        continue;
-+      d = g_bytes_get_data (t, &len);
-+      if (blob->len + len > SECUREFP_TMPL_MAX)
-+        break;
-+      g_byte_array_append (blob, d, len);
-+    }
-+  if (blob->len == 0)
-+    {
-+      securefp_op_free (op);
-+      fpi_device_identify_complete (dev, fpi_device_error_new_msg (FP_DEVICE_ERROR_DATA_INVALID,
-+                                                                   "No usable templates"));
-+      return;
-+    }
-+  op->gallery_blob = g_byte_array_free_to_bytes (g_steal_pointer (&blob));
++    for (guint i = 0; i < prints->len && !any; i++)
++      {
++        guint32 idx;
++        g_autoptr(GBytes) t = securefp_print_template (g_ptr_array_index (prints, i), &idx);
++
++        any = t != NULL;
++      }
++    if (!any)
++      {
++        securefp_op_free (op);
++        fpi_device_identify_complete (dev, fpi_device_error_new_msg (FP_DEVICE_ERROR_DATA_INVALID,
++                                                                     "No usable templates"));
++        return;
++      }
++  }
 +  securefp_start (dev, op);
 +}
 +
