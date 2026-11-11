@@ -8,14 +8,14 @@ Files that run on the phone, as opposed to `tools/` which runs on the host.
 | `installer/install-rootfs.sh` | M3.5: format `super`/`userdata` and unpack the Arch rootfs |
 | `rootfs/` | overlay copied over `/` by `tools/build-rootfs.sh`: units, udev rules, NetworkManager, UCM, cover display |
 | `rootfs-packages.txt` | the phone's explicitly installed repo packages, installed by `tools/build-rootfs.sh` |
-| `b2q-cover/` | `b2q-coverd`, the cover display (leased DRM connector, clock, notifications, calls) |
+| `kita/` | `kita`, the cover display (leased DRM connector, clock, notifications, calls) |
 
 Packages built natively on the phone (`makepkg` as `<user>`) and given to
 `tools/build-rootfs.sh --packages`; each PKGBUILD starts from Arch's or the AUR's:
 
 | path | version | why |
 |---|---|---|
-| `b2q-spud/` | 0.1.0-6 | fingerprint glue for the securefp TA |
+| `claire/` | 0.1.0-6 | fingerprint glue for the securefp TA |
 | `callaudiod/` | 0.1.99-4 | switches the call profile for the speaker button |
 | `hexagonrpcd/` | 0.5.0-1 | file server for the sensor hub (SLPI) |
 | `iio-sensor-proxy/` | 3.9-2 | SSC sensors |

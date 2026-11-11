@@ -1,14 +1,14 @@
 [Unit]
 Description=Skin temperature estimate and SIOP CPU/GPU limits (stock's LRP2)
-Documentation=file:///usr/share/doc/b2q-siop/README.md
-ConditionPathExists=/usr/share/b2q-siop/model.conf
+Documentation=file:///usr/share/doc/mihari/README.md
+ConditionPathExists=/usr/share/mihari/model.conf
 # OPP voltages for stock's gold/prime voltage match
 Wants=sys-kernel-debug.mount
 After=sys-kernel-debug.mount systemd-modules-load.service
 
 [Service]
-ExecStart=/usr/lib/b2q-siop/b2q-siopd
-RuntimeDirectory=b2q-siop
+ExecStart=/usr/lib/mihari/mihari
+RuntimeDirectory=mihari
 Restart=on-failure
 RestartSec=10
 

@@ -70,13 +70,13 @@ them in the DT is safe on that count.
     2. `QSEE_APP_IOC_VMBUF`, a new ioctl in 0049: 0x5000 bytes assigned to VMID 0x22 (`CP_SPSS_SP_SHARED`) with `qcom_scm_assign_mem`, as stock's ION `sp_mem` heap does.
     3. `SPU_INIT` 0x20d `{u32 0x20d, u64 pa, u32 0x5000}` returns 0. The wrap moves on to **-2** (hwvault ret 9998). No hang, no listener request so far.
   - The buffer has to stay assigned while keymaster64 uses it, so the descriptor that owns it lives in a long-running holder (the stock HAL daemon's role), not in fprintd's per-operation open.
-- **Working end to end (2026-11-10, kernel #6, b2q-spud 0.1.0-6):**
-  - The root key needed the SPSS's NVM served from HLOS, the way stock `spdaemon` and `sec_nvm` do it, and `b2q-spud` now does that at boot:
+- **Working end to end (2026-11-10, kernel #6, claire 0.1.0-6):**
+  - The root key needed the SPSS's NVM served from HLOS, the way stock `spdaemon` and `sec_nvm` do it, and `claire` now does that at boot:
     1. **Persist:** mounts the persist partition at `/mnt/vendor/persist` (`mnt-vendor-persist.mount`), where the secnvm copies are.
     2. **Channels:** binds the SPSS edge's `sp_kernel` channel to `rpmsg_chrdev`, then every `sec_nvm_<app>` channel.
-    3. **sec_nvm:** serves each `sec_nvm_<app>` channel with its own manager (`userspace/b2q-spud/src/nvm.c`, ported from stock `sec_nvm` with GhidraMCP).
+    3. **sec_nvm:** serves each `sec_nvm_<app>` channel with its own manager (`userspace/claire/src/nvm.c`, ported from stock `sec_nvm` with GhidraMCP).
     4. **Keymaster:** on NVM_READY (its kernel partition open and committed), opens `sp_keymaster` and runs `KM_NEW_CONFIGURE` and `SPU_INIT`. SPU_INIT returns 0 here.
-    5. **hwvault:** loads hwvault and generates the root key, then sets it (`GENERATE_HWVAULT_ROT` returns 0 with a 185-byte blob, `SET_HWVAULT_ROT` returns 0). The blob is kept in `/var/lib/b2q-spud/hwvault.hvr` and set again on later boots.
+    5. **hwvault:** loads hwvault and generates the root key, then sets it (`GENERATE_HWVAULT_ROT` returns 0 with a 185-byte blob, `SET_HWVAULT_ROT` returns 0). The blob is kept in `/var/lib/claire/hwvault.hvr` and set again on later boots.
   - **What the SPSS asked for during the boot that worked:** IsCommit `0x5` (version 3), then Open SKP `0xc` on `sec_nvm_sp_nvm` (the kernel partition, 32 blocks, ARC marker) and Commit SKP `0x8`. Next came GET_SBDB_ADDR `0xd` (a 4 KiB scratch database), a second Commit SKP during the wrap, Open `0xa` on `sec_nvm_sp_keymaster` (the keymaster partition, CMAC marker) and LOOKUP_SBAPP `0xe` (a 68806-byte app scratch buffer). Only then did the wrap finish. Each of these got its stock reply layout; the IsCommit, async-commit and scratch-buffer layouts are from `IsCommitOp`, `AsyncCommitOp` and `ScratchBufferOp::execute`.
   - **Shared buffers:** `QSEE_APP_IOC_VMBUF` with `QSEE_APP_VMBUF_HLOS | KEEP` gives a buffer below 4 GiB assigned to {VMID 0x24 RW, HLOS RW} and mmap()able, as stock's ION `sp_mem` heap does.
   - **Polkit:** enrolling from Settings needs a polkit agent, because fprintd's enroll action is `auth_self_keep`. Without `polkit-kde-agent` fprintd answers "Not Authorized".

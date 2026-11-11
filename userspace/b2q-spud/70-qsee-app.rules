@@ -1,2 +1,0 @@
-# /dev/qsee-app: give it a systemd device unit, so b2q-spud can order after it
-KERNEL=="qsee-app", SUBSYSTEM=="misc", TAG+="systemd"

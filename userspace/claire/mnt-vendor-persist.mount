@@ -1,6 +1,6 @@
 [Unit]
 Description=Samsung persist partition (secnvm, the SPSS's NVM copies)
-Documentation=file:///usr/share/doc/b2q-spud/README.md
+Documentation=file:///usr/share/doc/claire/README.md
 
 [Mount]
 What=/dev/disk/by-partlabel/persist

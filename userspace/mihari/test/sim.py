@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
-"""Drive b2q-siopd through a fake sysfs tree and check every tick against a
+"""Drive mihari through a fake sysfs tree and check every tick against a
 reference written from the stock code: the HAL's virtual thermistors and
 heatmap, SDHMS's Q.o.D() (LRP2), C0224w (SIOP level), Z1.n()/X1 (step-0
 limiters) and cpufreq_limit's three-cluster mapping.
@@ -293,7 +293,7 @@ class Ref:
 
 
 # ---- fake tree ----
-root = tempfile.mkdtemp(prefix="b2q-siop-sim-")
+root = tempfile.mkdtemp(prefix="mihari-sim-")
 
 
 def put(rel, val):
@@ -346,7 +346,7 @@ def scenario():
 
 
 ref = Ref()
-p = subprocess.Popen([DAEMON, MODEL], env={"B2Q_SIOP_ROOT": root}, stdin=subprocess.PIPE,
+p = subprocess.Popen([DAEMON, MODEL], env={"MIHARI_ROOT": root}, stdin=subprocess.PIPE,
                      stdout=subprocess.PIPE, text=True)
 fails = 0
 seen = set()

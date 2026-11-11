@@ -8,26 +8,26 @@ framebuffer. The connector is marked
 screen for it, which is what the mobile shell, Firefox's mobile profile and the
 app switcher need.
 
-KWin only offers non-desktop connectors through `wp_drm_lease_v1`. `b2q-coverd`
+KWin only offers non-desktop connectors through `wp_drm_lease_v1`. `kita`
 leases DSI-2, owns it with DRM/KMS and draws the clock, up to three
 notifications and the incoming-call banner with Cairo/Pango. Page flips on the
 leased CRTC deliver no completion events, so redraws use `drmModeDirtyFB`.
 
 ## Build and install
 
-`b2q-coverd` runs on the phone, so build it there (the phone has
+`kita` runs on the phone, so build it there (the phone has
 `aarch64-linux-gnu-gcc` and the libraries):
 
 ```sh
-scp b2q-coverd.c drm-lease-v1-client-protocol.h drm-lease-v1-protocol.c \
-	root@<phone>:/tmp/b2q-cover/
-ssh root@<phone> 'cd /tmp/b2q-cover && \
-	gcc -O2 -Wall b2q-coverd.c drm-lease-v1-protocol.c -o b2q-coverd \
+scp kita.c drm-lease-v1-client-protocol.h drm-lease-v1-protocol.c \
+	root@<phone>:/tmp/kita/
+ssh root@<phone> 'cd /tmp/kita && \
+	gcc -O2 -Wall kita.c drm-lease-v1-protocol.c -o kita \
 	$(pkg-config --cflags --libs gio-2.0 wayland-client libdrm cairo pangocairo) -lm && \
-	install -m755 b2q-coverd /usr/local/bin/b2q-coverd'
-install -m644 ../rootfs/etc/xdg/autostart/b2q-coverd.desktop /etc/xdg/autostart/
-install -m644 ../rootfs/usr/lib/udev/rules.d/82-b2q-backlight.rules /usr/lib/udev/rules.d/
-install -m644 ../rootfs/usr/lib/udev/rules.d/82-b2q-touch.rules /usr/lib/udev/rules.d/
+	install -m755 kita /usr/local/bin/kita'
+install -m644 ../rootfs/etc/xdg/autostart/kita.desktop /etc/xdg/autostart/
+install -m644 ../rootfs/usr/lib/udev/rules.d/82-kita-backlight.rules /usr/lib/udev/rules.d/
+install -m644 ../rootfs/usr/lib/udev/rules.d/82-kita-touch.rules /usr/lib/udev/rules.d/
 udevadm control --reload-rules
 ```
 
@@ -51,7 +51,7 @@ calls from IMSroha (`codes.noa.IMSroha`) on the system bus, and notifications fr
 on the session bus (`BecomeMonitor`), parsed from the message body.
 
 While folded the main panel is DPMS Off, not just backlight 0: `apply_lid`
-runs `qml6 /usr/local/share/b2q/dpms-main-off.qml` on close and `...-on.qml`
+runs `qml6 /usr/local/share/kita/dpms-main-off.qml` on close and `...-on.qml`
 on open, using the Plasma Mobile `DPMSUtil`. Only one helper runs at a time; a
 fold or unfold during a run is applied when it exits. A folded power-key press runs the
 off helper before waking the cover. PowerDevil's profiles use `LidAction=0`
@@ -60,7 +60,7 @@ and `PowerButtonAction=32` (LockScreen); the mobile default
 
 ## Heat
 
-`b2q-coverd` is event-driven. While the cover sleeps no timer runs at all.
+`kita` is event-driven. While the cover sleeps no timer runs at all.
 While it is lit there are two one-shot timeouts: one at the next minute
 boundary for the clock and one at the earliest notification expiry (90 s after
 it arrived); expired cards are also pruned on every wake. The cover is DPMS Off

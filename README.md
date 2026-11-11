@@ -66,11 +66,11 @@ unlockable.
 | SSC sensors: accelerometer, gyroscope, magnetometer, compass, ambient light | verified (data via `ssccli`; `iio-sensor-proxy` reports them) |
 | Grip sensor (Semtech SX9360, IIO proximity) | verified (raw channels; its main electrode is the phone's proximity sensor) |
 | GNSS | verified through ModemManager's QMI LOC (`gps-raw`, `gps-nmea`; no fix indoors, no `/dev/gnss`) |
-| Cover display | working: 512x260 strip; `b2q-coverd` leases the non-desktop connector, sleeps by default and wakes on notification/call/SMS/power key; the main panel is DPMS Off while folded and only the cover is active; the call banner clears on hangup |
-| Fingerprint sensor (power button) | verified: Samsung's securefp TrustZone app through `/dev/qsee-app`, libfprint `samsung_securefp`, fprintd; `b2q-spud` serves the secure processor's storage and sets up the key that seals templates; enroll in Settings, unlock at the lock screen ([`FINGERPRINT.md`](FINGERPRINT.md)) |
+| Cover display | working: 512x260 strip; `kita` leases the non-desktop connector, sleeps by default and wakes on notification/call/SMS/power key; the main panel is DPMS Off while folded and only the cover is active; the call banner clears on hangup |
+| Fingerprint sensor (power button) | verified: Samsung's securefp TrustZone app through `/dev/qsee-app`, libfprint `samsung_securefp`, fprintd; `claire` serves the secure processor's storage and sets up the key that seals templates; enroll in Settings, unlock at the lock screen ([`FINGERPRINT.md`](FINGERPRINT.md)) |
 | NFC (NXP SN100U) | verified: `nxp-nci` at i2c15 0x2b, neard reads tags (a YubiKey's NDEF URI) |
 | Cameras: rear wide (IMX563), ultrawide (IMX258), front (IMX374) | verified: raw capture at full resolution and 30 fps on all three (the wide one over C-PHY), colour bars exact; pictures through libcamera 0.7.2's software ISP with auto exposure ([`CAMERA.md`](CAMERA.md)) |
-| Cover touchscreen (Zinitix ZTW522) | verified: vendor protocol driver/DT in `patches/linux/0038-*`, `0039-*`; `b2q-coverd` grabs the evdev and dismisses tapped cards while the cover is lit; a tap never wakes it, a swipe does; udev keeps libinput off it |
+| Cover touchscreen (Zinitix ZTW522) | verified: vendor protocol driver/DT in `patches/linux/0038-*`, `0039-*`; `kita` grabs the evdev and dismisses tapped cards while the cover is lit; a tap never wakes it, a swipe does; udev keeps libinput off it |
 
 ## Not working yet
 
@@ -163,14 +163,14 @@ everything, cellular included, works:
   `sns_reg.conf` under `/usr/share/qcom/sm8350/Samsung/b2q/`), `hexagonrpcd` from
   `userspace/hexagonrpcd`, the patched `iio-sensor-proxy` from
   `userspace/iio-sensor-proxy` (`-Dssc-support=enabled` and the claim race patch),
-  and `b2q-sensors-tree.service` plus the `81-b2q-sensors.rules` udev rule from
+  and `renge.service` plus the `81-b2q-sensors.rules` udev rule from
   `userspace/rootfs/`,
 - the NFC userspace stack: `neard` from `userspace/neard` (not in the ports repos),
   which also provides `nfctool` for `/dev/nfc0`,
-- the cover daemon: `userspace/b2q-cover/` (`b2q-coverd`), which leases DSI-2 from KWin,
+- the cover daemon: `userspace/kita/` (`kita`), which leases DSI-2 from KWin,
   drives the panel with Cairo/Pango and controls its backlight; autostart under
   `userspace/rootfs/etc/xdg/autostart/` and the backlight udev rule under
-  `userspace/rootfs/usr/lib/udev/rules.d/82-b2q-backlight.rules`,
+  `userspace/rootfs/usr/lib/udev/rules.d/82-kita-backlight.rules`,
 - the Spacebar MMSC default for `<user>` (`http://omammsc.uplus.co.kr:9084`,
   no proxy) so a reimage can send MMS without opening settings,
 - user `<user>` (groups wheel, video, audio, input, render), no password set by the

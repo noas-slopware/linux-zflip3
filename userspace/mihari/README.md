@@ -1,10 +1,10 @@
-# b2q-siop
+# mihari
 
 Stock's skin temperature (LRP2) and the CPU and GPU limits Samsung throttles on with it,
 the way the stock firmware does them. On stock this is split between Samsung's thermal HAL
 (`/vendor/bin/hw/vendor.samsung.hardware.thermal@1.0-service` with
 `/vendor/etc/mercury.json`), SamsungDeviceHealthManagerService (SDHMS, its SIOP table
-`siop_b2q_sm8350.xml`) and the kernel's `cpufreq_limit`. `b2q-siopd` does all three.
+`siop_b2q_sm8350.xml`) and the kernel's `cpufreq_limit`. `mihari` does all three.
 
 ## What it does, every 10 s (the HAL's interval)
 
@@ -39,12 +39,12 @@ the way the stock firmware does them. On stock this is split between Samsung's t
    each policy's `scaling_max_freq`, GPUFreqMax to the GPU's devfreq `max_freq`, only when
    they change, and released on exit.
 
-The status of the last tick is in `/run/b2q-siop/status`.
+The status of the last tick is in `/run/mihari/status`.
 
 ## Model data
 
 None of Samsung's data is in this repository. `tools/extract-siop-data.py --sdhms <apk>`
-writes `/usr/share/b2q-siop/model.conf` (into `out/firmware/`) from the stock vendor tree
+writes `/usr/share/mihari/model.conf` (into `out/firmware/`) from the stock vendor tree
 (`mercury.json`), the stock dtbo (thermistor tables) and SDHMS's APK (SIOP tables), and
 checks the collapsed forms against a literal evaluation of the HAL's heatmap.
 
@@ -64,7 +64,7 @@ debug overrides. The HAL's 5 s interval during boot is not reproduced (always 10
 
 ## Testing
 
-`test/sim.py <b2q-siopd> <model.conf>` runs the daemon against a fake sysfs tree with the
+`test/sim.py <mihari> <model.conf>` runs the daemon against a fake sysfs tree with the
 phone's OPP tables and voltages through a heat-up, fold, camera, music and cool-down
 scenario, and checks every tick (inputs, LRP2, level, limits, the values written) against
 a separate port written from the decompiled stock code. It has not been checked against

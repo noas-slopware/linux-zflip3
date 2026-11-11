@@ -161,12 +161,12 @@ log "configuration from userspace/rootfs"
 cp -a --no-preserve=ownership "$REPO_ROOT/userspace/rootfs/." "$DEST/"
 install -d -m700 "$DEST/root/.ssh"
 install -m600 "$KEYS" "$DEST/root/.ssh/authorized_keys"
-chroot_run systemctl enable systemd-networkd NetworkManager b2q-wifi-mac bluetooth sshd \
+chroot_run systemctl enable systemd-networkd NetworkManager akari-wifi bluetooth sshd \
   serial-getty@ttyGS0
 # What the phone runs, for the units the overlay and --packages brought in: the
 # modem's file servers, the sensor hub's, IMS, the session.
-for unit in rmtfs tqftpserv hexagonrpcd-sdsp ModemManager 81voltd b2q-spud imsroha \
-            imsroha-bearer b2q-sim-provision imsroha-vss-samsung b2q-sensors-tree plasmalogin \
+for unit in rmtfs tqftpserv hexagonrpcd-sdsp ModemManager 81voltd claire imsroha \
+            imsroha-bearer simamura imsroha-vss-samsung renge plasmalogin \
             systemd-resolved systemd-timesyncd; do
   if [ -e "$DEST/usr/lib/systemd/system/$unit.service" ]; then
     chroot_run systemctl enable "$unit.service"

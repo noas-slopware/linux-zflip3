@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 /*
- * b2q-spud: the secure-world services the Galaxy Z Flip3's fingerprint TA
+ * claire: the secure-world services the Galaxy Z Flip3's fingerprint TA
  * depends on, set up the way Samsung/Qualcomm's Android stack does at boot
  * (keymaster HAL, hermesd), over the kernel's /dev/qsee-app.
  *
@@ -38,7 +38,7 @@
 #include <systemd/sd-device.h>
 #include <systemd/sd-event.h>
 
-#define STATE_DIR	"/var/lib/b2q-spud"
+#define STATE_DIR	"/var/lib/claire"
 #define HVR_FILE	STATE_DIR "/hwvault.hvr"
 
 /* keymaster64 */
@@ -71,21 +71,21 @@ static int app_open(const char *path, uint32_t sbuf, int must_be_resident)
 	int fd = open("/dev/qsee-app", O_RDWR | O_CLOEXEC);
 
 	if (fd < 0) {
-		fprintf(stderr, "b2q-spud: /dev/qsee-app: %m\n");
+		fprintf(stderr, "claire: /dev/qsee-app: %m\n");
 		return -1;
 	}
 	snprintf(req.path, sizeof(req.path), "%s", path);
 	if (ioctl(fd, QSEE_APP_IOC_LOAD, &req) < 0) {
-		fprintf(stderr, "b2q-spud: loading %s: %m\n", path);
+		fprintf(stderr, "claire: loading %s: %m\n", path);
 		close(fd);
 		return -1;
 	}
 	if (must_be_resident && (req.flags & QSEE_APP_LOADED_HERE)) {
-		fprintf(stderr, "b2q-spud: %s was not resident\n", path);
+		fprintf(stderr, "claire: %s was not resident\n", path);
 		close(fd);
 		return -1;
 	}
-	fprintf(stderr, "b2q-spud: %s: app id %u%s\n", path, req.app_id,
+	fprintf(stderr, "claire: %s: app id %u%s\n", path, req.app_id,
 		(req.flags & QSEE_APP_LOADED_HERE) ? " (loaded)" : "");
 	return fd;
 }
@@ -122,16 +122,16 @@ static int km_setup(void)
 
 	memcpy(cfg, km_configure, sizeof(cfg));
 	if (app_send(fd, cfg, sizeof(cfg), rsp, sizeof(rsp)) < 0) {
-		fprintf(stderr, "b2q-spud: KM_NEW_CONFIGURE: %m\n");
+		fprintf(stderr, "claire: KM_NEW_CONFIGURE: %m\n");
 		return -1;
 	}
 	st = rd32(rsp);
-	fprintf(stderr, "b2q-spud: keymaster64 configure: %d\n", st);
+	fprintf(stderr, "claire: keymaster64 configure: %d\n", st);
 	if (st)
 		return -1;
 
 	if (ioctl(fd, QSEE_APP_IOC_VMBUF, &vb) < 0) {
-		fprintf(stderr, "b2q-spud: SPU buffer: %m\n");
+		fprintf(stderr, "claire: SPU buffer: %m\n");
 		return -1;
 	}
 	memcpy(req, &cmd, 4);
@@ -139,11 +139,11 @@ static int km_setup(void)
 	memcpy(req + 12, &len, 4);
 	memset(rsp, 0, sizeof(rsp));
 	if (app_send(fd, req, sizeof(req), rsp, sizeof(rsp)) < 0) {
-		fprintf(stderr, "b2q-spud: KEYMASTER_SPU_INIT: %m\n");
+		fprintf(stderr, "claire: KEYMASTER_SPU_INIT: %m\n");
 		return -1;
 	}
 	st = rd32(rsp);
-	fprintf(stderr, "b2q-spud: keymaster64 SPU init (buffer %#llx): %d\n",
+	fprintf(stderr, "claire: keymaster64 SPU init (buffer %#llx): %d\n",
 		(unsigned long long)vb.phys, st);
 	close(fd);	/* the buffer stays with the SPSS for the boot */
 	return st == 0 || st == KM_ERR_SPU_ALREADY_INIT ? 0 : -1;
@@ -167,7 +167,7 @@ static long hv_cmd(int fd, uint32_t cmd, const uint8_t *items, uint32_t items_le
 		memcpy(hv_req + 8, items, items_len);
 	memset(hv_rsp, 0, sizeof(hv_rsp));
 	if (app_send(fd, hv_req, sizeof(hv_req), hv_rsp, sizeof(hv_rsp)) < 0) {
-		fprintf(stderr, "b2q-spud: hwvault cmd %#x: %m\n", cmd);
+		fprintf(stderr, "claire: hwvault cmd %#x: %m\n", cmd);
 		return -1;
 	}
 	memcpy(&n, hv_rsp + 4, 4);
@@ -187,7 +187,7 @@ static long hv_cmd(int fd, uint32_t cmd, const uint8_t *items, uint32_t items_le
 		if (v > 8 + n - p)
 			break;
 		if (tag == HV_TAG_LOG)
-			fprintf(stderr, "b2q-spud: hwvault: %.*s\n", (int)strnlen((char *)hv_rsp + p, v),
+			fprintf(stderr, "claire: hwvault: %.*s\n", (int)strnlen((char *)hv_rsp + p, v),
 				(char *)hv_rsp + p);
 		else if (tag == HV_TAG_ROT && blob && blob_len && v <= *blob_len) {
 			memcpy(blob, hv_rsp + p, v);
@@ -241,20 +241,20 @@ static void hv_rot(int fd)
 		close(in);
 		if (n > 0) {
 			r = hv_set_rot(fd, blob, (uint32_t)n);
-			fprintf(stderr, "b2q-spud: hwvault set ROT: %ld\n", r);
+			fprintf(stderr, "claire: hwvault set ROT: %ld\n", r);
 			if (r == 0 || r != HV_RET_ROT_BROKEN)
 				return;
-			fprintf(stderr, "b2q-spud: saved ROT is broken, making a new one\n");
+			fprintf(stderr, "claire: saved ROT is broken, making a new one\n");
 		}
 	}
 	r = hv_cmd(fd, HV_CMD_GEN_ROT, NULL, 0, blob, &len);
-	fprintf(stderr, "b2q-spud: hwvault generate ROT: %ld (%u bytes)\n", r, r == 0 ? len : 0);
+	fprintf(stderr, "claire: hwvault generate ROT: %ld (%u bytes)\n", r, r == 0 ? len : 0);
 	if (r != 0)
 		return;
 	if (save_blob(blob, len))
-		fprintf(stderr, "b2q-spud: saving %s: %m\n", HVR_FILE);
+		fprintf(stderr, "claire: saving %s: %m\n", HVR_FILE);
 	r = hv_set_rot(fd, blob, len);
-	fprintf(stderr, "b2q-spud: hwvault set ROT: %ld\n", r);
+	fprintf(stderr, "claire: hwvault set ROT: %ld\n", r);
 }
 
 /* ---- the SPSS channels (spdaemon and sec_nvm's part) ---- */

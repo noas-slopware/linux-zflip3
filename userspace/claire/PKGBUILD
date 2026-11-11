@@ -1,0 +1,31 @@
+# Maintainer: Noa Himesaka <himesaka@noa.codes>
+# b2q: our own daemon (no Arch or AUR package exists); built from this directory.
+
+pkgname=claire
+pkgver=0.1.0
+pkgrel=7
+# renamed from b2q-spud on 2026-11-11
+replaces=('b2q-spud')
+conflicts=('b2q-spud')
+provides=('b2q-spud')
+pkgdesc="Galaxy Z Flip3: secure-world services the fingerprint TA needs (sec_nvm, keymaster64 SPU init, hwvault)"
+arch=(aarch64)
+url="https://github.com/NoaHimesaka1873"
+license=(MIT)
+depends=(systemd-libs)
+makedepends=(gcc)
+_src=${CLAIRE_SRC:-$PWD}
+
+build() {
+	cc ${CPPFLAGS} ${CFLAGS} -O2 -Wall -Wextra -o claire "$_src/src/spud.c" "$_src/src/nvm.c" ${LDFLAGS} -lsystemd -lpthread
+}
+
+package() {
+	install -Dm755 claire "$pkgdir/usr/lib/claire/claire"
+	install -Dm644 "$_src/claire.service" "$pkgdir/usr/lib/systemd/system/claire.service"
+	install -Dm644 "$_src/70-qsee-app.rules" "$pkgdir/usr/lib/udev/rules.d/70-qsee-app.rules"
+	install -Dm644 "$_src/mnt-vendor-persist.mount" "$pkgdir/usr/lib/systemd/system/mnt-vendor-persist.mount"
+	install -Dm644 "$_src/claire-modules.conf" "$pkgdir/usr/lib/modules-load.d/claire.conf"
+	install -Dm644 "$_src/fprintd-claire.conf" "$pkgdir/usr/lib/systemd/system/fprintd.service.d/claire.conf"
+	install -Dm644 "$_src/README.md" "$pkgdir/usr/share/doc/claire/README.md"
+}

@@ -1,0 +1,19 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# Print a factory address Samsung keeps on the efs partition: "bt" or "wifi".
+# efs is mounted read-only, without journal replay, and unmounted again.
+set -eu
+case "${1:-}" in
+  bt) file=bluetooth/bt_addr ;;
+  wifi) file=wifi/.mac.info ;;
+  *) echo "usage: efs-addr bt|wifi" >&2; exit 2 ;;
+esac
+dev=
+for u in /sys/class/block/*/uevent; do
+  if grep -qx PARTNAME=efs "$u"; then dev=/dev/$(sed -n 's/^DEVNAME=//p' "$u"); break; fi
+done
+[ -n "$dev" ] || { echo "efs-addr: no efs partition" >&2; exit 1; }
+mnt=$(mktemp -d /run/akari.XXXXXX)
+trap 'umount "$mnt" 2>/dev/null; rmdir "$mnt"' EXIT
+mount -o ro,noload "$dev" "$mnt"
+tr -d '\r\n' < "$mnt/$file"

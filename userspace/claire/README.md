@@ -1,4 +1,4 @@
-# b2q-spud
+# claire
 
 Sets up the secure-world services that Samsung's fingerprint TA (`securefp`) depends on,
 the way the stock Android stack does at boot, over `/dev/qsee-app` (kernel patch 0049):
@@ -19,7 +19,7 @@ the way the stock Android stack does at boot, over `/dev/qsee-app` (kernel patch
    Samsung's `init_spu_worker`.
 2. **hwvault**: loaded and kept loaded for as long as the service runs. securefp derives
    the key that seals its templates from hwvault (QSEE service 0x89). Its root of trust is
-   set from `/var/lib/b2q-spud/hwvault.hvr` (`SET_HWVAULT_ROT` 0x271c) or, the first time,
+   set from `/var/lib/claire/hwvault.hvr` (`SET_HWVAULT_ROT` 0x271c) or, the first time,
    generated (`GENERATE_HWVAULT_ROT` 0x271b) and saved. Stock: `hermesd`.
 
 Generating the root of trust goes through keymaster64 to the secure processor (SPSS). That

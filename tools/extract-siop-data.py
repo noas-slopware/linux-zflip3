@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
-"""Generate b2q-siopd's model data from the stock firmware.
+"""Generate mihari's model data from the stock firmware.
 
 Stock estimates the skin temperature (LRP2) in its thermal HAL from
 /vendor/etc/mercury.json, a linear heatmap of 14 sensors, and throttles on it
 from SamsungDeviceHealthManagerService's SIOP table. This writes everything
-b2q-siopd needs into one text file, so none of Samsung's data is in the repo:
+mihari needs into one text file, so none of Samsung's data is in the repo:
 
   form    the heatmap collapsed to one linear form per heat source and face
           (AP2_F .. WIFI2_R): the mean over the source's rectangle of
@@ -143,7 +143,7 @@ def main():
     ap.add_argument("--vendor", default=REPO / ".cache/fw/super/vfs")
     ap.add_argument("--dtbo", default=REPO / "evidence/raw/dtbo/entry.3.dts")
     ap.add_argument("--sdhms", required=True, help="SamsungDeviceHealthManagerService.apk")
-    ap.add_argument("--out", default=REPO / "out/firmware/usr/share/b2q-siop/model.conf")
+    ap.add_argument("--out", default=REPO / "out/firmware/usr/share/mihari/model.conf")
     a = ap.parse_args()
 
     f = forms(Path(a.vendor) / "etc/mercury.json")
@@ -153,7 +153,7 @@ def main():
     out = Path(a.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w") as o:
-        o.write("# b2q-siopd model data from the stock firmware (tools/extract-siop-data.py)\n")
+        o.write("# mihari model data from the stock firmware (tools/extract-siop-data.py)\n")
         for name, (c, coef) in f.items():
             o.write(f"form {name} {c!r}" + "".join(f" {k}={v!r}" for k, v in coef.items()) + "\n")
         for name, (adc, temp) in t.items():

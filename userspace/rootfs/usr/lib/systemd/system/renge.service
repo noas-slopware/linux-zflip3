@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: MIT
+[Unit]
+Description=Prepare the b2q sensor hub tree for hexagonrpcd
+Before=hexagonrpcd-sdsp.service iio-sensor-proxy.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/renge
+
+[Install]
+WantedBy=multi-user.target

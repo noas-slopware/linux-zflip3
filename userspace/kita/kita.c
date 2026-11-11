@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// b2q-coverd: the Galaxy Z Flip3 cover display daemon.
+// kita: the Galaxy Z Flip3 cover display daemon.
 //
 // The cover panel is a non-desktop DRM connector. KWin does not use it and
 // only offers it through wp_drm_lease_v1. This daemon takes the lease, owns
@@ -656,8 +656,8 @@ static void spawn_main_dpms(struct daemon *d, gboolean on)
 {
 	gchar *argv[] = {
 		(gchar *)"/usr/bin/qml6",
-		(gchar *)(on ? "/usr/local/share/b2q/dpms-main-on.qml" :
-				 "/usr/local/share/b2q/dpms-main-off.qml"),
+		(gchar *)(on ? "/usr/local/share/kita/dpms-main-on.qml" :
+				 "/usr/local/share/kita/dpms-main-off.qml"),
 		NULL
 	};
 	GError *err = NULL;
@@ -1646,9 +1646,9 @@ int main(int argc, char **argv)
 	g_unix_signal_add(SIGINT, on_signal, d);
 	g_unix_signal_add(SIGTERM, on_signal, d);
 
-	g_message("b2q-coverd started");
+	g_message("kita started");
 	g_main_loop_run(d->loop);
-	g_message("b2q-coverd stopped");
+	g_message("kita stopped");
 	cleanup(d);
 	return 0;
 }

@@ -1,0 +1,46 @@
+#!/bin/sh
+# Activate the first USIM as the modem's primary GW provisioning session.
+# The modem firmware boots with none open; on stock Android the radio layer
+# opens one. Without it ModemManager reports "GW primary session index
+# unknown" and the SIM stays missing.
+#
+# qmicli is from libqmi; the modem is at qrtr://0 once rmtfs has started it.
+# Some SIMs list their USIM application only well after the modem is up, so
+# the card status is polled for up to 90 iterations (one qmicli call plus 2 s
+# each, about 3-6 minutes) before giving up.
+Q="qmicli -d qrtr://0"
+
+# The AID is on the line after the "Application ID" label under "usim (2)".
+usim_aid() {
+	printf '%s\n' "$1" | grep -A3 'usim (2)' | grep -A1 'Application ID' | tail -1 \
+		| tr -d ' \t' | grep -E '^([0-9A-F]{2}:)+[0-9A-F]{2}$'
+}
+
+i=0
+while [ "$i" -lt 90 ]; do
+	status=$($Q --uim-get-card-status 2>/dev/null) || true
+
+	case $status in
+	*'Primary GW:   slot'*)
+		echo "primary GW session already open"
+		exit 0
+		;;
+	esac
+
+	case $status in
+	*"Card state: 'present'"*)
+		aid=$(usim_aid "$status") && break
+		;;
+	*"Card state: 'absent'"*)
+		[ "$i" -gt 10 ] && { echo "no SIM"; exit 0; }
+		;;
+	esac
+
+	i=$((i + 1))
+	sleep 2
+done
+
+[ -n "${aid:-}" ] || { echo "no USIM application found after 3 minutes" >&2; exit 1; }
+
+echo "USIM found after about $((i * 2)) s, activating as primary GW session, slot 1"
+$Q --uim-change-provisioning-session="session-type=primary-gw-provisioning,activate=yes,slot=1,aid=$aid"

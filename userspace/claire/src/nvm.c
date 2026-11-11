@@ -120,10 +120,10 @@ struct sbdb_entry {		/* stock's 40-byte record, kept in the SBDB buffer itself *
 static struct sp_buf sbdb = { .fd = -1 };
 static struct sp_buf sbapp[3] = { { .fd = -1 }, { .fd = -1 }, { .fd = -1 } };
 
-/* B2Q_SPUD_SECNVM_DIR and B2Q_SPUD_FAKE_DDR are for testing against copies off the phone */
+/* CLAIRE_SECNVM_DIR and CLAIRE_FAKE_DDR are for testing against copies off the phone */
 static const char *secnvm_dir(void)
 {
-	const char *d = getenv("B2Q_SPUD_SECNVM_DIR");
+	const char *d = getenv("CLAIRE_SECNVM_DIR");
 
 	return d && *d ? d : SECNVM_DIR;
 }
@@ -135,7 +135,7 @@ static int sp_buf_alloc(struct sp_buf *b, uint32_t size)
 		.flags = QSEE_APP_VMBUF_HLOS | QSEE_APP_VMBUF_KEEP,
 	};
 
-	if (getenv("B2Q_SPUD_FAKE_DDR")) {
+	if (getenv("CLAIRE_FAKE_DDR")) {
 		static uint64_t fake_pa = 0xdd000000;
 
 		b->map = calloc(1, size);

@@ -1,0 +1,34 @@
+# Maintainer: Noa Himesaka <himesaka@noa.codes>
+# b2q: our own daemon (no Arch or AUR package exists); built from this directory.
+# The model data is not packaged: tools/extract-siop-data.py writes it from the
+# stock firmware to /usr/share/mihari/model.conf.
+
+pkgname=mihari
+pkgver=0.1.0
+pkgrel=2
+# renamed from b2q-siop on 2026-11-11
+replaces=('b2q-siop')
+conflicts=('b2q-siop')
+provides=('b2q-siop')
+pkgdesc="Galaxy Z Flip3: stock's skin temperature estimate (LRP2) and SIOP CPU/GPU limits"
+arch=(aarch64)
+url="https://github.com/NoaHimesaka1873"
+license=(MIT)
+depends=(alsa-lib)
+makedepends=(gcc)
+_src=${MIHARI_SRC:-$PWD}
+
+build() {
+	cc ${CPPFLAGS} ${CFLAGS} -O2 -Wall -Wextra -o mihari "$_src/mihari.c" ${LDFLAGS} -lasound
+}
+
+check() {
+	python3 -I "$_src/test/sim.py" ./mihari /usr/share/mihari/model.conf || \
+		[ ! -e /usr/share/mihari/model.conf ]
+}
+
+package() {
+	install -Dm755 mihari "$pkgdir/usr/lib/mihari/mihari"
+	install -Dm644 "$_src/mihari.service" "$pkgdir/usr/lib/systemd/system/mihari.service"
+	install -Dm644 "$_src/README.md" "$pkgdir/usr/share/doc/mihari/README.md"
+}

@@ -3,7 +3,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define spud_log(fmt, ...) fprintf(stderr, "b2q-spud: " fmt "\n", ##__VA_ARGS__)
+#define spud_log(fmt, ...) fprintf(stderr, "claire: " fmt "\n", ##__VA_ARGS__)
 
 struct nvm_part;
 struct nvm_part *nvm_new(const char *channel);

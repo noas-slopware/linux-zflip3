@@ -5,8 +5,8 @@
 [Unit]
 Description=Qualcomm HexagonFS daemon for the b2q sensor hub
 Requires=dev-fastrpc\x2dsdsp.device
-After=dev-fastrpc\x2dsdsp.device b2q-sensors-tree.service
-Wants=b2q-sensors-tree.service
+After=dev-fastrpc\x2dsdsp.device renge.service
+Wants=renge.service
 Before=iio-sensor-proxy.service
 
 [Service]

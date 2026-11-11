@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 /*
- * b2q-siopd: Samsung's skin temperature (LRP2) and its SIOP CPU/GPU limits on
+ * mihari: Samsung's skin temperature (LRP2) and its SIOP CPU/GPU limits on
  * the Galaxy Z Flip3, done the way stock does them.
  *
  * Every 10 s, as stock's thermal HAL (vendor.samsung.hardware.thermal@1.0):
@@ -16,7 +16,7 @@
  * cpufreq_limit applies CPUFreqMax to the three clusters.
  *
  * The model data comes from the stock firmware (tools/extract-siop-data.py).
- * B2Q_SIOP_ROOT=<dir> runs against a fake tree: one tick per line on stdin
+ * MIHARI_ROOT=<dir> runs against a fake tree: one tick per line on stdin
  * ("<boottime ms>"), a status line per tick on stdout.
  */
 
@@ -1010,7 +1010,7 @@ static void tick(long now)
 	apply_gpu(g.gpu.cur);
 
 	{
-		FILE *o = g.sim ? stdout : fopen("/run/b2q-siop/status.tmp", "we");
+		FILE *o = g.sim ? stdout : fopen("/run/mihari/status.tmp", "we");
 
 		if (o) {
 			fprintf(o, "lrp2=%d lv=%d folded=%d cpu=%d gpu=%d max=%d,%d,%d gpumax=%d",
@@ -1024,7 +1024,7 @@ static void tick(long now)
 			fflush(o);
 			if (!g.sim) {
 				fclose(o);
-				rename("/run/b2q-siop/status.tmp", "/run/b2q-siop/status");
+				rename("/run/mihari/status.tmp", "/run/mihari/status");
 			}
 		}
 	}
@@ -1032,12 +1032,12 @@ static void tick(long now)
 
 int main(int argc, char **argv)
 {
-	const char *model = argc > 1 ? argv[1] : "/usr/share/b2q-siop/model.conf";
+	const char *model = argc > 1 ? argv[1] : "/usr/share/mihari/model.conf";
 	struct itimerspec its = { { TICK_MS / 1000, 0 }, { 0, 1 } };
 	char line[64];
 	int tfd;
 
-	g.root = getenv("B2Q_SIOP_ROOT") ? getenv("B2Q_SIOP_ROOT") : "";
+	g.root = getenv("MIHARI_ROOT") ? getenv("MIHARI_ROOT") : "";
 	g.sim = *g.root;
 	g.fcam = g.upspk = g.dnspk = INVALID;
 	g.cpu.name = "CPUFreqMax";
