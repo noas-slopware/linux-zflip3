@@ -1,0 +1,64 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] drm/panel: s6e3had: give 60HS and 48HS their scan rate
+
+The panel scans 60HS at 120 Hz and 48HS at 96 Hz, their LFD base, and
+sends TE on every second scan, so a frame has to arrive within one 120 or
+96 Hz scan; stock's qcom,mdss-mdp-transfer-time-us for these two modes is
+120HS's and 96HS's. DPU sizes its core clock and bandwidth from
+width x vtotal x refresh, so at 48 Hz the MDP core ran at 150 MHz (460 MHz
+at 120), a frame took about 19 ms, and the 96 Hz scan overtook it at the
+same line every frame: a band of noise in a fixed place while anything
+moved.
+
+Keep the base mode's horizontal timing and double its vtotal with a long
+VFP. DPU then clocks for the base rate, the mode clock and so the lane
+rate are the base mode's (910 Mbps), and the refresh is still 60 and
+48 Hz.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+diff --git a/drivers/gpu/drm/panel/panel-samsung-s6e3had.c b/drivers/gpu/drm/panel/panel-samsung-s6e3had.c
+index 7cc53ae..59cf64b 100644
+--- a/drivers/gpu/drm/panel/panel-samsung-s6e3had.c
++++ b/drivers/gpu/drm/panel/panel-samsung-s6e3had.c
+@@ -1022,6 +1022,17 @@ static const s8 s6e3had_96hs_offsets[][S6E3HAD_GAMMA_OFS_COUNT] = {
+  * compressed by DSC to a third of hdisplay, so the horizontal front porch is
+  * stretched until that comes to 910 Mbps at the stock refresh rate; the other
+  * porches are stock. Stock has no fhd48ns timing, so neither does this driver.
++ *
++ * 60HS and 48HS are not scanned at 60 and 48 Hz: the panel scans at 120 and
++ * 96 Hz (their LFD base) and sends TE on every second scan, so each frame has
++ * to arrive within one 120 or 96 Hz scan. Stock says so with
++ * qcom,mdss-mdp-transfer-time-us, which is 120HS's for 60HS and 96HS's for
++ * 48HS. DPU sizes its core clock and bandwidth from width x vtotal x refresh,
++ * so these two modes keep the horizontal timing of their base mode and twice
++ * its vtotal (a long VFP): DPU then works at the base rate, the lanes stay at
++ * the base mode's 910 Mbps, and TE still comes at 60 or 48 Hz. At the 48 Hz
++ * rate the MDP core ran at 150 MHz, a frame took about 19 ms, and the 96 Hz
++ * scan overtook it at the same line every frame: a band of noise.
+  */
+ struct s6e3had_timing {
+ 	struct drm_display_mode mode;
+@@ -1059,8 +1070,8 @@ static const struct s6e3had_timing s6e3had_timings[] = {
+ 		.vrr = s6e3had_vrr_96hs_cmds, .vrr_count = ARRAY_SIZE(s6e3had_vrr_96hs_cmds),
+ 		.gamma_comp = true,
+ 	},
+-	{	/* fhd60hs */
+-		.mode = S6E3HAD_MODE(60, 513, 24, 28),
++	{	/* fhd60hs: 120HS's lines, twice its vtotal (2 x 2712) */
++		.mode = S6E3HAD_MODE(60, 50, 2728, 28),
+ 		.on = s6e3had_on_60hs_cmds, .on_count = ARRAY_SIZE(s6e3had_on_60hs_cmds),
+ 		.vrr = s6e3had_vrr_60hs_cmds, .vrr_count = ARRAY_SIZE(s6e3had_vrr_60hs_cmds),
+ 	},
+@@ -1069,8 +1080,8 @@ static const struct s6e3had_timing s6e3had_timings[] = {
+ 		.on = s6e3had_on_60ns_cmds, .on_count = ARRAY_SIZE(s6e3had_on_60ns_cmds),
+ 		.vrr = s6e3had_vrr_60ns_cmds, .vrr_count = ARRAY_SIZE(s6e3had_vrr_60ns_cmds),
+ 	},
+-	{	/* fhd48hs: 909.80 Mbps */
+-		.mode = S6E3HAD_MODE(48, 742, 32, 28),
++	{	/* fhd48hs: 96HS's lines, twice its vtotal (2 x 2716), 910.49 Mbps */
++		.mode = S6E3HAD_MODE(48, 166, 2736, 28),
+ 		.on = s6e3had_on_48hs_cmds, .on_count = ARRAY_SIZE(s6e3had_on_48hs_cmds),
+ 		.vrr = s6e3had_vrr_48hs_cmds, .vrr_count = ARRAY_SIZE(s6e3had_vrr_48hs_cmds),
+ 		.gamma_comp = true,
