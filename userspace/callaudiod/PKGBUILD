@@ -5,7 +5,7 @@
 
 pkgname=callaudiod
 pkgver=0.1.99
-pkgrel=4
+pkgrel=5
 pkgdesc='Call audio routing daemon (deprecated)'
 arch=(x86_64 aarch64)
 url='https://gitlab.com/mobian1/callaudiod'
@@ -23,9 +23,11 @@ makedepends=(
   meson
 )
 source=("git+https://gitlab.com/mobian1/callaudiod.git#tag=${pkgver/[a-z]/.&}"
-        0001-pulse-switch-the-profile-for-the-speaker-when-ACP-splits-it-out.patch)
+        0001-pulse-switch-the-profile-for-the-speaker-when-ACP-splits-it-out.patch
+        0002-pulse-keep-the-default-sink-and-source-on-another-ca.patch)
 b2sums=(8f123d321bb6ffbe1e5d60f768306212fcd8c43b8a3de3eeaffb7edc0d2376a76a6213b54c047f3acd35fdbee449b02ee780e0bc127f25f42946ab3b234607cc
-        649fb047fe22738856416b9aa49345aacc71762d1d85caa477d8d32013fa088e634dbe93b4d8e832d75efbed8565abfd8f46bb261a7c8aa8d1bcdfd159deb1ed)
+        649fb047fe22738856416b9aa49345aacc71762d1d85caa477d8d32013fa088e634dbe93b4d8e832d75efbed8565abfd8f46bb261a7c8aa8d1bcdfd159deb1ed
+        a0724e2b8ed1359383dc0b55ac72e1c1757bedee450cecd0205440147a5b36770f1eda031e8e9fb344ac1d05ec070ea1d7af3ff26c71ba799f0879d319635c4b)
 
 prepare() {
   cd $pkgname
@@ -36,6 +38,9 @@ prepare() {
 
   # b2q: the speaker is a profile of its own under PipeWire's ACP
   git apply ../0001-pulse-switch-the-profile-for-the-speaker-when-ACP-splits-it-out.patch
+
+  # b2q: a USB or Bluetooth headset that is the default stays in use for calls
+  git apply ../0002-pulse-keep-the-default-sink-and-source-on-another-ca.patch
 }
 
 build() {

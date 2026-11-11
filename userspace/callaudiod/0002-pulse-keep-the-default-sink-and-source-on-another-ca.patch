@@ -1,0 +1,434 @@
+From d6df20efd0ce6583773f41a279ae9eff153123cc Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Wed, 11 Nov 2026 23:37:31 +0900
+Subject: [PATCH] pulse: keep the default sink and source on another card
+
+Whenever the card's sink or source appeared, callaudiod made it the
+default. A profile change replaces both, so the start and end of every
+call and every speaker toggle moved the default back to the card, even
+while a USB or Bluetooth headset was in use.
+
+Keep the default when it is a sink (source) on another card that still
+exists, and only take it when it is the card's own, when it is gone, or,
+for a source, when it is the monitor of a sink. The server reports a
+fallback while the card's sink and source are being replaced, so decide
+on the default as it was last reported while they existed, and ignore
+reports of a default that callaudiod replaced until the session manager
+has applied the new one.
+
+The speaker is the card's: turning it on makes the card's sink and
+source the default, and turning it off, or ending the call, brings back
+the device that was the default before, if it is still there. Muting
+the microphone also mutes the default source when it is not the card's,
+since that is what the call captures from.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/cad-pulse.c | 288 ++++++++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 281 insertions(+), 7 deletions(-)
+
+diff --git a/src/cad-pulse.c b/src/cad-pulse.c
+index 219a39c..e7cb6a2 100644
+--- a/src/cad-pulse.c
++++ b/src/cad-pulse.c
+@@ -42,6 +42,18 @@ struct _CadPulse
+     int card_id;
+     int sink_id;
+     int source_id;
++    gchar *sink_name;
++    gchar *source_name;
++
++    /* the server's default sink and source, see update_default_sink() */
++    gchar *default_sink;
++    gchar *default_source;
++    /* the defaults ours replaced, until the server stops reporting them */
++    gchar *replaced_sink;
++    gchar *replaced_source;
++    /* the default sink and source the speaker put aside */
++    gchar *saved_sink;
++    gchar *saved_source;
+ 
+     gboolean has_voice_profile;
+     gchar *speaker_port;
+@@ -67,6 +79,242 @@ static void pulseaudio_cleanup(CadPulse *self);
+ static gboolean pulseaudio_connect(CadPulse *self);
+ static gboolean init_pulseaudio_objects(gpointer data);
+ 
++/******************************************************************************
++ * Default sink and source
++ *
++ * The card's sink and source become the default when they appear, unless the
++ * default is a device on another card: a USB or Bluetooth headset that was
++ * plugged in or picked stays in use, for calls too.
++ *
++ * A profile change replaces the card's sink and source, and while they are
++ * gone the server reports a fallback as the default, often that headset even
++ * when the card was the default. So what counts is the default as it was last
++ * seen while the card's sink (source) existed.
++ *
++ * The session manager applies a new default some time after it is set, and
++ * until then the server still reports the one it replaced.
++ ******************************************************************************/
++
++static void track_default(const gchar *what, gchar **current, gchar **replaced,
++                          const gchar *reported)
++{
++    if (*replaced && g_strcmp0(reported, *replaced) == 0)
++        return;
++    g_clear_pointer(replaced, g_free);
++
++    if (g_strcmp0(*current, reported) != 0) {
++        g_debug("default %s is '%s'", what, reported);
++        g_free(*current);
++        *current = g_strdup(reported);
++    }
++}
++
++static void note_default(gchar **current, gchar **replaced, const gchar *name)
++{
++    if (g_strcmp0(*current, name) == 0)
++        return;
++
++    g_free(*replaced);
++    *replaced = *current;
++    *current = g_strdup(name);
++}
++
++static void server_info_cb(pa_context *ctx, const pa_server_info *info, void *data)
++{
++    CadPulse *self = data;
++
++    if (!info)
++        return;
++
++    if (self->sink_id >= 0 || !self->default_sink)
++        track_default("sink", &self->default_sink, &self->replaced_sink,
++                      info->default_sink_name);
++    if (self->source_id >= 0 || !self->default_source)
++        track_default("source", &self->default_source, &self->replaced_source,
++                      info->default_source_name);
++}
++
++/* the name is a device other than ours, which may exist ("@DEFAULT_SINK@" is none) */
++static gboolean is_other_device(const gchar *name, const gchar *ours)
++{
++    return name && name[0] != '@' && g_strcmp0(name, ours) != 0;
++}
++
++static void set_default_sink(CadPulse *self)
++{
++    pa_operation *op;
++
++    if (self->sink_id < 0 || !self->sink_name)
++        return;
++
++    g_debug("setting default sink '%s'", self->sink_name);
++    note_default(&self->default_sink, &self->replaced_sink, self->sink_name);
++
++    op = pa_context_set_default_sink(self->ctx, self->sink_name, NULL, NULL);
++    if (op)
++        pa_operation_unref(op);
++}
++
++static void set_default_source(CadPulse *self)
++{
++    pa_operation *op;
++
++    if (self->source_id < 0 || !self->source_name)
++        return;
++
++    g_debug("setting default source '%s'", self->source_name);
++    note_default(&self->default_source, &self->replaced_source, self->source_name);
++
++    op = pa_context_set_default_source(self->ctx, self->source_name, NULL, NULL);
++    if (op)
++        pa_operation_unref(op);
++}
++
++static void check_default_sink(pa_context *ctx, const pa_sink_info *info, int eol, void *data)
++{
++    CadPulse *self = data;
++
++    if (eol > 0)
++        return;
++
++    if (info && info->card != self->card_id) {
++        g_debug("keeping default sink '%s'", info->name);
++        return;
++    }
++
++    /* the default is gone, or it is the card's */
++    set_default_sink(self);
++}
++
++static void check_default_source(pa_context *ctx, const pa_source_info *info, int eol, void *data)
++{
++    CadPulse *self = data;
++
++    if (eol > 0)
++        return;
++
++    if (info && info->card != self->card_id && info->monitor_of_sink == PA_INVALID_INDEX) {
++        g_debug("keeping default source '%s'", info->name);
++        return;
++    }
++
++    /* the default is gone, the card's, or the monitor of a sink */
++    set_default_source(self);
++}
++
++static void update_default_sink(CadPulse *self)
++{
++    pa_operation *op;
++
++    if (!is_other_device(self->default_sink, self->sink_name)) {
++        set_default_sink(self);
++        return;
++    }
++
++    op = pa_context_get_sink_info_by_name(self->ctx, self->default_sink,
++                                          check_default_sink, self);
++    if (op)
++        pa_operation_unref(op);
++}
++
++static void update_default_source(CadPulse *self)
++{
++    pa_operation *op;
++
++    if (!is_other_device(self->default_source, self->source_name)) {
++        set_default_source(self);
++        return;
++    }
++
++    op = pa_context_get_source_info_by_name(self->ctx, self->default_source,
++                                            check_default_source, self);
++    if (op)
++        pa_operation_unref(op);
++}
++
++static void restore_sink(pa_context *ctx, const pa_sink_info *info, int eol, void *data)
++{
++    CadPulse *self = data;
++    pa_operation *op;
++
++    if (eol != 0 || !info || info->card == self->card_id)
++        return;
++
++    g_debug("restoring default sink '%s'", info->name);
++    note_default(&self->default_sink, &self->replaced_sink, info->name);
++
++    op = pa_context_set_default_sink(ctx, info->name, NULL, NULL);
++    if (op)
++        pa_operation_unref(op);
++}
++
++static void restore_source(pa_context *ctx, const pa_source_info *info, int eol, void *data)
++{
++    CadPulse *self = data;
++    pa_operation *op;
++
++    if (eol != 0 || !info || info->card == self->card_id ||
++        info->monitor_of_sink != PA_INVALID_INDEX)
++        return;
++
++    g_debug("restoring default source '%s'", info->name);
++    note_default(&self->default_source, &self->replaced_source, info->name);
++
++    op = pa_context_set_default_source(ctx, info->name, NULL, NULL);
++    if (op)
++        pa_operation_unref(op);
++}
++
++/*
++ * The speaker is the card's: turning it on makes the card's sink and source
++ * the default, and turning it off brings back the external device that was
++ * the default before, if it is still there.
++ */
++static void speaker_defaults(CadPulse *self, gboolean enable)
++{
++    pa_operation *op;
++
++    if (enable) {
++        if (!self->saved_sink)
++            self->saved_sink = g_strdup(self->default_sink);
++        if (!self->saved_source)
++            self->saved_source = g_strdup(self->default_source);
++        set_default_sink(self);
++        set_default_source(self);
++        return;
++    }
++
++    if (is_other_device(self->saved_sink, self->sink_name)) {
++        op = pa_context_get_sink_info_by_name(self->ctx, self->saved_sink,
++                                              restore_sink, self);
++        if (op)
++            pa_operation_unref(op);
++    }
++    if (is_other_device(self->saved_source, self->source_name)) {
++        op = pa_context_get_source_info_by_name(self->ctx, self->saved_source,
++                                                restore_source, self);
++        if (op)
++            pa_operation_unref(op);
++    }
++    g_clear_pointer(&self->saved_sink, g_free);
++    g_clear_pointer(&self->saved_source, g_free);
++}
++
++/* the call captures from the default source, so the mute applies there too */
++static void mute_default_source(CadPulse *self, gboolean mute)
++{
++    pa_operation *op;
++
++    if (!is_other_device(self->default_source, self->source_name))
++        return;
++
++    g_debug("%s default source '%s'", mute ? "muting" : "unmuting", self->default_source);
++    op = pa_context_set_source_mute_by_name(self->ctx, self->default_source, mute,
++                                            NULL, NULL);
++    if (op)
++        pa_operation_unref(op);
++}
++
+ /******************************************************************************
+  * Source management
+  *
+@@ -161,6 +409,8 @@ static void process_new_source(CadPulse *self, const pa_source_info *info)
+         return;
+ 
+     self->source_id = info->index;
++    g_free(self->source_name);
++    self->source_name = g_strdup(info->name);
+     if (self->source_ports)
+         g_hash_table_destroy(self->source_ports);
+     self->source_ports = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+@@ -196,9 +446,7 @@ static void init_source_info(pa_context *ctx, const pa_source_info *info, int eo
+     if (self->source_id < 0 || self->source_id != info->index)
+         return;
+ 
+-    op = pa_context_set_default_source(ctx, info->name, NULL, NULL);
+-    if (op)
+-        pa_operation_unref(op);
++    update_default_source(self);
+ 
+     if (self->mic_state == CALL_AUDIO_MIC_UNKNOWN) {
+         if (info->mute)
+@@ -309,6 +557,8 @@ static void process_new_sink(CadPulse *self, const pa_sink_info *info)
+         return;
+ 
+     self->sink_id = info->index;
++    g_free(self->sink_name);
++    self->sink_name = g_strdup(info->name);
+     if (self->sink_ports)
+         g_hash_table_destroy(self->sink_ports);
+     self->sink_ports = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+@@ -374,9 +624,7 @@ static void init_sink_info(pa_context *ctx, const pa_sink_info *info, int eol, v
+     if (self->sink_id < 0 || self->sink_id != info->index)
+         return;
+ 
+-    op = pa_context_set_default_sink(ctx, info->name, NULL, NULL);
+-    if (op)
+-        pa_operation_unref(op);
++    update_default_sink(self);
+ 
+     /*
+      * A profile change replaces the sink (see set_speaker_profile()), and the
+@@ -580,6 +828,8 @@ static void init_server_info(pa_context *ctx, const pa_server_info *info, void *
+     CadPulse *self = data;
+     static void *wireplumber_dll;
+ 
++    server_info_cb(ctx, info, data);
++
+     if (g_strrstr(info->server_name, "Pipewire") == NULL)
+         return;
+ 
+@@ -606,6 +856,10 @@ static gboolean init_pulseaudio_objects(gpointer data)
+ 
+     self->card_id = self->sink_id = self->source_id = -1;
+     self->sink_ports = self->source_ports = NULL;
++    g_clear_pointer(&self->default_sink, g_free);
++    g_clear_pointer(&self->default_source, g_free);
++    g_clear_pointer(&self->replaced_sink, g_free);
++    g_clear_pointer(&self->replaced_source, g_free);
+ 
+     op = pa_context_get_card_info_list(self->ctx, init_card_info, self);
+     if (op)
+@@ -631,6 +885,7 @@ static void changed_cb(pa_context *ctx, pa_subscription_event_type_t type, uint3
+         if (idx == self->sink_id && kind == PA_SUBSCRIPTION_EVENT_REMOVE) {
+             g_debug("sink %u removed", idx);
+             self->sink_id = -1;
++            g_clear_pointer(&self->sink_name, g_free);
+             g_hash_table_destroy(self->sink_ports);
+             self->sink_ports = NULL;
+         } else if (kind == PA_SUBSCRIPTION_EVENT_NEW) {
+@@ -644,6 +899,7 @@ static void changed_cb(pa_context *ctx, pa_subscription_event_type_t type, uint3
+         if (idx == self->source_id && kind == PA_SUBSCRIPTION_EVENT_REMOVE) {
+             g_debug("source %u removed", idx);
+             self->source_id = -1;
++            g_clear_pointer(&self->source_name, g_free);
+             g_hash_table_destroy(self->source_ports);
+             self->source_ports = NULL;
+         } else if (kind == PA_SUBSCRIPTION_EVENT_NEW) {
+@@ -653,6 +909,11 @@ static void changed_cb(pa_context *ctx, pa_subscription_event_type_t type, uint3
+                 pa_operation_unref(op);
+         }
+         break;
++    case PA_SUBSCRIPTION_EVENT_SERVER:
++        op = pa_context_get_server_info(ctx, server_info_cb, self);
++        if (op)
++            pa_operation_unref(op);
++        break;
+     case PA_SUBSCRIPTION_EVENT_CARD:
+         if (self->card_id < 0 && kind == PA_SUBSCRIPTION_EVENT_NEW) {
+             g_debug("card %u added, but no valid card detected yet, retrying...", idx);
+@@ -700,7 +961,8 @@ static void pulse_state_cb(pa_context *ctx, void *data)
+     case PA_CONTEXT_READY:
+         pa_context_set_subscribe_callback(ctx, changed_cb, self);
+         pa_context_subscribe(ctx,
+-                             PA_SUBSCRIPTION_MASK_SINK  | PA_SUBSCRIPTION_MASK_SOURCE | PA_SUBSCRIPTION_MASK_CARD,
++                             PA_SUBSCRIPTION_MASK_SINK  | PA_SUBSCRIPTION_MASK_SOURCE |
++                             PA_SUBSCRIPTION_MASK_CARD | PA_SUBSCRIPTION_MASK_SERVER,
+                              NULL, self);
+         g_debug("PA is ready, initializing cards list");
+         g_idle_add(init_pulseaudio_objects, self);
+@@ -771,6 +1033,14 @@ static void dispose(GObject *object)
+ 
+     g_clear_pointer(&self->speaker_port, g_free);
+     g_clear_pointer(&self->earpiece_port, g_free);
++    g_clear_pointer(&self->sink_name, g_free);
++    g_clear_pointer(&self->source_name, g_free);
++    g_clear_pointer(&self->default_sink, g_free);
++    g_clear_pointer(&self->default_source, g_free);
++    g_clear_pointer(&self->replaced_sink, g_free);
++    g_clear_pointer(&self->replaced_source, g_free);
++    g_clear_pointer(&self->saved_sink, g_free);
++    g_clear_pointer(&self->saved_source, g_free);
+ 
+     pulseaudio_cleanup(self);
+ 
+@@ -1171,6 +1441,8 @@ void cad_pulse_enable_speaker(gboolean enable, CadOperation *cad_op)
+     operation->op = cad_op;
+     operation->value = (guint)enable;
+ 
++    speaker_defaults(operation->pulse, enable);
++
+     op = pa_context_get_card_info_by_index(operation->pulse->ctx,
+                                            operation->pulse->card_id,
+                                            set_speaker_profile, operation);
+@@ -1216,11 +1488,13 @@ void cad_pulse_mute_mic(gboolean mute, CadOperation *cad_op)
+ 
+     if (operation->pulse->mic_state == CALL_AUDIO_MIC_OFF && !operation->value) {
+         g_debug("mic is muted, unmuting...");
++        mute_default_source(operation->pulse, FALSE);
+         op = pa_context_set_source_mute_by_index(operation->pulse->ctx,
+                                                  operation->pulse->source_id, 0,
+                                                  operation_complete_cb, operation);
+     } else if (operation->pulse->mic_state == CALL_AUDIO_MIC_ON && operation->value) {
+         g_debug("mic is active, muting...");
++        mute_default_source(operation->pulse, TRUE);
+         op = pa_context_set_source_mute_by_index(operation->pulse->ctx,
+                                                  operation->pulse->source_id, 1,
+                                                  operation_complete_cb, operation);
+-- 
+2.56.0
+
