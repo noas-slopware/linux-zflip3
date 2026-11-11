@@ -1,0 +1,32 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] arm64: dts: qcom: sm8350-b2q: disable ramoops
+
+Its records never survived a reset on the Galaxy Z Flip3, and the kernel
+console showed garbage at startup with it.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+index cfe6258..7346c79 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+@@ -239,12 +239,17 @@
+ //			no-map;
+ //		};
+ 
+-		/* Samsung's own ramoops address on this board (stock base dtb). */
++		/*
++		 * Samsung's own ramoops address on this board (stock base dtb).
++		 * Disabled: its records never survived a reset on this phone, and
++		 * the kernel console showed garbage at startup with it.
++		 */
+ 		ramoops@f0b00000 {
+ 			compatible = "ramoops";
+ 			reg = <0 0xf0b00000 0 0x100000>;
+ 			record-size = <0x40000>;
+ 			console-size = <0x80000>;
++			status = "disabled";
+ 		};
+ 
+ 		framebuffer_internal: memory@e4000000 {
