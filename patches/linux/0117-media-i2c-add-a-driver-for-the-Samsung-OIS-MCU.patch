@@ -1,0 +1,1045 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] media: i2c: add a driver for the Samsung OIS MCU
+
+The Galaxy Z Flip3's rear wide camera stabilises its lens with an
+STM32G0 running Samsung's firmware (stock cam_ois_mcu_stm32g.c). Drive
+it as stock does, without any help from userspace:
+
+- It powers up and down with its camera sensor: a runtime PM device
+  link with the sensor (samsung,camera-sensor) as consumer, so it is on
+  while the sensor streams, for any V4L2 or libcamera user.
+- Power-up is the camera HAL's sequence (vdig, vaf, vio, 5 ms, NRST,
+  BOOT0 low), then stock's cam_ois_init(): wait for status 0x01 or
+  0x13, the module EEPROM's gyro gains if their mark is 0xbb, gyro
+  polarity, orientation and zero offsets, centre shift compensation
+  from focus position 0x80, gyro gain fade times of 1000, the compensation
+  angle, and the HAL's init setting (OISSEL = module 1). Then the lens
+  is centred for 40 ms, and the servo runs in the selected mode.
+- Modes are the HAL's: still (0x00, its default), movie (0x01) and
+  centering (0x05, what it uses with stabilisation off), chosen in
+  sysfs.
+- The focus position (the lens's V4L2_CID_FOCUS_ABSOLUTE >> 4, as stock's
+  actuator driver passes it) goes to CAAFPOSM1 on every change, through
+  a control notifier on the sensor's lens-focus.
+- The gyro zero offsets come from stock's factory calibration, which
+  the HAL reads from /efs/FactoryApp/camera_ois_gyro_cal ("x,y,z" in
+  degrees per second) and the kernel scales by 114/1000. The same text
+  goes into the gyro_calibration attribute. Like stock, Z is written as
+  0.
+- Like stock, a failed start is logged and the sensor still streams,
+  and power-down turns no servo off.
+
+The probe powers the MCU once and logs its firmware version.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+
+diff --git a/Documentation/ABI/testing/sysfs-bus-i2c-devices-samsung-ois-mcu b/Documentation/ABI/testing/sysfs-bus-i2c-devices-samsung-ois-mcu
+new file mode 100644
+index 0000000..b8243cc
+--- /dev/null
++++ b/Documentation/ABI/testing/sysfs-bus-i2c-devices-samsung-ois-mcu
+@@ -0,0 +1,41 @@
++What:		/sys/bus/i2c/devices/.../mode
++Date:		November 2026
++KernelVersion:	7.3
++Contact:	Noa Himesaka <himesaka@noa.codes>
++Description:
++		(RW) The mode the lens is stabilised in while the camera
++		sensor is powered: "still" (the default, Samsung's camera
++		for photos), "movie" (for video) or "centering" (the lens
++		held centred, no stabilisation). A change applies at once
++		when the MCU is on.
++
++What:		/sys/bus/i2c/devices/.../gyro_calibration
++Date:		November 2026
++KernelVersion:	7.3
++Contact:	Noa Himesaka <himesaka@noa.codes>
++Description:
++		(RW) The gyro zero offsets of this phone, in the format of
++		Samsung's /efs/FactoryApp/camera_ois_gyro_cal: "x,y,z", each
++		in degrees per second with three decimals, as Samsung's
++		factory calibration measures them. X and Y are written to the
++		MCU at every power-up, Z is kept but not used (Samsung's
++		driver writes 0). Defaults to 0,0,0.
++
++What:		/sys/bus/i2c/devices/.../status
++Date:		November 2026
++KernelVersion:	7.3
++Contact:	Noa Himesaka <himesaka@noa.codes>
++Description:
++		(RO) "off" while the MCU is powered down; while it is on, its
++		status and error registers, whether the servo is on, the mode
++		register, the 8-bit focus position last passed to it (-1 if
++		none yet) and the lens hall centre it reported.
++
++What:		/sys/bus/i2c/devices/.../firmware_version
++Date:		November 2026
++KernelVersion:	7.3
++Contact:	Noa Himesaka <himesaka@noa.codes>
++Description:
++		(RO) The MCU firmware version read at probe, in Samsung's
++		8-character form (core version, driver IC, MCU, gyro, year,
++		month, release count, development or release mark).
+diff --git a/MAINTAINERS b/MAINTAINERS
+index 782389b..2886a4c 100644
+--- a/MAINTAINERS
++++ b/MAINTAINERS
+@@ -24368,6 +24368,14 @@ F:	drivers/rtc/rtc-s5m.c
+ F:	include/dt-bindings/regulator/samsung,s2m*.h
+ F:	include/linux/mfd/samsung/
+ 
++SAMSUNG OIS MCU DRIVER
++M:	Noa Himesaka <himesaka@noa.codes>
++L:	linux-media@vger.kernel.org
++S:	Maintained
++F:	Documentation/ABI/testing/sysfs-bus-i2c-devices-samsung-ois-mcu
++F:	Documentation/devicetree/bindings/media/i2c/samsung,ois-mcu-stm32g.yaml
++F:	drivers/media/i2c/samsung-ois-mcu.c
++
+ SAMSUNG S3C24XX/S3C64XX SOC SERIES CAMIF DRIVER
+ M:	Sylwester Nawrocki <sylvester.nawrocki@gmail.com>
+ L:	linux-samsung-soc@vger.kernel.org
+diff --git a/drivers/media/i2c/Kconfig b/drivers/media/i2c/Kconfig
+index 814ff69..9431bd6 100644
+--- a/drivers/media/i2c/Kconfig
++++ b/drivers/media/i2c/Kconfig
+@@ -969,6 +969,19 @@ config VIDEO_DW9807_VCM
+ 	  capability. This is designed for linear control of
+ 	  voice coil motors, controlled via I2C serial interface.
+ 
++config VIDEO_SAMSUNG_OIS_MCU
++	tristate "Samsung OIS MCU support"
++	depends on GPIOLIB && OF
++	select REGMAP_I2C
++	help
++	  This is a driver for the optical image stabilisation MCU (an
++	  STM32G0 with Samsung firmware) in Samsung phone camera modules,
++	  such as the Galaxy Z Flip3's rear wide camera. It stabilises the
++	  lens while the camera sensor is powered.
++
++	  To compile this driver as a module, choose M here: the module
++	  will be called samsung-ois-mcu.
++
+ endif
+ 
+ menu "Flash devices"
+diff --git a/drivers/media/i2c/Makefile b/drivers/media/i2c/Makefile
+index f58fc64..fe9e557 100644
+--- a/drivers/media/i2c/Makefile
++++ b/drivers/media/i2c/Makefile
+@@ -131,6 +131,7 @@ obj-$(CONFIG_VIDEO_RDACM20) += rdacm20.o
+ obj-$(CONFIG_VIDEO_RDACM21) += rdacm21.o
+ obj-$(CONFIG_VIDEO_RJ54N1) += rj54n1cb0c.o
+ obj-$(CONFIG_VIDEO_S5C73M3) += s5c73m3/
++obj-$(CONFIG_VIDEO_SAMSUNG_OIS_MCU) += samsung-ois-mcu.o
+ obj-$(CONFIG_VIDEO_S5K3M5) += s5k3m5.o
+ obj-$(CONFIG_VIDEO_S5K5BAF) += s5k5baf.o
+ obj-$(CONFIG_VIDEO_S5K6A3) += s5k6a3.o
+diff --git a/drivers/media/i2c/samsung-ois-mcu.c b/drivers/media/i2c/samsung-ois-mcu.c
+new file mode 100644
+index 0000000..61906a5
+--- /dev/null
++++ b/drivers/media/i2c/samsung-ois-mcu.c
+@@ -0,0 +1,900 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Samsung optical image stabilisation MCU (STM32G0 with Samsung firmware)
++ *
++ * The MCU reads its own gyroscope and moves the lens of a camera module
++ * sideways against hand shake. This driver powers it while the camera
++ * sensor it belongs to is powered (a runtime PM device link with the
++ * sensor as consumer), brings it up the way Samsung's camera stack does,
++ * and passes it the position of the sensor's focus lens, which the MCU
++ * uses to compensate the shift of the optical centre with focus.
++ *
++ * Register addresses are 16 bits big-endian; multi-byte values are
++ * little-endian. Sequence and values follow Samsung's cam_ois_mcu_stm32g.c
++ * and the camera HAL's OIS driver data for the Galaxy Z Flip3.
++ */
++
++#include <linux/bits.h>
++#include <linux/ctype.h>
++#include <linux/delay.h>
++#include <linux/device.h>
++#include <linux/gpio/consumer.h>
++#include <linux/i2c.h>
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/nvmem-consumer.h>
++#include <linux/of.h>
++#include <linux/pm_runtime.h>
++#include <linux/regmap.h>
++#include <linux/regulator/consumer.h>
++#include <linux/slab.h>
++#include <linux/string_choices.h>
++#include <linux/sysfs.h>
++#include <linux/unaligned.h>
++
++#include <media/v4l2-ctrls.h>
++#include <media/v4l2-subdev.h>
++
++#define OIS_REG_CTRL		0x0000	/* servo on (1) / off (0) */
++#define OIS_REG_STS		0x0001
++#define OIS_REG_MODE		0x0002
++#define OIS_REG_ERR		0x0004	/* 16 bits */
++#define OIS_REG_CACTRL		0x0039	/* centre shift compensation on */
++#define OIS_REG_CAAFPOSM1	0x003a	/* module 1 focus position, 8 bits */
++#define OIS_REG_VDRINFO		0x007c	/* 4 bytes */
++#define OIS_REG_OISSEL		0x00be	/* driver output select, a module mask */
++#define OIS_REG_HWVER		0x00f8	/* 4 bytes */
++#define OIS_REG_XCENTER_M1	0x021a
++#define OIS_REG_YCENTER_M1	0x021c
++#define OIS_REG_GGFADEUP	0x0238
++#define OIS_REG_GGFADEDOWN	0x023a
++#define OIS_REG_GYRO_POLA_M1	0x0240	/* X, Y */
++#define OIS_REG_GYRO_ORIENT	0x0242
++#define OIS_REG_XGZERO		0x0248
++#define OIS_REG_YGZERO		0x024a
++#define OIS_REG_ZGZERO		0x024c
++#define OIS_REG_XGG_M1		0x0254	/* X and Y gyro gains, 8 bytes */
++#define OIS_REG_ANGLE_COMP_1	0x0348
++#define OIS_REG_ANGLE_COMP_2	0x03d8
++
++#define OIS_STS_IDLE		0x01
++#define OIS_STS_INIT_DONE	0x13	/* also accepted at power-up */
++
++#define OIS_MODE_STILL		0x00
++#define OIS_MODE_MOVIE		0x01
++#define OIS_MODE_CENTERING	0x05
++
++/* Gyro zero offset register LSB per raw unit of the calibration, x1000 */
++#define OIS_GYRO_SCALE		114
++
++/* The OIS block of the module EEPROM (stock ADDR_M_OIS) */
++#define OIS_CAL_XYGG		0x10
++#define OIS_CAL_XYGG_SIZE	8
++#define OIS_CAL_MARK		0x30
++#define OIS_CAL_MARK_VALID	0xbb
++
++#define OIS_VERSION_SIZE	8
++
++static const char * const ois_supply_names[] = {
++	/* in power-up order */
++	"vdig",
++	"vaf",
++	"vio",
++};
++
++struct ois_mode_name {
++	const char *name;
++	u8 mode;
++};
++
++static const struct ois_mode_name ois_modes[] = {
++	{ "still", OIS_MODE_STILL },
++	{ "movie", OIS_MODE_MOVIE },
++	{ "centering", OIS_MODE_CENTERING },
++};
++
++struct samsung_ois {
++	struct device *dev;
++	struct regmap *regmap;
++	struct regulator_bulk_data supplies[ARRAY_SIZE(ois_supply_names)];
++	struct gpio_desc *reset;
++	struct gpio_desc *boot0;
++
++	struct device *sensor;
++	struct device *lens;
++	struct v4l2_ctrl *focus;
++
++	u8 polarity[2];
++	u8 orientation;
++	u8 xygg[OIS_CAL_XYGG_SIZE];
++	bool have_xygg;
++	char version[OIS_VERSION_SIZE + 1];
++
++	/* Everything below is protected by lock */
++	struct mutex lock;
++	bool powered;
++	bool servo_on;
++	u8 mode;		/* the mode stabilisation runs in */
++	u8 cur_mode;		/* the mode last written to the MCU */
++	int af_pos;		/* 8-bit focus position, -1 if not known */
++	s32 gyro_raw[3];	/* gyro calibration, thousandths of dps */
++	u16 x_center;
++	u16 y_center;
++};
++
++static int ois_write(struct samsung_ois *ois, unsigned int reg, u8 val)
++{
++	int ret = regmap_write(ois->regmap, reg, val);
++
++	if (ret)
++		dev_err(ois->dev, "write 0x%04x = 0x%02x failed: %d\n",
++			reg, val, ret);
++	return ret;
++}
++
++static int ois_write_le16(struct samsung_ois *ois, unsigned int reg, u16 val)
++{
++	u8 buf[2];
++	int ret;
++
++	put_unaligned_le16(val, buf);
++	ret = regmap_bulk_write(ois->regmap, reg, buf, sizeof(buf));
++	if (ret)
++		dev_err(ois->dev, "write 0x%04x = 0x%04x failed: %d\n",
++			reg, val, ret);
++	return ret;
++}
++
++static int ois_read_le16(struct samsung_ois *ois, unsigned int reg, u16 *val)
++{
++	u8 buf[2];
++	int ret;
++
++	ret = regmap_bulk_read(ois->regmap, reg, buf, sizeof(buf));
++	if (ret) {
++		dev_err(ois->dev, "read 0x%04x failed: %d\n", reg, ret);
++		return ret;
++	}
++	*val = get_unaligned_le16(buf);
++	return 0;
++}
++
++static int ois_read_status(struct samsung_ois *ois, unsigned int *sts)
++{
++	return regmap_read(ois->regmap, OIS_REG_STS, sts);
++}
++
++/* Stock cam_ois_wait_idle(): 10 ms between reads */
++static int ois_wait_idle(struct samsung_ois *ois, int retries)
++{
++	unsigned int sts = 0;
++	int ret;
++
++	for (;;) {
++		ret = ois_read_status(ois, &sts);
++		if (!ret && sts == OIS_STS_IDLE)
++			return 0;
++		if (--retries < 0)
++			break;
++		usleep_range(10000, 11000);
++	}
++
++	if (ret) {
++		dev_err(ois->dev, "status read failed: %d\n", ret);
++		return ret;
++	}
++	dev_err(ois->dev, "not idle, status 0x%02x\n", sts);
++	return -EBUSY;
++}
++
++static int ois_power_on(struct samsung_ois *ois)
++{
++	unsigned int i;
++	int ret;
++
++	/*
++	 * The camera HAL's power-up sequence: vdig, vaf, vio, 5 ms, NRST
++	 * released, 1 ms, BOOT0 low (it is held low throughout), 1 ms.
++	 */
++	for (i = 0; i < ARRAY_SIZE(ois->supplies); i++) {
++		ret = regulator_enable(ois->supplies[i].consumer);
++		if (ret) {
++			dev_err(ois->dev, "%s supply: %d\n",
++				ois->supplies[i].supply, ret);
++			goto err_off;
++		}
++	}
++	usleep_range(5000, 6000);
++
++	gpiod_set_value_cansleep(ois->reset, 0);
++	usleep_range(1000, 2000);
++	gpiod_set_value_cansleep(ois->boot0, 0);
++	usleep_range(1000, 2000);
++
++	return 0;
++
++err_off:
++	while (i--)
++		regulator_disable(ois->supplies[i].consumer);
++	return ret;
++}
++
++static void ois_power_off(struct samsung_ois *ois)
++{
++	int i;
++
++	/* The HAL's power-down sequence: NRST, 1 ms, vio, vaf, vdig */
++	gpiod_set_value_cansleep(ois->reset, 1);
++	usleep_range(1000, 2000);
++	for (i = ARRAY_SIZE(ois->supplies) - 1; i >= 0; i--)
++		regulator_disable(ois->supplies[i].consumer);
++}
++
++/* Stock cam_ois_set_ois_mode(): the mode, then servo on */
++static int ois_set_mode(struct samsung_ois *ois, u8 mode)
++{
++	int ret;
++
++	if (ois->servo_on && mode == ois->cur_mode)
++		return 0;
++
++	ret = ois_write(ois, OIS_REG_MODE, mode);
++	if (ret)
++		return ret;
++	ret = ois_write(ois, OIS_REG_CTRL, 1);
++	if (ret)
++		return ret;
++
++	ois->cur_mode = mode;
++	ois->servo_on = true;
++	dev_dbg(ois->dev, "mode 0x%02x\n", mode);
++
++	return 0;
++}
++
++static s16 ois_gyro_zero(s32 raw)
++{
++	/* Stock: raw * 114 / 1000, folded into 16 bits two's complement */
++	return (s16)(raw * OIS_GYRO_SCALE / 1000);
++}
++
++/* Stock cam_ois_init() and the CAM_OIS thread's start message */
++static int ois_start(struct samsung_ois *ois)
++{
++	static const u8 angle_comp[4] = { 0x06, 0x81, 0x55, 0x3f };
++	unsigned int sts = 0;
++	u16 err = 0;
++	int retries;
++	int ret;
++
++	/* The OIS thread waits 10 ms before cam_ois_init() */
++	usleep_range(10000, 11000);
++
++	/*
++	 * Status 0x01 (idle) or 0x13, 20 reads 5 ms apart. Stock goes on
++	 * after a timeout as well.
++	 */
++	for (retries = 20; ; retries--) {
++		ret = ois_read_status(ois, &sts);
++		if (!ret && (sts == OIS_STS_IDLE || sts == OIS_STS_INIT_DONE))
++			break;
++		if (!retries) {
++			dev_err(ois->dev,
++				"not ready after power-up: status 0x%02x, %d\n",
++				sts, ret);
++			break;
++		}
++		usleep_range(5000, 5050);
++	}
++
++	/* Stock cam_ois_mcu_init(): gains, gyro orientation, gyro offsets */
++	if (ois->have_xygg) {
++		ret = regmap_bulk_write(ois->regmap, OIS_REG_XGG_M1, ois->xygg,
++					sizeof(ois->xygg));
++		if (ret)
++			dev_err(ois->dev, "gyro gains: %d\n", ret);
++	}
++
++	ret = regmap_bulk_write(ois->regmap, OIS_REG_GYRO_POLA_M1,
++				ois->polarity, sizeof(ois->polarity));
++	if (ret)
++		dev_err(ois->dev, "gyro polarity: %d\n", ret);
++	ois_write(ois, OIS_REG_GYRO_ORIENT, ois->orientation);
++
++	ois_write_le16(ois, OIS_REG_XGZERO, ois_gyro_zero(ois->gyro_raw[0]));
++	ois_write_le16(ois, OIS_REG_YGZERO, ois_gyro_zero(ois->gyro_raw[1]));
++	/* Stock never loads a Z offset and always writes 0 */
++	ois_write_le16(ois, OIS_REG_ZGZERO, 0);
++
++	/*
++	 * Stock cam_ois_set_shift(): centre shift compensation from the
++	 * middle focus position. Stock skips it, and still reports success,
++	 * when the MCU is not idle.
++	 */
++	if (!ois_wait_idle(ois, 10)) {
++		ret = ois_write(ois, OIS_REG_CAAFPOSM1, 0x80);
++		if (!ret)
++			ret = ois_write(ois, OIS_REG_CACTRL, 1);
++		if (ret)
++			return ret;
++	}
++
++	/* VDIS: gyro gain fade-up and fade-down times */
++	ret = ois_write_le16(ois, OIS_REG_GGFADEUP, 1000);
++	if (!ret)
++		ret = ois_write_le16(ois, OIS_REG_GGFADEDOWN, 1000);
++	if (ret)
++		return ret;
++
++	ret = ois_read_le16(ois, OIS_REG_XCENTER_M1, &ois->x_center);
++	if (!ret)
++		ret = ois_read_le16(ois, OIS_REG_YCENTER_M1, &ois->y_center);
++	if (ret)
++		return ret;
++
++	/* Compensation angle 1.5 -> 1.25 */
++	ret = regmap_bulk_write(ois->regmap, OIS_REG_ANGLE_COMP_1, angle_comp,
++				sizeof(angle_comp));
++	if (!ret)
++		ret = regmap_bulk_write(ois->regmap, OIS_REG_ANGLE_COMP_2,
++					angle_comp, sizeof(angle_comp));
++	if (ret) {
++		dev_err(ois->dev, "compensation angle: %d\n", ret);
++		return ret;
++	}
++
++	/* The HAL's init settings: drive module 1 only */
++	ret = ois_write(ois, OIS_REG_OISSEL, BIT(0));
++	if (ret)
++		return ret;
++
++	ret = ois_read_le16(ois, OIS_REG_ERR, &err);
++	if (ret)
++		return ret;
++
++	/* The OIS thread centres the lens, then waits 40 ms */
++	ois->servo_on = false;
++	ret = ois_set_mode(ois, OIS_MODE_CENTERING);
++	if (ret)
++		return ret;
++	msleep(40);
++
++	/* The HAL's mode settings */
++	ret = ois_set_mode(ois, ois->mode);
++	if (ret)
++		return ret;
++
++	if (ois->af_pos >= 0)
++		ois_write(ois, OIS_REG_CAAFPOSM1, ois->af_pos);
++
++	ois_read_status(ois, &sts);
++	dev_dbg(ois->dev,
++		"on: status 0x%02x, error 0x%04x, mode 0x%02x, centre %u %u\n",
++		sts, err, ois->cur_mode, ois->x_center, ois->y_center);
++
++	return 0;
++}
++
++static int ois_runtime_resume(struct device *dev)
++{
++	struct samsung_ois *ois = dev_get_drvdata(dev);
++	int ret;
++
++	ret = ois_power_on(ois);
++	if (ret)
++		return ret;
++
++	mutex_lock(&ois->lock);
++	ois->powered = true;
++	ret = ois_start(ois);
++	mutex_unlock(&ois->lock);
++
++	/*
++	 * A failed start leaves the lens unstabilised but must not keep the
++	 * camera sensor, whose resume this is part of, from streaming.
++	 */
++	if (ret)
++		dev_err(dev, "start failed (%d), lens not stabilised\n", ret);
++
++	return 0;
++}
++
++static int ois_runtime_suspend(struct device *dev)
++{
++	struct samsung_ois *ois = dev_get_drvdata(dev);
++
++	/* Stock turns no servo off, it just powers the MCU down */
++	mutex_lock(&ois->lock);
++	ois->powered = false;
++	ois->servo_on = false;
++	mutex_unlock(&ois->lock);
++
++	ois_power_off(ois);
++
++	return 0;
++}
++
++/* Called by the lens's control handler, with its lock held */
++static void ois_focus_notify(struct v4l2_ctrl *ctrl, void *priv)
++{
++	struct samsung_ois *ois = priv;
++
++	mutex_lock(&ois->lock);
++	/* Stock: the 12-bit lens position >> 4 */
++	ois->af_pos = clamp(ctrl->val >> 4, 0, 0xff);
++	if (ois->servo_on)
++		ois_write(ois, OIS_REG_CAAFPOSM1, ois->af_pos);
++	mutex_unlock(&ois->lock);
++}
++
++static ssize_t mode_show(struct device *dev, struct device_attribute *attr,
++			 char *buf)
++{
++	struct samsung_ois *ois = dev_get_drvdata(dev);
++	const char *name = "unknown";
++	unsigned int i;
++
++	mutex_lock(&ois->lock);
++	for (i = 0; i < ARRAY_SIZE(ois_modes); i++)
++		if (ois_modes[i].mode == ois->mode)
++			name = ois_modes[i].name;
++	mutex_unlock(&ois->lock);
++
++	return sysfs_emit(buf, "%s\n", name);
++}
++
++static ssize_t mode_store(struct device *dev, struct device_attribute *attr,
++			  const char *buf, size_t count)
++{
++	struct samsung_ois *ois = dev_get_drvdata(dev);
++	int i, ret = 0;
++
++	for (i = 0; i < ARRAY_SIZE(ois_modes); i++)
++		if (sysfs_streq(buf, ois_modes[i].name))
++			break;
++	if (i == ARRAY_SIZE(ois_modes))
++		return -EINVAL;
++
++	mutex_lock(&ois->lock);
++	ois->mode = ois_modes[i].mode;
++	if (ois->servo_on)
++		ret = ois_set_mode(ois, ois->mode);
++	mutex_unlock(&ois->lock);
++
++	return ret ?: count;
++}
++static DEVICE_ATTR_RW(mode);
++
++/*
++ * The gyro calibration as stock keeps it in /efs/FactoryApp/camera_ois_gyro_cal:
++ * "x,y,z", each the zero offset in degrees per second with three decimals.
++ * Stock's camera HAL drops the dots and reads each field as an integer
++ * (thousandths), and the kernel takes X and Y; it writes 0 for Z.
++ */
++static ssize_t ois_emit_milli(char *buf, ssize_t at, s32 v, char end)
++{
++	u32 a = v < 0 ? -(u32)v : v;
++
++	return sysfs_emit_at(buf, at, "%s%u.%03u%c", v < 0 ? "-" : "",
++			     a / 1000, a % 1000, end);
++}
++
++static ssize_t gyro_calibration_show(struct device *dev,
++				     struct device_attribute *attr, char *buf)
++{
++	struct samsung_ois *ois = dev_get_drvdata(dev);
++	ssize_t len;
++
++	mutex_lock(&ois->lock);
++	len = ois_emit_milli(buf, 0, ois->gyro_raw[0], ',');
++	len += ois_emit_milli(buf, len, ois->gyro_raw[1], ',');
++	len += ois_emit_milli(buf, len, ois->gyro_raw[2], '\n');
++	mutex_unlock(&ois->lock);
++
++	return len;
++}
++
++static int ois_parse_milli(const char *field, size_t len, s32 *val)
++{
++	char num[16];
++	size_t i, n = 0;
++
++	for (i = 0; i < len; i++) {
++		if (field[i] == '.')
++			continue;
++		if (n == sizeof(num) - 1)
++			return -EINVAL;
++		num[n++] = field[i];
++	}
++	num[n] = '\0';
++
++	return kstrtos32(strim(num), 10, val);
++}
++
++static ssize_t gyro_calibration_store(struct device *dev,
++				      struct device_attribute *attr,
++				      const char *buf, size_t count)
++{
++	struct samsung_ois *ois = dev_get_drvdata(dev);
++	s32 raw[3] = { 0, 0, 0 };
++	const char *p = buf;
++	int i, ret;
++
++	for (i = 0; i < ARRAY_SIZE(raw); i++) {
++		size_t len = strcspn(p, ",");
++
++		ret = ois_parse_milli(p, len, &raw[i]);
++		if (ret)
++			return ret;
++		if (p[len] != ',')
++			break;
++		p += len + 1;
++	}
++	/* X and Y at least, as the HAL needs a comma */
++	if (i == 0)
++		return -EINVAL;
++
++	mutex_lock(&ois->lock);
++	memcpy(ois->gyro_raw, raw, sizeof(raw));
++	if (ois->powered) {
++		ois_write_le16(ois, OIS_REG_XGZERO, ois_gyro_zero(raw[0]));
++		ois_write_le16(ois, OIS_REG_YGZERO, ois_gyro_zero(raw[1]));
++	}
++	mutex_unlock(&ois->lock);
++
++	return count;
++}
++static DEVICE_ATTR_RW(gyro_calibration);
++
++static ssize_t status_show(struct device *dev, struct device_attribute *attr,
++			   char *buf)
++{
++	struct samsung_ois *ois = dev_get_drvdata(dev);
++	unsigned int sts;
++	u16 err;
++	ssize_t len;
++	int ret;
++
++	mutex_lock(&ois->lock);
++	if (!ois->powered) {
++		len = sysfs_emit(buf, "off\n");
++		goto out;
++	}
++
++	ret = ois_read_status(ois, &sts);
++	if (!ret)
++		ret = ois_read_le16(ois, OIS_REG_ERR, &err);
++	if (ret) {
++		len = ret;
++		goto out;
++	}
++
++	len = sysfs_emit(buf,
++			 "status 0x%02x error 0x%04x servo %s mode 0x%02x focus %d centre %u %u\n",
++			 sts, err, str_on_off(ois->servo_on), ois->cur_mode,
++			 ois->af_pos, ois->x_center, ois->y_center);
++out:
++	mutex_unlock(&ois->lock);
++	return len;
++}
++static DEVICE_ATTR_RO(status);
++
++static ssize_t firmware_version_show(struct device *dev,
++				     struct device_attribute *attr, char *buf)
++{
++	struct samsung_ois *ois = dev_get_drvdata(dev);
++
++	return sysfs_emit(buf, "%s\n", ois->version);
++}
++static DEVICE_ATTR_RO(firmware_version);
++
++static struct attribute *ois_attrs[] = {
++	&dev_attr_mode.attr,
++	&dev_attr_gyro_calibration.attr,
++	&dev_attr_status.attr,
++	&dev_attr_firmware_version.attr,
++	NULL
++};
++ATTRIBUTE_GROUPS(ois);
++
++/*
++ * Stock cam_ois_read_module_ver(): HWVER and VDRINFO, as core version,
++ * driver IC, MCU and gyro, then the firmware's year, month, release count
++ * and a development or release mark.
++ */
++static int ois_read_version(struct samsung_ois *ois)
++{
++	u8 hw[4], vdr[4];
++	unsigned int sts = 0;
++	int i, ret;
++
++	ret = ois_read_status(ois, &sts);
++	if (ret)
++		return ret;
++
++	ret = regmap_bulk_read(ois->regmap, OIS_REG_HWVER, hw, sizeof(hw));
++	if (!ret)
++		ret = regmap_bulk_read(ois->regmap, OIS_REG_VDRINFO, vdr,
++				       sizeof(vdr));
++	if (ret)
++		return ret;
++
++	for (i = 0; i < 4; i++) {
++		ois->version[i] = hw[3 - i];
++		ois->version[4 + i] = vdr[i];
++	}
++	ois->version[OIS_VERSION_SIZE] = '\0';
++	for (i = 0; i < OIS_VERSION_SIZE; i++)
++		if (!isalnum(ois->version[i]))
++			ois->version[i] = '?';
++
++	dev_info(ois->dev, "firmware %s (HWVER %4phN VDRINFO %4phN), status 0x%02x\n",
++		 ois->version, hw, vdr, sts);
++
++	return 0;
++}
++
++static int ois_read_calibration(struct samsung_ois *ois)
++{
++	struct nvmem_cell *cell;
++	size_t len;
++	u8 *cal;
++
++	cell = devm_nvmem_cell_get(ois->dev, "calibration");
++	if (IS_ERR(cell)) {
++		if (PTR_ERR(cell) == -ENOENT)
++			return 0;
++		return dev_err_probe(ois->dev, PTR_ERR(cell),
++				     "calibration cell\n");
++	}
++
++	cal = nvmem_cell_read(cell, &len);
++	if (IS_ERR(cal))
++		return dev_err_probe(ois->dev, PTR_ERR(cal),
++				     "reading calibration\n");
++
++	if (len > OIS_CAL_MARK && cal[OIS_CAL_MARK] == OIS_CAL_MARK_VALID) {
++		memcpy(ois->xygg, cal + OIS_CAL_XYGG, sizeof(ois->xygg));
++		ois->have_xygg = true;
++		dev_info(ois->dev, "gyro gains %*phN\n",
++			 (int)sizeof(ois->xygg), ois->xygg);
++	} else {
++		dev_info(ois->dev, "no gyro gains in the module (mark 0x%02x)\n",
++			 len > OIS_CAL_MARK ? cal[OIS_CAL_MARK] : 0);
++	}
++
++	kfree(cal);
++	return 0;
++}
++
++static void ois_put_device(void *data)
++{
++	put_device(data);
++}
++
++static struct device *ois_get_i2c_device(struct samsung_ois *ois,
++					 struct device_node *np)
++{
++	struct i2c_client *client;
++	int ret;
++
++	client = of_find_i2c_device_by_node(np);
++	if (!client)
++		return ERR_PTR(-EPROBE_DEFER);
++
++	ret = devm_add_action_or_reset(ois->dev, ois_put_device, &client->dev);
++	if (ret)
++		return ERR_PTR(ret);
++
++	return &client->dev;
++}
++
++static void ois_focus_release(void *data)
++{
++	struct samsung_ois *ois = data;
++	struct v4l2_ctrl *ctrl = ois->focus;
++
++	v4l2_ctrl_lock(ctrl);
++	v4l2_ctrl_notify(ctrl, NULL, NULL);
++	ctrl->handler->notify = NULL;
++	ctrl->handler->notify_priv = NULL;
++	v4l2_ctrl_unlock(ctrl);
++}
++
++/*
++ * Follow the focus position of the sensor's lens (its lens-focus). The
++ * lens driver must be bound; the device link unbinds this driver before
++ * the lens driver goes, so the control outlives the notifier.
++ */
++static int ois_link_lens(struct samsung_ois *ois, struct device_node *sensor_np)
++{
++	struct device_node *lens_np;
++	struct v4l2_subdev *sd;
++	struct v4l2_ctrl *ctrl;
++	int ret;
++
++	lens_np = of_parse_phandle(sensor_np, "lens-focus", 0);
++	if (!lens_np) {
++		dev_info(ois->dev, "sensor has no lens-focus, no focus tracking\n");
++		return 0;
++	}
++
++	ois->lens = ois_get_i2c_device(ois, lens_np);
++	of_node_put(lens_np);
++	if (IS_ERR(ois->lens))
++		return dev_err_probe(ois->dev, PTR_ERR(ois->lens), "lens\n");
++
++	if (!device_is_bound(ois->lens))
++		return dev_err_probe(ois->dev, -EPROBE_DEFER,
++				     "lens driver not bound\n");
++
++	if (!device_link_add(ois->dev, ois->lens, DL_FLAG_AUTOREMOVE_CONSUMER))
++		return dev_err_probe(ois->dev, -EINVAL, "lens device link\n");
++
++	sd = i2c_get_clientdata(to_i2c_client(ois->lens));
++	if (!sd || sd->dev != ois->lens || !sd->ctrl_handler)
++		return dev_err_probe(ois->dev, -EINVAL,
++				     "lens is not a V4L2 subdevice\n");
++
++	ctrl = v4l2_ctrl_find(sd->ctrl_handler, V4L2_CID_FOCUS_ABSOLUTE);
++	if (!ctrl) {
++		dev_info(ois->dev, "lens has no focus control, no focus tracking\n");
++		return 0;
++	}
++
++	v4l2_ctrl_lock(ctrl);
++	if (ctrl->handler->notify) {
++		v4l2_ctrl_unlock(ctrl);
++		dev_warn(ois->dev, "lens controls taken, no focus tracking\n");
++		return 0;
++	}
++	mutex_lock(&ois->lock);
++	ois->af_pos = clamp(ctrl->cur.val >> 4, 0, 0xff);
++	mutex_unlock(&ois->lock);
++	v4l2_ctrl_notify(ctrl, ois_focus_notify, ois);
++	ois->focus = ctrl;
++	v4l2_ctrl_unlock(ctrl);
++
++	ret = devm_add_action_or_reset(ois->dev, ois_focus_release, ois);
++	if (ret)
++		return ret;
++
++	return 0;
++}
++
++/* Runs after runtime PM is disabled: power off if unbound while on */
++static void ois_power_off_unbound(void *data)
++{
++	struct samsung_ois *ois = data;
++
++	if (!pm_runtime_status_suspended(ois->dev)) {
++		ois_runtime_suspend(ois->dev);
++		pm_runtime_set_suspended(ois->dev);
++	}
++}
++
++static const struct regmap_config ois_regmap_config = {
++	.reg_bits = 16,
++	.val_bits = 8,
++	.max_register = 0x0fff,
++	.cache_type = REGCACHE_NONE,
++};
++
++static int ois_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	struct device_node *sensor_np;
++	struct samsung_ois *ois;
++	u32 pola[2] = { 0, 0 };
++	u32 orient = 0;
++	unsigned int i;
++	int ret;
++
++	ois = devm_kzalloc(dev, sizeof(*ois), GFP_KERNEL);
++	if (!ois)
++		return -ENOMEM;
++
++	ois->dev = dev;
++	ois->mode = OIS_MODE_STILL;
++	ois->af_pos = -1;
++	ret = devm_mutex_init(dev, &ois->lock);
++	if (ret)
++		return ret;
++	i2c_set_clientdata(client, ois);
++
++	ois->regmap = devm_regmap_init_i2c(client, &ois_regmap_config);
++	if (IS_ERR(ois->regmap))
++		return dev_err_probe(dev, PTR_ERR(ois->regmap), "regmap\n");
++
++	for (i = 0; i < ARRAY_SIZE(ois_supply_names); i++)
++		ois->supplies[i].supply = ois_supply_names[i];
++	ret = devm_regulator_bulk_get(dev, ARRAY_SIZE(ois->supplies),
++				      ois->supplies);
++	if (ret)
++		return dev_err_probe(dev, ret, "supplies\n");
++
++	/* In reset, and BOOT0 low so that it boots its firmware */
++	ois->reset = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
++	if (IS_ERR(ois->reset))
++		return dev_err_probe(dev, PTR_ERR(ois->reset), "reset gpio\n");
++	ois->boot0 = devm_gpiod_get_optional(dev, "boot0", GPIOD_OUT_LOW);
++	if (IS_ERR(ois->boot0))
++		return dev_err_probe(dev, PTR_ERR(ois->boot0), "boot0 gpio\n");
++
++	of_property_read_u32_array(dev->of_node, "samsung,gyro-polarity",
++				   pola, ARRAY_SIZE(pola));
++	of_property_read_u32(dev->of_node, "samsung,gyro-orientation", &orient);
++	ois->polarity[0] = pola[0];
++	ois->polarity[1] = pola[1];
++	ois->orientation = orient;
++
++	ret = ois_read_calibration(ois);
++	if (ret)
++		return ret;
++
++	sensor_np = of_parse_phandle(dev->of_node, "samsung,camera-sensor", 0);
++	if (!sensor_np)
++		return dev_err_probe(dev, -EINVAL, "no samsung,camera-sensor\n");
++	ois->sensor = ois_get_i2c_device(ois, sensor_np);
++	if (IS_ERR(ois->sensor)) {
++		of_node_put(sensor_np);
++		return dev_err_probe(dev, PTR_ERR(ois->sensor), "sensor\n");
++	}
++	ret = ois_link_lens(ois, sensor_np);
++	of_node_put(sensor_np);
++	if (ret)
++		return ret;
++
++	/* Check that the MCU answers, and log its firmware version */
++	ret = ois_power_on(ois);
++	if (ret)
++		return ret;
++	ret = ois_wait_idle(ois, 20);
++	if (!ret || ret == -EBUSY)
++		ret = ois_read_version(ois);
++	ois_power_off(ois);
++	if (ret)
++		return dev_err_probe(dev, ret, "no answer from the MCU\n");
++
++	ret = devm_add_action_or_reset(dev, ois_power_off_unbound, ois);
++	if (ret)
++		return ret;
++	ret = devm_pm_runtime_enable(dev);
++	if (ret)
++		return ret;
++
++	/* Power up with the sensor, power down with it */
++	if (!device_link_add(ois->sensor, dev,
++			     DL_FLAG_PM_RUNTIME | DL_FLAG_AUTOREMOVE_SUPPLIER))
++		return dev_err_probe(dev, -EINVAL, "sensor device link\n");
++
++	dev_info(dev, "stabilising %s\n", dev_name(ois->sensor));
++
++	return 0;
++}
++
++static const struct dev_pm_ops ois_pm_ops = {
++	RUNTIME_PM_OPS(ois_runtime_suspend, ois_runtime_resume, NULL)
++};
++
++static const struct of_device_id ois_of_match[] = {
++	{ .compatible = "samsung,ois-mcu-stm32g" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, ois_of_match);
++
++static struct i2c_driver ois_driver = {
++	.driver = {
++		.name = "samsung-ois-mcu",
++		.of_match_table = ois_of_match,
++		.pm = pm_ptr(&ois_pm_ops),
++		.dev_groups = ois_groups,
++	},
++	.probe = ois_probe,
++};
++module_i2c_driver(ois_driver);
++
++MODULE_AUTHOR("Noa Himesaka <himesaka@noa.codes>");
++MODULE_DESCRIPTION("Samsung optical image stabilisation MCU");
++MODULE_LICENSE("GPL");

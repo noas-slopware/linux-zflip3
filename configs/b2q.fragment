@@ -128,6 +128,9 @@ CONFIG_VIDEO_IMX374=m
 CONFIG_VIDEO_IMX563=m
 # Cameras: the rear wide's AK7377 focus actuator (patches/linux/0099-0100).
 CONFIG_VIDEO_AK7375=m
+# Cameras: the rear wide's OIS MCU and its calibration EEPROM (patches/linux/0116-0118).
+CONFIG_VIDEO_SAMSUNG_OIS_MCU=m
+CONFIG_EEPROM_AT24=m
 
 # GPU as a thermal cooling device (msm registers devfreq cooling; the sm8350
 # gpu-top/bottom zones and the b2q skin and PMIC zones map onto it)

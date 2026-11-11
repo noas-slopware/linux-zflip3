@@ -1,0 +1,147 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] arm64: dts: qcom: sm8350-b2q: rear wide camera OIS
+
+The rear wide's OIS MCU is stock's qcom,ois@51 (dtbo entry 3) on QUP SE2
+at 1 MHz. The address is 0x62: stock's slave-addr 0xc4, which the
+camera HAL also sends, in 8-bit form. Its rails are S2MPB02 LDO18
+(3.3 V vdig), LDO13 (2.8 V, shared with the AK7377) and LDO7 (1.8 V
+vio); NRST is gpio173 and BOOT0 gpio168. Gyro polarity 0 0 and
+orientation 0x10 are stock's.
+
+The module's M24128 calibration EEPROM is stock's eeprom_rear_wide on
+CCI1 master 1 at 0x50 (vio LDO8). Stock's camera module data has the
+OIS block at 0x2e10, 92 bytes; describe it as an nvmem cell for the MCU
+driver, which takes the gyro gains from it.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+index 06c1aab..cfe6258 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+@@ -608,6 +608,16 @@
+ 					regulator-max-microvolt = <1800000>;
+ 				};
+ 
++				/*
++				 * Stock's cam_vio for the rear wide's OIS MCU, 1.8 V.
++				 * Stock also gives it to the rear light sensor.
++				 */
++				s2mpb02_l7: ldo7 {
++					regulator-name = "s2mpb02-l7";
++					regulator-min-microvolt = <1800000>;
++					regulator-max-microvolt = <1800000>;
++				};
++
+ 				/*
+ 				 * Stock's cam_vio for the rear wide, 1.8 V. Stock also
+ 				 * gives it to the wide's actuator and EEPROM.
+@@ -689,6 +699,13 @@
+ 					regulator-always-on;
+ 				};
+ 
++				/* Stock's cam_vdig for the rear wide's OIS MCU, 3.3 V */
++				s2mpb02_l18: ldo18 {
++					regulator-name = "s2mpb02-l18";
++					regulator-min-microvolt = <3300000>;
++					regulator-max-microvolt = <3300000>;
++				};
++
+ 				s2mpb02_b2: buck2 {
+ 					regulator-name = "s2mpb02-b2";
+ 					regulator-min-microvolt = <1300000>;
+@@ -2155,6 +2172,14 @@
+ 		};
+ 	};
+ 
++	/* Stock's mcu_boot0_swclk_active and mcu_rst_active states */
++	ois_mcu_default: ois-mcu-default-state {
++		pins = "gpio168", "gpio173";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-disable;
++	};
++
+ 	cam_wide_suspend: cam-wide-suspend-state {
+ 		mclk-pins {
+ 			pins = "gpio100";
+@@ -2328,11 +2353,37 @@
+ 	};
+ };
+ 
++/*
++ * The rear wide's OIS MCU, stock's qcom,ois@51 (dtbo entry 3) on QUP SE2 at
++ * 1 MHz. Its slave-addr 0xc4 is the 8-bit form of 0x62, which is what
++ * stock's camera HAL also sends. Stock's DT and HAL leave the gyro polarity
++ * at 0 for both axes and give gyro-orientation 0x10.
++ */
+ &i2c2 {
++	clock-frequency = <1000000>;
++
+ 	status = "okay";
+ 
+-	// Likely an AT24 EEPROM for OIS camera
+-	// qcom,ois@51
++	ois@62 {
++		compatible = "samsung,ois-mcu-stm32g";
++		reg = <0x62>;
++
++		vdig-supply = <&s2mpb02_l18>;
++		vaf-supply = <&s2mpb02_l13>;
++		vio-supply = <&s2mpb02_l7>;
++
++		reset-gpios = <&tlmm 173 GPIO_ACTIVE_LOW>;
++		boot0-gpios = <&tlmm 168 GPIO_ACTIVE_HIGH>;
++		pinctrl-0 = <&ois_mcu_default>;
++		pinctrl-names = "default";
++
++		samsung,camera-sensor = <&cam_wide>;
++		samsung,gyro-polarity = <0 0>;
++		samsung,gyro-orientation = <0x10>;
++
++		nvmem-cells = <&wide_ois_cal>;
++		nvmem-cell-names = "calibration";
++	};
+ };
+ 
+ &i2c4 {
+@@ -2921,7 +2972,7 @@
+ 	#address-cells = <1>;
+ 	#size-cells = <0>;
+ 
+-	camera@10 {
++	cam_wide: camera@10 {
+ 		compatible = "sony,imx563";
+ 		reg = <0x10>;
+ 
+@@ -3018,6 +3069,28 @@
+ 		vdd-supply = <&s2mpb02_l13>;
+ 		vio-supply = <&s2mpb02_l8>;
+ 	};
++
++	/*
++	 * The rear wide's calibration EEPROM, an M24128 (stock's
++	 * eeprom_rear_wide, slave-addr 0xa0, cam_vio l8). Stock's camera
++	 * module data puts its OIS block (ADDR_M_OIS) at 0x2e10, 92 bytes.
++	 */
++	eeprom@50 {
++		compatible = "st,24c128", "atmel,24c128";
++		reg = <0x50>;
++		vcc-supply = <&s2mpb02_l8>;
++		read-only;
++
++		nvmem-layout {
++			compatible = "fixed-layout";
++			#address-cells = <1>;
++			#size-cells = <1>;
++
++			wide_ois_cal: ois-calibration@2e10 {
++				reg = <0x2e10 0x5c>;
++			};
++		};
++	};
+ };
+ 
+ &cci1_i2c0 {

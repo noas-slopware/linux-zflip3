@@ -1,0 +1,139 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] dt-bindings: media: i2c: add the Samsung OIS MCU
+
+Samsung's phone camera modules with optical image stabilisation have an
+STM32G0 running Samsung's OIS firmware: it reads its own gyroscope and
+moves the lens sideways, controlled over I2C. Describe its supplies,
+NRST and BOOT0, the image sensor whose lens it stabilises, the gyro
+polarity and orientation for the board (stock's pole-values and
+gyro-orientation), and the module EEPROM's OIS calibration block, which
+holds the factory gyro gains.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+
+diff --git a/Documentation/devicetree/bindings/media/i2c/samsung,ois-mcu-stm32g.yaml b/Documentation/devicetree/bindings/media/i2c/samsung,ois-mcu-stm32g.yaml
+new file mode 100644
+index 0000000..278e698
+--- /dev/null
++++ b/Documentation/devicetree/bindings/media/i2c/samsung,ois-mcu-stm32g.yaml
+@@ -0,0 +1,118 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/media/i2c/samsung,ois-mcu-stm32g.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: Samsung optical image stabilisation MCU (STM32G0)
++
++maintainers:
++  - Noa Himesaka <himesaka@noa.codes>
++
++description:
++  Samsung camera modules with optical image stabilisation have an STM32G0
++  microcontroller running Samsung's OIS firmware from its own flash. It
++  reads a gyroscope, drives the lens of one or more camera modules
++  sideways to cancel hand shake, and is controlled over I2C with 16-bit
++  big-endian register addresses. It stabilises the lens of the camera
++  sensor given in samsung,camera-sensor while that sensor is powered, and
++  takes the position of the sensor's focus lens (its lens-focus) to
++  compensate the shift of the optical centre with focus.
++
++properties:
++  compatible:
++    const: samsung,ois-mcu-stm32g
++
++  reg:
++    maxItems: 1
++
++  vdig-supply:
++    description: MCU core supply
++
++  vaf-supply:
++    description: Lens driver supply, shared with the focus actuator
++
++  vio-supply:
++    description: I/O supply
++
++  reset-gpios:
++    maxItems: 1
++    description: NRST of the MCU
++
++  boot0-gpios:
++    maxItems: 1
++    description:
++      BOOT0 of the MCU. Held low, so that the MCU runs its firmware rather
++      than the ROM bootloader.
++
++  samsung,camera-sensor:
++    $ref: /schemas/types.yaml#/definitions/phandle
++    description:
++      The image sensor whose lens this MCU stabilises. Stabilisation runs
++      while the sensor is powered.
++
++  samsung,gyro-polarity:
++    $ref: /schemas/types.yaml#/definitions/uint32-array
++    description:
++      Polarity of the gyroscope's X and Y axes for this module, as mounted
++      on the board.
++    items:
++      - maximum: 0xff
++      - maximum: 0xff
++    default: [0, 0]
++
++  samsung,gyro-orientation:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    description: Orientation of the gyroscope on the board.
++    maximum: 0xff
++    default: 0
++
++  nvmem-cells:
++    maxItems: 1
++    description:
++      The OIS calibration block of the camera module's EEPROM, with the
++      factory gyro gains at offset 0x10 and their mark (0xbb when present)
++      at offset 0x30.
++
++  nvmem-cell-names:
++    const: calibration
++
++required:
++  - compatible
++  - reg
++  - vdig-supply
++  - vaf-supply
++  - vio-supply
++  - reset-gpios
++  - samsung,camera-sensor
++
++additionalProperties: false
++
++examples:
++  - |
++    #include <dt-bindings/gpio/gpio.h>
++
++    i2c {
++        #address-cells = <1>;
++        #size-cells = <0>;
++
++        ois@62 {
++            compatible = "samsung,ois-mcu-stm32g";
++            reg = <0x62>;
++
++            vdig-supply = <&vreg_ois_vdig>;
++            vaf-supply = <&vreg_cam_vaf>;
++            vio-supply = <&vreg_ois_vio>;
++
++            reset-gpios = <&tlmm 173 GPIO_ACTIVE_LOW>;
++            boot0-gpios = <&tlmm 168 GPIO_ACTIVE_HIGH>;
++
++            samsung,camera-sensor = <&cam_wide>;
++            samsung,gyro-polarity = <0 0>;
++            samsung,gyro-orientation = <0x10>;
++
++            nvmem-cells = <&wide_ois_cal>;
++            nvmem-cell-names = "calibration";
++        };
++    };
++...
