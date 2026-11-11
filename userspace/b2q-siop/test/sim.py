@@ -313,7 +313,7 @@ for pol, fr in ((0, F0), (4, F4), (7, F7)):
     put(f"/sys/devices/system/cpu/cpufreq/policy{pol}/scaling_max_freq", fr[-1])
 for cpu, fr, vv in (("cpu4", F4, V4), ("cpu7", F7, V7)):
     for f, v in zip(fr, vv):
-        put(f"/sys/kernel/debug/opp/{cpu}/opp:{f * 1000}/supply-0/u_volt_target", v)
+        put(f"/sys/kernel/debug/opp/{cpu}/opp:{f * 1000}-0/supply-0/u_volt_target", v)
 put("/sys/class/devfreq/3d00000.gpu/available_frequencies", " ".join(str(m * 1000000) for m in GPU))
 put("/sys/class/devfreq/3d00000.gpu/max_freq", GPU[-1] * 1000000)
 put("/sys/bus/i2c/devices/16-001a/name", "imx374")

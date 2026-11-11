@@ -768,6 +768,24 @@ static void apply_gpu(int mhz)
 
 /* ---- setup ---- */
 
+/* debugfs names each OPP opp:<Hz>-<level> */
+static int opp_volt(const char *cpu, int khz, long *uv)
+{
+	char p[512];
+	glob_t gl;
+	int ret;
+
+	path(p, sizeof(p), "/sys/kernel/debug/opp/%s/opp:%ld-*/supply-0/u_volt_target", cpu,
+	     khz * 1000L);
+	if (glob(p, 0, NULL, &gl) || gl.gl_pathc != 1) {
+		globfree(&gl);
+		return -1;
+	}
+	ret = read_long(gl.gl_pathv[0], uv);
+	globfree(&gl);
+	return ret;
+}
+
 /* The modem's zones register when its sensor service comes up, maybe after us. */
 static void find_zones(void)
 {
@@ -867,16 +885,12 @@ static int find_hardware(void)
 		int idy = n4 - 1;
 
 		for (int i = 0; i < n7; i++) {
-			path(p, sizeof(p), "/sys/kernel/debug/opp/cpu7/opp:%ld/supply-0/u_volt_target",
-			     f7[i] * 1000L);
-			if (read_long(p, &v))
+			if (opp_volt("cpu7", f7[i], &v))
 				goto novolt;
 			pv[i] = v;
 		}
 		for (int i = 0; i < n4; i++) {
-			path(p, sizeof(p), "/sys/kernel/debug/opp/cpu4/opp:%ld/supply-0/u_volt_target",
-			     f4[i] * 1000L);
-			if (read_long(p, &v))
+			if (opp_volt("cpu4", f4[i], &v))
 				goto novolt;
 			gv[i] = v;
 		}
