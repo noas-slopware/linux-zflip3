@@ -1,0 +1,51 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] wifi: ath11k: keep the firmware loaded across suspend on DT machines that need it
+
+Since hibernation support, ath11k powers the chip down in suspend_late
+and loads the firmware again in resume_early, unless a DMI quirk picks
+the WoW policy. Device tree machines have no DMI, so they always get
+the power-down path.
+
+On the Galaxy Z Flip3 (QCA6390 on PCIe) the firmware load after an
+s2idle fails ("mhi mhi0: Image transfer failed") and Wi-Fi stays down
+until reboot. Samsung's cnss2 driver never powers the chip down for
+suspend: it puts MHI into M3, the device into D3hot and the link down,
+and the firmware stays resident. That is what ATH11K_PM_WOW does.
+
+Add a table of machine compatibles that get ATH11K_PM_WOW, next to the
+DMI one, and list the Flip3. Hibernation still powers down, as
+ath11k_core_pm_notify() forces ATH11K_PM_DEFAULT for it.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+
+diff --git a/drivers/net/wireless/ath/ath11k/core.c b/drivers/net/wireless/ath/ath11k/core.c
+index 8039124..65bfe2e 100644
+--- a/drivers/net/wireless/ath/ath11k/core.c
++++ b/drivers/net/wireless/ath/ath11k/core.c
+@@ -1044,6 +1044,15 @@ static const struct dmi_system_id ath11k_pm_quirk_table[] = {
+ 	{}
+ };
+ 
++/* Device tree machines whose firmware has to stay loaded across suspend, as
++ * their vendor driver keeps it: powering the chip down at suspend and loading
++ * the firmware again on resume fails there.
++ */
++static const char * const ath11k_pm_wow_machines[] = {
++	"samsung,b2q",	/* Galaxy Z Flip3 5G, QCA6390 */
++	NULL
++};
++
+ static const struct __ath11k_core_usecase_firmware_table {
+ 	u32 hw_rev;
+ 	const char *compatible;
+@@ -2693,6 +2702,8 @@ int ath11k_core_init(struct ath11k_base *ab)
+ 	dmi_id = dmi_first_match(ath11k_pm_quirk_table);
+ 	if (dmi_id)
+ 		ab->pm_policy = (kernel_ulong_t)dmi_id->driver_data;
++	else if (of_machine_compatible_match(ath11k_pm_wow_machines))
++		ab->pm_policy = ATH11K_PM_WOW;
+ 	else
+ 		ab->pm_policy = ATH11K_PM_DEFAULT;
+ 
