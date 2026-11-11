@@ -1,0 +1,48 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] iio: adc: qcom-spmi-adc5: expose the raw conversion code
+
+Report IIO_CHAN_INFO_RAW next to the processed value: the calibrated ADC
+code that the processed value is scaled from. Boards calibrate their
+thermistors with their own tables; Samsung's sm8350 phones convert the
+code of each thermistor with a table of their own, which differs from
+the generic 100 kOhm table by up to 2 C at room temperature. With the
+code, user space can apply the board's table.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+
+diff --git a/drivers/iio/adc/qcom-spmi-adc5.c b/drivers/iio/adc/qcom-spmi-adc5.c
+index 83ecd3a..3a2109a 100644
+--- a/drivers/iio/adc/qcom-spmi-adc5.c
++++ b/drivers/iio/adc/qcom-spmi-adc5.c
+@@ -456,6 +456,14 @@ static int adc_read_raw_common(struct iio_dev *indio_dev,
+ 		if (ret)
+ 			return ret;
+ 
++		return IIO_VAL_INT;
++	case IIO_CHAN_INFO_RAW:
++		ret = do_conv(adc, prop, chan,
++					&adc_code_volt, &adc_code_cur);
++		if (ret)
++			return ret;
++
++		*val = adc_code_volt;
+ 		return IIO_VAL_INT;
+ 	default:
+ 		return -EINVAL;
+@@ -508,12 +516,12 @@ struct adc5_channels {
+ 
+ #define ADC5_CHAN_TEMP(_dname, _pre, _scale)				\
+ 	ADC5_CHAN(_dname, IIO_TEMP,					\
+-		BIT(IIO_CHAN_INFO_PROCESSED),				\
++		BIT(IIO_CHAN_INFO_RAW) | BIT(IIO_CHAN_INFO_PROCESSED),	\
+ 		_pre, _scale)						\
+ 
+ #define ADC5_CHAN_VOLT(_dname, _pre, _scale)				\
+ 	ADC5_CHAN(_dname, IIO_VOLTAGE,					\
+-		  BIT(IIO_CHAN_INFO_PROCESSED),				\
++		  BIT(IIO_CHAN_INFO_RAW) | BIT(IIO_CHAN_INFO_PROCESSED),	\
+ 		  _pre, _scale)						\
+ 
+ static const struct adc5_channels adc5_chans_pmic[ADC5_MAX_CHANNEL] = {

@@ -1,0 +1,217 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] arm64: dts: qcom: sm8350-samsung-b2q: skin estimate inputs
+
+Samsung's skin temperature for this model, LRP2, is a linear model of 14
+sensors computed in user space (vendor.samsung.hardware.thermal and its
+mercury.json); its SIOP table throttles on it. Describe the sensors it
+reads that the board does not expose yet:
+
+- the AP thermistor's channel is stock's sec-ap-thermistor, not a skin
+  sensor: rename it ap_thm, and drop the skin zone 0106 built on it,
+  which throttled within seconds of load;
+- wf_thm (AMUX_THM3) and cf_thm (GPIO1, with PM8350 gpio2 in analog
+  mode), stock's sec-wf- and sec-cf-thermistor;
+- the modem's QMI sensors pa, pa_1, mmw_pa1 and mmw_pa3, as zones
+  without trips like stock's modem-lte-sub6-pa1/-pa2 and
+  modem-mmw-pa1/-pa3-usr.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+index f810240..eda5cd6 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+@@ -1054,9 +1054,9 @@
+ 		"NC",
+ 		"NC";
+ 
+-	/* stock chg_thm, wpc_thm, sub_bat_thm: thermistors on the ADC */
++	/* stock chg_thm, cf_therm, wpc_thm, sub_bat_thm: thermistors on the ADC */
+ 	thm_adc_state: thm-adc-state {
+-		pins = "gpio1", "gpio3", "gpio4";
++		pins = "gpio1", "gpio2", "gpio3", "gpio4";
+ 		function = "normal";
+ 		bias-high-impedance;
+ 	};
+@@ -1111,10 +1111,28 @@
+ 		qcom,ratiometric;
+ 	};
+ 
+-	/* stock's skin-msm-therm, the sensor its skin policy runs on */
++	/* stock's sec-ap-thermistor (ap_therm), beside the SoC */
+ 	channel@144 {
+ 		reg = <PM8350_ADC7_AMUX_THM1_100K_PU(1)>;
+-		label = "skin_msm_thm";
++		label = "ap_thm";
++		qcom,hw-settle-time = <200>;
++		qcom,pre-scaling = <1 1>;
++		qcom,ratiometric;
++	};
++
++	/* stock's sec-wf-thermistor (wf_therm), beside the Wi-Fi chip */
++	channel@146 {
++		reg = <PM8350_ADC7_AMUX_THM3_100K_PU(1)>;
++		label = "wf_thm";
++		qcom,hw-settle-time = <200>;
++		qcom,pre-scaling = <1 1>;
++		qcom,ratiometric;
++	};
++
++	/* stock's sec-cf-thermistor (cf_therm), FLASH_THM beside the camera flash */
++	channel@14a {
++		reg = <PM8350_ADC7_GPIO1_100K_PU(1)>;
++		label = "cf_thm";
+ 		qcom,hw-settle-time = <200>;
+ 		qcom,pre-scaling = <1 1>;
+ 		qcom,ratiometric;
+@@ -1162,13 +1180,6 @@
+ 		qcom,ratiometric;
+ 	};
+ 
+-	skin-msm-thm@4 {
+-		reg = <4>;
+-		io-channels = <&pmk8350_vadc PM8350_ADC7_AMUX_THM1_100K_PU(1)>;
+-		qcom,hw-settle-time-us = <200>;
+-		qcom,ratiometric;
+-	};
+-
+ 	xo-thm@5 {
+ 		reg = <5>;
+ 		io-channels = <&pmk8350_vadc PMK8350_ADC7_AMUX_THM1_100K_PU>;
+@@ -1190,6 +1201,17 @@
+  *   46 C (chg_high_temp, back at 44): wired level 1, 1000 mA in, 1900 mA
+  */
+ / {
++	/* the modem's temperature sensors, as stock's qmi-ts-sensors */
++	qmi_ts: qmi-ts-sensors {
++		compatible = "qcom,qmi-sensors";
++		#thermal-sensor-cells = <1>;
++
++		modem {
++			qcom,instance-id = <0>;
++			qcom,qmi-sensor-names = "pa", "pa_1", "mmw_pa1", "mmw_pa3";
++		};
++	};
++
+ 	thermal-zones {
+ 		batt-thermal {
+ 			thermal-sensors = <&pmk8350_adc_tm 0>;
+@@ -1279,100 +1301,26 @@
+ 		};
+ 
+ 		/*
+-		 * Skin. Stock's kernel only exposes skin-msm-therm to user space;
+-		 * Samsung's framework (SSRM) throttles from its table for this model,
+-		 * siop_b2q_sm8350.xml in SamsungDeviceHealthManagerService. Its
+-		 * default AP limits, with its default 2 C gap as hysteresis:
+-		 *   38 C: CPUFreqMax 1555200, GPUFreqMax 443 MHz
+-		 *   42 C: CPUFreqMax 1420800
+-		 *   44 C: CPUFreqMax 1075200
+-		 *   47 C: CPUFreqMax 854400, GPUFreqMax 315 MHz
+-		 * CPUFreqMax caps the gold and prime clusters at the highest OPP not
+-		 * above it; the states below are those OPPs counted from the top
+-		 * (gold 1555200/1324800/1075200/844800, prime 1555200/1420800/
+-		 * 1075200/844800; GPU 443/315 MHz). Fixed states per trip, so the
+-		 * caps are exactly stock's, and the ADC-TM interrupts drive the zone.
++		 * The modem's thermistors, read over QMI (qmi-ts-sensors below).
++		 * Stock's zones of the same sensors are modem-lte-sub6-pa1/-pa2 and
++		 * modem-mmw-pa1/-pa3-usr; Samsung's thermal HAL reads them as PATHM,
++		 * PA1THM, LRPTHM and MMWTHM, four of the inputs of its skin estimate.
++		 * Like stock's, they have no trips here.
+ 		 */
+-		skin-thermal {
+-			thermal-sensors = <&pmk8350_adc_tm 4>;
+-
+-			trips {
+-				skin_38: skin-38 {
+-					temperature = <38000>;
+-					hysteresis = <2000>;
+-					type = "passive";
+-				};
+-
+-				skin_42: skin-42 {
+-					temperature = <42000>;
+-					hysteresis = <2000>;
+-					type = "passive";
+-				};
+-
+-				skin_44: skin-44 {
+-					temperature = <44000>;
+-					hysteresis = <2000>;
+-					type = "passive";
+-				};
+-
+-				skin_47: skin-47 {
+-					temperature = <47000>;
+-					hysteresis = <2000>;
+-					type = "passive";
+-				};
+-			};
+-
+-			cooling-maps {
+-				map-gold-38 {
+-					trip = <&skin_38>;
+-					cooling-device = <&cpu4 8 8>;
+-				};
+-
+-				map-prime-38 {
+-					trip = <&skin_38>;
+-					cooling-device = <&cpu7 12 12>;
+-				};
+-
+-				map-gpu-38 {
+-					trip = <&skin_38>;
+-					cooling-device = <&gpu 7 7>;
+-				};
+-
+-				map-gold-42 {
+-					trip = <&skin_42>;
+-					cooling-device = <&cpu4 10 10>;
+-				};
+-
+-				map-prime-42 {
+-					trip = <&skin_42>;
+-					cooling-device = <&cpu7 13 13>;
+-				};
+-
+-				map-gold-44 {
+-					trip = <&skin_44>;
+-					cooling-device = <&cpu4 12 12>;
+-				};
+-
+-				map-prime-44 {
+-					trip = <&skin_44>;
+-					cooling-device = <&cpu7 16 16>;
+-				};
++		lte-pa1-thermal {
++			thermal-sensors = <&qmi_ts 0>;
++		};
+ 
+-				map-gold-47 {
+-					trip = <&skin_47>;
+-					cooling-device = <&cpu4 14 14>;
+-				};
++		lte-pa2-thermal {
++			thermal-sensors = <&qmi_ts 1>;
++		};
+ 
+-				map-prime-47 {
+-					trip = <&skin_47>;
+-					cooling-device = <&cpu7 18 18>;
+-				};
++		mmw-pa1-thermal {
++			thermal-sensors = <&qmi_ts 26>;
++		};
+ 
+-				map-gpu-47 {
+-					trip = <&skin_47>;
+-					cooling-device = <&gpu 9 9>;
+-				};
+-			};
++		mmw-pa3-thermal {
++			thermal-sensors = <&qmi_ts 28>;
+ 		};
+ 
+ 		/*

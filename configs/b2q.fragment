@@ -125,3 +125,6 @@ CONFIG_VIDEO_AK7375=m
 # GPU as a thermal cooling device (msm registers devfreq cooling; the sm8350
 # gpu-top/bottom zones and the b2q skin and PMIC zones map onto it)
 CONFIG_DEVFREQ_THERMAL=y
+
+# The modem's thermistors over QMI (patch 0108): inputs of the skin estimate
+CONFIG_QCOM_QMI_TS=m
