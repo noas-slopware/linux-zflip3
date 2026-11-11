@@ -86,6 +86,11 @@ pictures with auto exposure.
   scans it, convergence not yet seen in light (`STATE.md` header). OIS: the MCU on QUP SE2
   has no driver.
 - `cam` at full resolution and 1080p works on all three cameras since 0105 (384 MiB CMA).
+- Autofocus speed (libcamera 0.7.2-9, 0017): the soft ISP measures every 4th frame and the
+  IPU3-derived algorithm counted its settle time and fine window as if every frame: the lens
+  never settled within 10 s. Now the settle time is in frames and the fine scan covers one
+  coarse step either side of the coarse peak in eighths; on the phone it was stable at step 405
+  about 2 s after start (10 scan steps). Host model in the scratchpad's `afh/`.
 - Calibration: no lens shading or AWB data from the module EEPROMs, and no libcamera tuning
   files; the ultrawide's crop and orientation are not yet compared against stock.
 - The flash LED works on its own but is not tied into capture.
