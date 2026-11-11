@@ -85,7 +85,7 @@ pictures with auto exposure.
   master 1, 0x0c, through ak7375 (standby before active, as stock); libcamera's soft ISP Af
   scans it, convergence not yet seen in light (`STATE.md` header). OIS: the MCU on QUP SE2
   has no driver.
-- `cam` at full resolution fails to allocate: the only CMA heap is the 32 MiB default.
+- `cam` at full resolution and 1080p works on all three cameras since 0105 (384 MiB CMA).
 - Calibration: no lens shading or AWB data from the module EEPROMs, and no libcamera tuning
   files; the ultrawide's crop and orientation are not yet compared against stock.
 - The flash LED works on its own but is not tied into capture.

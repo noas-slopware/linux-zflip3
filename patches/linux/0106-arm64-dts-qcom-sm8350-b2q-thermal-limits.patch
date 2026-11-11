@@ -1,0 +1,246 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] arm64: dts: qcom: sm8350-samsung-b2q: stock's thermal limits
+
+Add the board's skin and crystal thermistors and the limits stock
+applies with them:
+
+- skin-thermal on skin-msm-therm (PM8350 AMUX_THM1), with the default AP
+  limits of Samsung's SIOP table for this model (siop_b2q_sm8350.xml):
+  the gold and prime clusters capped at 1.56, 1.42, 1.08 and 0.85 GHz
+  from 38, 42, 44 and 47 C, the GPU at 443 MHz from 38 C and 315 MHz
+  from 47 C, 2 C hysteresis. Stock applies these from user space; here
+  they are fixed cooling states per trip, driven by ADC-TM interrupts.
+- xo-thermal on xo-therm (PMK8350 AMUX_THM1), stock's xo-therm-step:
+  gold and prime at their lowest frequency from 78 C.
+- Cooling maps on pm8350-thermal, stock's pm8350_tz: GPU, gold and prime
+  at their lowest frequency when the PMIC die passes 95 C.
+
+Stock's CPU isolation and hotplug at these trips have no mainline cooling
+device and are left out.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+index a7c6a79..f810240 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+@@ -11,6 +11,7 @@
+ 
+ #include <dt-bindings/gpio/gpio.h>
+ #include <dt-bindings/iio/qcom,spmi-adc7-pm8350.h>
++#include <dt-bindings/iio/qcom,spmi-adc7-pmk8350.h>
+ #include <dt-bindings/input/gpio-keys.h>
+ #include <dt-bindings/leds/common.h>
+ #include <dt-bindings/media/video-interfaces.h>
+@@ -1109,6 +1110,24 @@
+ 		qcom,pre-scaling = <1 1>;
+ 		qcom,ratiometric;
+ 	};
++
++	/* stock's skin-msm-therm, the sensor its skin policy runs on */
++	channel@144 {
++		reg = <PM8350_ADC7_AMUX_THM1_100K_PU(1)>;
++		label = "skin_msm_thm";
++		qcom,hw-settle-time = <200>;
++		qcom,pre-scaling = <1 1>;
++		qcom,ratiometric;
++	};
++
++	/* the crystal's thermistor, stock's xo-therm */
++	channel@44 {
++		reg = <PMK8350_ADC7_AMUX_THM1_100K_PU>;
++		label = "xo_therm";
++		qcom,hw-settle-time = <200>;
++		qcom,pre-scaling = <1 1>;
++		qcom,ratiometric;
++	};
+ };
+ 
+ /* the same thermistors as thermal sensors: thresholds raise interrupts */
+@@ -1142,6 +1161,20 @@
+ 		qcom,hw-settle-time-us = <200>;
+ 		qcom,ratiometric;
+ 	};
++
++	skin-msm-thm@4 {
++		reg = <4>;
++		io-channels = <&pmk8350_vadc PM8350_ADC7_AMUX_THM1_100K_PU(1)>;
++		qcom,hw-settle-time-us = <200>;
++		qcom,ratiometric;
++	};
++
++	xo-thm@5 {
++		reg = <5>;
++		io-channels = <&pmk8350_vadc PMK8350_ADC7_AMUX_THM1_100K_PU>;
++		qcom,hw-settle-time-us = <200>;
++		qcom,ratiometric;
++	};
+ };
+ 
+ /*
+@@ -1244,6 +1277,163 @@
+ 				};
+ 			};
+ 		};
++
++		/*
++		 * Skin. Stock's kernel only exposes skin-msm-therm to user space;
++		 * Samsung's framework (SSRM) throttles from its table for this model,
++		 * siop_b2q_sm8350.xml in SamsungDeviceHealthManagerService. Its
++		 * default AP limits, with its default 2 C gap as hysteresis:
++		 *   38 C: CPUFreqMax 1555200, GPUFreqMax 443 MHz
++		 *   42 C: CPUFreqMax 1420800
++		 *   44 C: CPUFreqMax 1075200
++		 *   47 C: CPUFreqMax 854400, GPUFreqMax 315 MHz
++		 * CPUFreqMax caps the gold and prime clusters at the highest OPP not
++		 * above it; the states below are those OPPs counted from the top
++		 * (gold 1555200/1324800/1075200/844800, prime 1555200/1420800/
++		 * 1075200/844800; GPU 443/315 MHz). Fixed states per trip, so the
++		 * caps are exactly stock's, and the ADC-TM interrupts drive the zone.
++		 */
++		skin-thermal {
++			thermal-sensors = <&pmk8350_adc_tm 4>;
++
++			trips {
++				skin_38: skin-38 {
++					temperature = <38000>;
++					hysteresis = <2000>;
++					type = "passive";
++				};
++
++				skin_42: skin-42 {
++					temperature = <42000>;
++					hysteresis = <2000>;
++					type = "passive";
++				};
++
++				skin_44: skin-44 {
++					temperature = <44000>;
++					hysteresis = <2000>;
++					type = "passive";
++				};
++
++				skin_47: skin-47 {
++					temperature = <47000>;
++					hysteresis = <2000>;
++					type = "passive";
++				};
++			};
++
++			cooling-maps {
++				map-gold-38 {
++					trip = <&skin_38>;
++					cooling-device = <&cpu4 8 8>;
++				};
++
++				map-prime-38 {
++					trip = <&skin_38>;
++					cooling-device = <&cpu7 12 12>;
++				};
++
++				map-gpu-38 {
++					trip = <&skin_38>;
++					cooling-device = <&gpu 7 7>;
++				};
++
++				map-gold-42 {
++					trip = <&skin_42>;
++					cooling-device = <&cpu4 10 10>;
++				};
++
++				map-prime-42 {
++					trip = <&skin_42>;
++					cooling-device = <&cpu7 13 13>;
++				};
++
++				map-gold-44 {
++					trip = <&skin_44>;
++					cooling-device = <&cpu4 12 12>;
++				};
++
++				map-prime-44 {
++					trip = <&skin_44>;
++					cooling-device = <&cpu7 16 16>;
++				};
++
++				map-gold-47 {
++					trip = <&skin_47>;
++					cooling-device = <&cpu4 14 14>;
++				};
++
++				map-prime-47 {
++					trip = <&skin_47>;
++					cooling-device = <&cpu7 18 18>;
++				};
++
++				map-gpu-47 {
++					trip = <&skin_47>;
++					cooling-device = <&gpu 9 9>;
++				};
++			};
++		};
++
++		/*
++		 * Stock's xo-therm-step: at 78 C (back at 70) the gold and prime
++		 * clusters go to their lowest frequency; at 80 C (back at 70) stock
++		 * also hotplugs CPUs 4-7, which has no mainline cooling device, so
++		 * that trip only holds the same limit.
++		 */
++		xo-thermal {
++			thermal-sensors = <&pmk8350_adc_tm 5>;
++
++			trips {
++				xo_config0: xo-config0 {
++					temperature = <78000>;
++					hysteresis = <8000>;
++					type = "passive";
++				};
++
++				xo_config1: xo-config1 {
++					temperature = <80000>;
++					hysteresis = <10000>;
++					type = "passive";
++				};
++			};
++
++			cooling-maps {
++				map-gold {
++					trip = <&xo_config0>;
++					cooling-device = <&cpu4 15 15>;
++				};
++
++				map-prime {
++					trip = <&xo_config0>;
++					cooling-device = <&cpu7 18 18>;
++				};
++			};
++		};
++	};
++};
++
++/*
++ * Stock's pm8350_tz cooling: when the PMIC die passes 95 C, the GPU and the
++ * gold and prime clusters go to their lowest frequency (stock also isolates
++ * CPUs 4-7).
++ */
++&pm8350_thermal {
++	cooling-maps {
++		map-gpu {
++			trip = <&pm8350_trip0>;
++			cooling-device = <&gpu 9 9>;
++		};
++
++		map-gold {
++			trip = <&pm8350_trip0>;
++			cooling-device = <&cpu4 15 15>;
++		};
++
++		map-prime {
++			trip = <&pm8350_trip0>;
++			cooling-device = <&cpu7 18 18>;
++		};
+ 	};
+ };
+ 

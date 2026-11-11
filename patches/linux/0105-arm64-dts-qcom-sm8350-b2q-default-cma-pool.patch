@@ -1,0 +1,43 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] arm64: dts: qcom: sm8350-samsung-b2q: 384 MiB default CMA pool
+
+Give the board a linux,cma node as stock has, with 384 MiB instead of
+stock's 32 MiB. Stock hands cameras ION's system heap; with mainline,
+libcamera's software ISP allocates its output buffers from the CMA heap,
+and the 32 MiB default fails at 1080p and full resolution (four
+full-resolution RGB frames from the IMX563 are about 190 MiB). The pool
+is reusable and, as stock's, below 0xdfffffff.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+index 1f06a0b..a7c6a79 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
++++ b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
+@@ -161,6 +161,24 @@
+ 	};
+ 
+ 	reserved-memory {
++		/*
++		 * The default CMA pool, stock's linux,cma node with more room. Stock
++		 * keeps 32 MiB here and gives cameras ION's system heap; libcamera's
++		 * software ISP allocates its output from the CMA heap, and four
++		 * full-resolution RGB frames from the IMX563 alone are about 190 MiB.
++		 * Reusable, so the pages serve movable allocations until a device
++		 * needs them. Below 0xdfffffff as stock's, where 0x9dd00000-0xb96fffff
++		 * is free RAM.
++		 */
++		linux,cma {
++			compatible = "shared-dma-pool";
++			alloc-ranges = <0x0 0x00000000 0x0 0xdfffffff>;
++			reusable;
++			alignment = <0x0 0x400000>;
++			size = <0x0 0x18000000>;
++			linux,cma-default;
++		};
++
+ 		cdsp_secure_heap: memory@80c00000 {
+ 			reg = <0 0x80c00000 0 0x600000>;
+ 			no-map;
