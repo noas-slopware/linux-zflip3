@@ -1,0 +1,51 @@
+From 0ffbcd57f1b2c0fd843dc55aafb8c48386a8b58e Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Wed, 11 Nov 2026 16:27:57 +0900
+Subject: [PATCH] wwan: apply the MTU of an IPv6 bearer
+
+ModemManager reports a bearer's MTU in each IP config, and NetworkManager
+applied only the IPv4 one. On an IPv6-only bearer (LG U+ in Korea, with a
+1400-byte MTU) the data link kept its 1496-byte default, so every larger
+IPv6 packet, and every full-size IPv4 packet through a CLAT, was lost on
+the way. Apply the IPv6 config's MTU the same way.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ src/core/devices/wwan/nm-modem-broadband.c | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/src/core/devices/wwan/nm-modem-broadband.c b/src/core/devices/wwan/nm-modem-broadband.c
+index 4bd0a45..b2ee2ff 100644
+--- a/src/core/devices/wwan/nm-modem-broadband.c
++++ b/src/core/devices/wwan/nm-modem-broadband.c
+@@ -1178,6 +1178,7 @@ stage3_ip_config_start(NMModem *modem, int addr_family, NMModemIPMethod ip_metho
+         NMPlatformIP6Address address;
+         NMPlatformIP6Address gw;
+         const char          *gw_string;
++        guint32              mtu_n;
+ 
+         address_string = mm_bearer_ip_config_get_address(self->_priv.ipv6_config);
+         if (!address_string) {
+@@ -1285,6 +1286,19 @@ stage3_ip_config_start(NMModem *modem, int addr_family, NMModemIPMethod ip_metho
+                 _LOGI("  DNS %s", dns[i]);
+             }
+         }
++
++#if MM_CHECK_VERSION(1, 4, 0)
++        /*
++         * An IPv6-only bearer has its MTU only here, and the network means it:
++         * on a bearer that says 1400 the link otherwise stays at its default
++         * (1496 for a QMAP mux) and every larger packet is lost on the way.
++         */
++        mtu_n = mm_bearer_ip_config_get_mtu(self->_priv.ipv6_config);
++        if (mtu_n) {
++            nm_l3_config_data_set_mtu(l3cd, mtu_n);
++            _LOGI("  MTU %u", mtu_n);
++        }
++#endif
+     }
+ 
+ out:
+-- 
+2.56.0
+
