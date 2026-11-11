@@ -3,16 +3,22 @@ Subject: [PATCH] arm64: dts: qcom: sm8350-b2q: fast wireless charging
 
 Stock's CV and full foreign object detection gains (fod_list pad_0x00)
 and its input limits on a Samsung fast wireless pad: 600 mA at 10 V
-(HV_WIRELESS), 500 mA until then (PREPARE_WIRELESS_HV).
+(HV_WIRELESS), 500 mA until then (PREPARE_WIRELESS_HV), and 5.5 V from
+38.5 C of battery to 37.5 C.
+
+The wireless charging limit at the battery's first trip was stock's
+wpc_high_temp, 37 C back at 35 C, which is for WC 2.0 pads only. Every
+other pad gets non_wc20_wpc_high_temp, 38.5 C back at 37.5 C
+(sec_bat_check_wpc_temp()); the trip is that now.
 
 Signed-off-by: Noa Himesaka <himesaka@noa.codes>
 Assisted-by: Claude:claude-opus-5-5
 ---
 diff --git a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
-index 27ee9ca..f694d25 100644
+index 27ee9ca..06c1aab 100644
 --- a/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
 +++ b/arch/arm64/boot/dts/qcom/sm8350-samsung-b2q.dts
-@@ -423,11 +423,21 @@
+@@ -423,11 +423,24 @@
  			pinctrl-0 = <&wpc_det_state &mfc_int_state &wpc_en_state>;
  			pinctrl-names = "default";
  
@@ -32,6 +38,30 @@ index 27ee9ca..f694d25 100644
 +			 */
 +			idt,hv-input-current-microamp = <600000>;
 +			idt,hv-prepare-input-current-microamp = <500000>;
++			/* non_wc20_wpc_high_temp: 5.5 V at 38.5 C, 10 V again at 37.5 */
++			idt,hv-hot-millicelsius = <38500>;
++			idt,hv-hot-recovery-millicelsius = <37500>;
  
  			/* the charger's UNO boost powers it to transmit */
  			uno-supply = <&max77705_uno>;
+@@ -1194,7 +1207,8 @@
+  * caps in maxim,thermal-*-current-limits-microamp, level 3 stops charging.
+  *
+  * batt-thermal, wpc_thm (stock's battery temperature):
+- *   37 C (wpc_high_temp, back at 35): wireless level 1, 600 mA in, 1000 mA
++ *   38.5 C (non_wc20_wpc_high_temp, back at 37.5): wireless level 1, 600 mA
++ *   in, 1000 mA (wpc_high_temp, 37/35, is for WC 2.0 pads, not supported)
+  *   42 C (normal_warm_thresh): both level 2, 1050 mA wired, 650 mA wireless
+  *   50 C (warm_overheat_thresh): both stop
+  * chg-thermal, chg_thm:
+@@ -1218,8 +1232,8 @@
+ 
+ 			trips {
+ 				batt_hot: batt-hot {
+-					temperature = <37000>;
+-					hysteresis = <2000>;
++					temperature = <38500>;
++					hysteresis = <1000>;
+ 					type = "passive";
+ 				};
+ 

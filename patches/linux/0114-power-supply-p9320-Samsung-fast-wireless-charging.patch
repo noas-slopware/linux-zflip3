@@ -16,22 +16,26 @@ link. Do the same:
 - The battery decides the rest, as stock's battery driver does: CV gains
   of foreign object detection above 85 %, CS100 and the full gains once
   it is full (on any pad), and on a fast pad 5.5 V in 250 ms steps while
-  it is at 38.5 C or more (back to 10 V below 37.5 C) or full, with the
-  pad told 5 V once full.
+  it is at 38.5 C or more (back to 10 V at 37.5 C, stock's
+  non_wc20_wpc_high_temp) or full, with the pad told 5 V once full.
 
 A receiver that comes back at 10 V (a reboot on a fast pad) stays at
 10 V, as in stock. Not ported: WC 2.0 pads' authentication, LED and fan
 control of stands, and stock's per-pad ID behaviour, none of which the
 b2q device tree enables.
 
-New properties: idt,fod-cv, idt,fod-full, idt,hv-input-current-microamp
-and idt,hv-prepare-input-current-microamp.
+The packet interrupt is enabled explicitly; stock leaves it at the
+chip's default.
+
+New properties: idt,fod-cv, idt,fod-full, idt,hv-input-current-microamp,
+idt,hv-prepare-input-current-microamp, idt,hv-hot-millicelsius and
+idt,hv-hot-recovery-millicelsius.
 
 Signed-off-by: Noa Himesaka <himesaka@noa.codes>
 Assisted-by: Claude:claude-opus-5-5
 ---
 diff --git a/Documentation/devicetree/bindings/power/supply/idt,p9320.yaml b/Documentation/devicetree/bindings/power/supply/idt,p9320.yaml
-index c37016e..e437ba8 100644
+index c37016e..48239fb 100644
 --- a/Documentation/devicetree/bindings/power/supply/idt,p9320.yaml
 +++ b/Documentation/devicetree/bindings/power/supply/idt,p9320.yaml
 @@ -48,6 +48,20 @@ properties:
@@ -55,7 +59,7 @@ index c37016e..e437ba8 100644
    idt,rpp-scale:
      $ref: /schemas/types.yaml#/definitions/uint32
      default: 0x40
-@@ -59,6 +73,18 @@ properties:
+@@ -59,6 +73,28 @@ properties:
        Input current the charger may draw from the receiver on a basic
        power profile pad.
  
@@ -64,6 +68,16 @@ index c37016e..e437ba8 100644
 +    description:
 +      Input current the charger may draw from the receiver at 10 V on a
 +      Samsung fast wireless pad.
++
++  idt,hv-hot-millicelsius:
++    default: 38500
++    description:
++      Battery temperature from which the receiver drops from 10 V to 5.5 V
++      on a Samsung fast wireless pad.
++
++  idt,hv-hot-recovery-millicelsius:
++    default: 37500
++    description: Battery temperature at or below which 10 V is taken again.
 +
 +  idt,hv-prepare-input-current-microamp:
 +    default: 500000
@@ -75,7 +89,7 @@ index c37016e..e437ba8 100644
      description:
        The charger's boost output that powers the chip as a transmitter, for
 diff --git a/drivers/power/supply/p9320_charger.c b/drivers/power/supply/p9320_charger.c
-index 69a6714..c62d01f 100644
+index 69a6714..1b5bb98 100644
 --- a/drivers/power/supply/p9320_charger.c
 +++ b/drivers/power/supply/p9320_charger.c
 @@ -12,6 +12,11 @@
@@ -133,7 +147,7 @@ index 69a6714..c62d01f 100644
  /* comm modulation: CMA only */
  #define P9320_COMM_CMA			0x30
  
-@@ -122,6 +136,41 @@
+@@ -122,6 +136,35 @@
  #define P9320_EPT_OVER_TEMPERATURE	0x03
  #define P9320_ECS_CS100			0x64
  
@@ -163,19 +177,13 @@ index 69a6714..c62d01f 100644
 +/* vrect and vout at attach: already at 10 V from before a reboot */
 +#define P9320_HV_ATTACHED_MV		8500
 +#define P9320_VOUT_STEP_DOWN_MS		250
-+/*
-+ * Stock's wpc_high_temp for pads other than WC 2.0: 10 V is given up at
-+ * 38.5 C of battery and taken again below 37.5 C (sec_battery_thermal.c).
-+ */
-+#define P9320_HV_HOT			385	/* 0.1 C */
-+#define P9320_HV_HOT_RECOVER		375
 +/* wireless_cc_cv: the foreign object gains switch to CV at 85 % */
 +#define P9320_FOD_CV_CAPACITY		85
 +
  /*
   * IEC power-loss foreign object check, stock's iec_data: 10 s after the
   * interrupt, three readings a second apart that agree; up to 700 is fine,
-@@ -160,6 +209,39 @@ struct p9320 {
+@@ -160,6 +203,41 @@ struct p9320 {
  	u32 rpp_scale;
  	u8 fod[P9320_FOD_LEN];
  	bool have_fod;
@@ -185,6 +193,8 @@ index 69a6714..c62d01f 100644
 +	bool have_fod_full;
 +	u32 hv_input_ua;
 +	u32 hv_prepare_input_ua;
++	int hv_hot;			/* 0.1 C of battery */
++	int hv_hot_recover;
 +	unsigned int vout_mv;
 +
 +	/* Samsung fast wireless */
@@ -215,7 +225,7 @@ index 69a6714..c62d01f 100644
  
  	/* transmitter */
  	struct regulator *uno;
-@@ -205,12 +287,109 @@ static int p9320_set_vout(struct p9320 *chip, unsigned int mv)
+@@ -205,12 +283,109 @@ static int p9320_set_vout(struct p9320 *chip, unsigned int mv)
  
  	ret = regmap_write(chip->regmap, P9320_VOUT_SET,
  			   (mv - P9320_VOUT_MIN_MV) / P9320_VOUT_STEP_MV);
@@ -326,16 +336,43 @@ index 69a6714..c62d01f 100644
  /*
   * What stock's mfc_wpc_det_work() does when a pad shows up: 5.5 V out, the
   * mode interrupt on, the 17 V clamp, a 1.6 A limit, CMA modulation, the CC
-@@ -219,7 +398,7 @@ static int p9320_set_vout(struct p9320 *chip, unsigned int mv)
+@@ -218,8 +393,8 @@ static int p9320_set_vout(struct p9320 *chip, unsigned int mv)
+  */
  static int p9320_configure(struct p9320 *chip)
  {
- 	unsigned int id, rev, major, minor, mode;
+-	unsigned int id, rev, major, minor, mode;
 -	int ret, i;
++	unsigned int id, rev, major, minor, mode, enables;
 +	int ret;
  
  	ret = regmap_read(chip->regmap, P9320_CHIP_ID, &id);
  	if (ret)
-@@ -270,14 +449,9 @@ static int p9320_configure(struct p9320 *chip)
+@@ -242,11 +417,24 @@ static int p9320_configure(struct p9320 *chip)
+ 	if (ret)
+ 		return ret;
+ 
++	if (!p9320_read16(chip, P9320_INT_ENABLE_L, &enables))
++		dev_dbg(chip->dev, "interrupt enables 0x%04x\n", enables);
++
+ 	ret = regmap_set_bits(chip->regmap, P9320_INT_ENABLE_L,
+ 			      P9320_STAT_OP_MODE);
+ 	if (ret)
+ 		return ret;
+ 
++	/*
++	 * Packets from the pad (its ID, the 10 V offer). Stock relies on the
++	 * chip's default for this one; set it so that a default does not
++	 * decide whether fast charging works.
++	 */
++	ret = regmap_set_bits(chip->regmap, P9320_INT_ENABLE_H,
++			      P9320_STAT_TRX_DATA >> 8);
++	if (ret)
++		return ret;
++
+ 	ret = regmap_write(chip->regmap, P9320_RX_OV_CLAMP, P9320_OV_CLAMP_17V);
+ 	if (ret)
+ 		return ret;
+@@ -270,14 +458,9 @@ static int p9320_configure(struct p9320 *chip)
  		 mode == P9320_MODE_PMA_SR1 || mode == P9320_MODE_PMA_SR1E ?
  		 "PMA" : "Qi");
  
@@ -353,7 +390,7 @@ index 69a6714..c62d01f 100644
  
  	/* stock lets the chip settle 5 ms before the RPP scale */
  	usleep_range(5000, 6000);
-@@ -288,6 +462,52 @@ static void p9320_service_int(struct p9320 *chip);
+@@ -288,6 +471,52 @@ static void p9320_service_int(struct p9320 *chip);
  static const char *p9320_tx_int(struct p9320 *chip, unsigned int src,
  				unsigned int status);
  
@@ -406,7 +443,7 @@ index 69a6714..c62d01f 100644
  static void p9320_update(struct p9320 *chip)
  {
  	bool present = gpiod_get_value_cansleep(chip->det_gpio) > 0;
-@@ -306,6 +526,8 @@ static void p9320_update(struct p9320 *chip)
+@@ -306,6 +535,8 @@ static void p9320_update(struct p9320 *chip)
  			chip->online = false;
  			chip->configured = false;
  			chip->input_ua = 0;
@@ -415,7 +452,7 @@ index 69a6714..c62d01f 100644
  			changed = true;
  			dev_info(chip->dev, "pad removed\n");
  		}
-@@ -315,6 +537,7 @@ static void p9320_update(struct p9320 *chip)
+@@ -315,6 +546,7 @@ static void p9320_update(struct p9320 *chip)
  	if (!chip->online) {
  		chip->online = true;
  		chip->attach_tries = 0;
@@ -423,7 +460,7 @@ index 69a6714..c62d01f 100644
  		/* the chip delivers 5 V by itself; this is stock's BPP limit */
  		chip->input_ua = chip->bpp_input_ua;
  		changed = true;
-@@ -327,6 +550,7 @@ static void p9320_update(struct p9320 *chip)
+@@ -327,6 +559,7 @@ static void p9320_update(struct p9320 *chip)
  	if (!ret) {
  		chip->configured = true;
  		changed = true;
@@ -431,7 +468,7 @@ index 69a6714..c62d01f 100644
  		/* an interrupt raised before this, while unserviced, holds INT low */
  		p9320_service_int(chip);
  	} else if (ret != -ENODEV &&
-@@ -344,6 +568,275 @@ out:
+@@ -344,6 +577,276 @@ out:
  		power_supply_changed(chip->psy);
  }
  
@@ -671,7 +708,8 @@ index 69a6714..c62d01f 100644
 +	}
 +
 +	if (bat.temp != INT_MIN) {
-+		hot = bat.temp >= (chip->hot ? P9320_HV_HOT_RECOVER : P9320_HV_HOT);
++		hot = chip->hot ? bat.temp > chip->hv_hot_recover :
++				  bat.temp >= chip->hv_hot;
 +		if (hot != chip->hot) {
 +			chip->hot = hot;
 +			changed |= p9320_apply_hv(chip);
@@ -707,7 +745,7 @@ index 69a6714..c62d01f 100644
  static void p9320_attach_work(struct work_struct *work)
  {
  	struct p9320 *chip = container_of(work, struct p9320, attach_work.work);
-@@ -706,6 +1199,13 @@ static void p9320_service_int(struct p9320 *chip)
+@@ -706,6 +1209,13 @@ static void p9320_service_int(struct p9320 *chip)
  
  		if (src & P9320_STAT_OP_MODE)
  			dev_dbg(chip->dev, "op mode 0x%02x\n", status);
@@ -721,7 +759,15 @@ index 69a6714..c62d01f 100644
  		if (src & (P9320_STAT_OVER_TEMP | P9320_STAT_OVER_CURR |
  			   P9320_STAT_OVER_VOL))
  			dev_warn(chip->dev, "receiver protection: status 0x%04x\n",
-@@ -933,6 +1433,12 @@ static int p9320_probe(struct i2c_client *client)
+@@ -900,6 +1410,7 @@ static int p9320_probe(struct i2c_client *client)
+ 	struct power_supply_config cfg = {};
+ 	struct p9320 *chip;
+ 	int irq, ret;
++	u32 val;
+ 
+ 	chip = devm_kzalloc(dev, sizeof(*chip), GFP_KERNEL);
+ 	if (!chip)
+@@ -933,6 +1444,22 @@ static int p9320_probe(struct i2c_client *client)
  	if (device_property_read_u32(dev, "idt,bpp-input-current-microamp",
  				     &chip->bpp_input_ua))
  		chip->bpp_input_ua = 800000;
@@ -731,10 +777,20 @@ index 69a6714..c62d01f 100644
 +	if (device_property_read_u32(dev, "idt,hv-prepare-input-current-microamp",
 +				     &chip->hv_prepare_input_ua))
 +		chip->hv_prepare_input_ua = 500000;
++	/*
++	 * Stock's non_wc20_wpc_high_temp: on a fast pad, 5.5 V from 38.5 C of
++	 * battery until it is back at 37.5 C (sec_bat_check_wpc_temp()).
++	 */
++	if (device_property_read_u32(dev, "idt,hv-hot-millicelsius", &val))
++		val = 38500;
++	chip->hv_hot = val / 100;
++	if (device_property_read_u32(dev, "idt,hv-hot-recovery-millicelsius", &val))
++		val = 37500;
++	chip->hv_hot_recover = val / 100;
  	if (device_property_read_u32(dev, "idt,rpp-scale", &chip->rpp_scale))
  		chip->rpp_scale = 0x40;
  	ret = device_property_count_u8(dev, "idt,fod");
-@@ -942,6 +1448,15 @@ static int p9320_probe(struct i2c_client *client)
+@@ -942,6 +1469,15 @@ static int p9320_probe(struct i2c_client *client)
  								P9320_FOD_LEN);
  	else if (ret != -EINVAL)
  		dev_warn(dev, "idt,fod needs %d bytes, ignored\n", P9320_FOD_LEN);
@@ -750,7 +806,22 @@ index 69a6714..c62d01f 100644
  
  	/* the transmitter needs the charger's UNO boost */
  	chip->uno = devm_regulator_get_optional(dev, "uno");
-@@ -966,6 +1481,26 @@ static int p9320_probe(struct i2c_client *client)
+@@ -961,11 +1497,32 @@ static int p9320_probe(struct i2c_client *client)
+ 		return dev_err_probe(dev, PTR_ERR(chip->psy),
+ 				     "cannot register the power supply\n");
+ 
++	/* after the works below are cancelled, which can queue it */
++	INIT_WORK(&chip->rx_check_work, p9320_rx_check_work);
++	chip->rx_nb.notifier_call = p9320_rx_notify;
++	ret = power_supply_reg_notifier(&chip->rx_nb);
++	if (ret)
++		return ret;
++	ret = devm_add_action_or_reset(dev, p9320_rx_remove, chip);
++	if (ret)
++		return ret;
++
+ 	/* cancelled before the power supply goes away */
+ 	ret = devm_delayed_work_autocancel(dev, &chip->attach_work,
  					   p9320_attach_work);
  	if (ret)
  		return ret;
@@ -763,15 +834,6 @@ index 69a6714..c62d01f 100644
 +	if (ret)
 +		return ret;
 +	ret = devm_delayed_work_autocancel(dev, &chip->hv_work, p9320_hv_work);
-+	if (ret)
-+		return ret;
-+
-+	INIT_WORK(&chip->rx_check_work, p9320_rx_check_work);
-+	chip->rx_nb.notifier_call = p9320_rx_notify;
-+	ret = power_supply_reg_notifier(&chip->rx_nb);
-+	if (ret)
-+		return ret;
-+	ret = devm_add_action_or_reset(dev, p9320_rx_remove, chip);
 +	if (ret)
 +		return ret;
  

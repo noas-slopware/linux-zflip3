@@ -3,23 +3,24 @@ Subject: [PATCH] power: supply: max77705: follow USB PD power role swaps
 
 The USB-C block runs USB PD itself and reports each step of a power role
 swap with PDMsgI and a code in PD_STATUS0. The Type-C state does not
-change in a swap, so no CC interrupt comes. A dual-role laptop that
-attached as a sink (the phone boosting VBUS) and then swapped to source
-would leave the boost on against its own VBUS, and the phone would not
-charge from it. An older tree polled the port every second while OTG was
-on for this.
+change in a swap, so no CC interrupt comes, and this driver ignored
+PDMsgI: a dual-role partner that attached as a sink (the phone boosting
+VBUS) and then swapped to source would find the boost still on against
+its own VBUS. Not seen on the phone yet; it is what stock handles here,
+and one candidate for an older tree's "a source plugged in during OTG
+does not always raise a CC interrupt".
 
 Do what stock max77705_pd.c does: on PRSWAP_SRCTOSWAP/SWAPTOSNK turn the
 boost off, on PRSWAP_SWAPTOSRC turn it on, and keep the data role, which
 a DR_Swap changes through the DataRole interrupt. The swapped role holds
 until the partner detaches, because CCStat keeps showing the role of the
-attach.
+attach; then the phone is a USB device again.
 
 Signed-off-by: Noa Himesaka <himesaka@noa.codes>
 Assisted-by: Claude:claude-opus-5-5
 ---
 diff --git a/drivers/power/supply/max77705_charger.c b/drivers/power/supply/max77705_charger.c
-index ed257cc..056ee07 100644
+index ed257cc..515fbd8 100644
 --- a/drivers/power/supply/max77705_charger.c
 +++ b/drivers/power/supply/max77705_charger.c
 @@ -28,7 +28,8 @@
@@ -44,13 +45,22 @@ index ed257cc..056ee07 100644
  
  	max77705_uno_force_off(chg, 0, "charger going away");
  
-@@ -1470,13 +1472,18 @@ static int __max77705_charger_update_port(struct max77705_charger_data *chg)
+@@ -1470,13 +1472,27 @@ static int __max77705_charger_update_port(struct max77705_charger_data *chg)
  	dev_dbg(chg->dev, "update_port: BC 0x%02x CC0 0x%02x PD1 0x%02x\n",
  		status, cc_status0, pd_status1);
  
-+	/* a PD power role swap lasts until the partner is gone */
-+	if (!cc_pin && cc_stat == MAX77705_CC_NO_CONN)
++	/*
++	 * A PD power role swap lasts until the partner is gone. After a swap
++	 * to sink the boost is already off and nothing else puts the data
++	 * role back: the next cable must find the phone a device again.
++	 */
++	if (!cc_pin && cc_stat == MAX77705_CC_NO_CONN &&
++	    chg->pr_role != MAX77705_PR_FROM_CC) {
++		if (chg->pr_role == MAX77705_PR_SWAPPED_SINK)
++			chg->dr_detach = true;
 +		chg->pr_role = MAX77705_PR_FROM_CC;
++		queue_work(chg->wqueue, &chg->dr_work);
++	}
 +
  	/*
  	 * A charger, laptop or other source reports CCStat = SINK. The phone
@@ -64,7 +74,7 @@ index ed257cc..056ee07 100644
  		if (chg->otg_requested) {
  			chg->otg_requested = false;
  			queue_work(chg->wqueue, &chg->otg_work);
-@@ -1490,6 +1497,8 @@ static int __max77705_charger_update_port(struct max77705_charger_data *chg)
+@@ -1490,6 +1506,8 @@ static int __max77705_charger_update_port(struct max77705_charger_data *chg)
  			chg->otg_requested = false;
  			queue_work(chg->wqueue, &chg->otg_work);
  		}
@@ -73,7 +83,7 @@ index ed257cc..056ee07 100644
  	} else if (chg->otg_allowed && cc_stat == MAX77705_CC_SOURCE) {
  		/* the MUIC's own debounced verdict: power the sink now */
  		chg->otg_requested = true;
-@@ -1642,15 +1651,17 @@ static void max77705_otg_work(struct work_struct *work)
+@@ -1642,15 +1660,17 @@ static void max77705_otg_work(struct work_struct *work)
  	struct max77705_charger_data *chg =
  		container_of(work, struct max77705_charger_data, otg_work);
  
@@ -93,7 +103,7 @@ index ed257cc..056ee07 100644
  	if (ret) {
  		/*
  		 * Drop the request so update_port() applies the sink state
-@@ -1707,7 +1718,8 @@ static void max77705_otg_attach_work(struct work_struct *work)
+@@ -1707,7 +1727,8 @@ static void max77705_otg_attach_work(struct work_struct *work)
  	mutex_unlock(&chg->port_lock);
  }
  
@@ -103,7 +113,7 @@ index ed257cc..056ee07 100644
  {
  	u8 sw_data = MAX77705_USBC_CONTROL1_USB;
  	unsigned int mode;
-@@ -1767,7 +1779,7 @@ static int max77705_charger_set_otg(struct max77705_charger_data *chg, bool enab
+@@ -1767,7 +1788,7 @@ static int max77705_charger_set_otg(struct max77705_charger_data *chg, bool enab
  			return ret;
  		}
  
@@ -112,7 +122,7 @@ index ed257cc..056ee07 100644
  			ret = usb_role_switch_set_role(chg->role_sw, USB_ROLE_HOST);
  			if (ret) {
  				dev_err(chg->dev, "failed to switch to host: %d\n", ret);
-@@ -1789,7 +1801,7 @@ static int max77705_charger_set_otg(struct max77705_charger_data *chg, bool enab
+@@ -1789,7 +1810,7 @@ static int max77705_charger_set_otg(struct max77705_charger_data *chg, bool enab
  		if (ret)
  			dev_err(chg->dev, "failed to restore charger mode: %d\n", ret);
  
@@ -121,7 +131,7 @@ index ed257cc..056ee07 100644
  			usb_role_switch_set_role(chg->role_sw, USB_ROLE_DEVICE);
  
  		chg->otg_on = false;
-@@ -2038,6 +2050,74 @@ static void max77705_pd_work(struct work_struct *work)
+@@ -2038,6 +2059,83 @@ static void max77705_pd_work(struct work_struct *work)
  	max77705_charger_set_fast(chg, in_ma * 1000, chg_ua);
  }
  
@@ -176,12 +186,21 @@ index ed257cc..056ee07 100644
 +	struct max77705_charger_data *chg =
 +		container_of(work, struct max77705_charger_data, dr_work);
 +	unsigned int pd_status1;
-+	bool swapped;
++	bool swapped, detach;
 +
 +	mutex_lock(&chg->port_lock);
 +	swapped = chg->pr_role != MAX77705_PR_FROM_CC;
++	detach = chg->dr_detach;
++	chg->dr_detach = false;
 +	mutex_unlock(&chg->port_lock);
-+	if (!swapped || !chg->role_sw)
++	if (!chg->role_sw)
++		return;
++
++	if (detach) {
++		usb_role_switch_set_role(chg->role_sw, USB_ROLE_DEVICE);
++		return;
++	}
++	if (!swapped)
 +		return;
 +
 +	if (regmap_read(chg->regmap_muic, MAX77705_USBC_REG_PD_STATUS1, &pd_status1))
@@ -196,7 +215,7 @@ index ed257cc..056ee07 100644
  static irqreturn_t max77705_charger_usbc_irq(int irq, void *data)
  {
  	struct max77705_charger_data *chg = data;
-@@ -2069,6 +2149,12 @@ static irqreturn_t max77705_charger_usbc_irq(int irq, void *data)
+@@ -2069,6 +2167,12 @@ static irqreturn_t max77705_charger_usbc_irq(int irq, void *data)
  	    (pd_status & MAX77705_USBC_PD_INT_DATAROLE))
  		max77705_charger_update_port(chg);
  
@@ -209,7 +228,7 @@ index ed257cc..056ee07 100644
  	if (pd_status & MAX77705_USBC_PD_INT_PSRDY)
  		queue_work(chg->wqueue, &chg->pd_work);
  
-@@ -2447,6 +2533,10 @@ static int max77705_charger_probe(struct i2c_client *i2c)
+@@ -2447,6 +2551,10 @@ static int max77705_charger_probe(struct i2c_client *i2c)
  	if (ret)
  		return ret;
  	ret = devm_work_autocancel(dev, &chg->otg_work, max77705_otg_work);
@@ -221,7 +240,7 @@ index ed257cc..056ee07 100644
  		return ret;
  	ret = devm_delayed_work_autocancel(dev, &chg->otg_delay_work,
 diff --git a/include/linux/power/max77705_charger.h b/include/linux/power/max77705_charger.h
-index 7ecc4ed..010bd8f 100644
+index 7ecc4ed..9d810da 100644
 --- a/include/linux/power/max77705_charger.h
 +++ b/include/linux/power/max77705_charger.h
 @@ -153,6 +153,7 @@
@@ -245,7 +264,7 @@ index 7ecc4ed..010bd8f 100644
  #define MAX77705_USBC_PD_STATUS1_DATAROLE	BIT(7)
  #define MAX77705_USBC_PD_STATUS1_PSRDY	BIT(4)
  #define MAX77705_USBC_REG_OPCODE	0x21
-@@ -300,6 +307,15 @@ struct max77705_charger_data {
+@@ -300,6 +307,16 @@ struct max77705_charger_data {
  	bool			otg_attach_settled;	/* the debounce ran out */
  	u8			otg_attach_cc0;		/* CC_STATUS0 it is timing */
  	u8			otg_prev_mode;
@@ -258,10 +277,11 @@ index 7ecc4ed..010bd8f 100644
 +		MAX77705_PR_SWAPPED_SINK,
 +		MAX77705_PR_SWAPPED_SOURCE,
 +	}			pr_role;
++	bool			dr_detach;	/* a swapped sink's partner left */
  	struct mutex		port_lock;	/* update_port() and the OTG request */
  	/* the CNFG_00 mode field: charge enable, OTG and UNO */
  	struct mutex		mode_lock;
-@@ -307,6 +323,7 @@ struct max77705_charger_data {
+@@ -307,6 +324,7 @@ struct max77705_charger_data {
  	bool			uno_on;
  	u8			uno_prev_mode;
  	struct work_struct	otg_work;
