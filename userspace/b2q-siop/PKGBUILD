@@ -1,0 +1,30 @@
+# Maintainer: Noa Himesaka <himesaka@noa.codes>
+# b2q: our own daemon (no Arch or AUR package exists); built from this directory.
+# The model data is not packaged: tools/extract-siop-data.py writes it from the
+# stock firmware to /usr/share/b2q-siop/model.conf.
+
+pkgname=b2q-siop
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Galaxy Z Flip3: stock's skin temperature estimate (LRP2) and SIOP CPU/GPU limits"
+arch=(aarch64)
+url="https://github.com/NoaHimesaka1873"
+license=(MIT)
+depends=(alsa-lib)
+makedepends=(gcc)
+_src=${B2Q_SIOP_SRC:-$PWD}
+
+build() {
+	cc ${CPPFLAGS} ${CFLAGS} -O2 -Wall -Wextra -o b2q-siopd "$_src/b2q-siopd.c" ${LDFLAGS} -lasound
+}
+
+check() {
+	python3 -I "$_src/test/sim.py" ./b2q-siopd /usr/share/b2q-siop/model.conf || \
+		[ ! -e /usr/share/b2q-siop/model.conf ]
+}
+
+package() {
+	install -Dm755 b2q-siopd "$pkgdir/usr/lib/b2q-siop/b2q-siopd"
+	install -Dm644 "$_src/b2q-siop.service" "$pkgdir/usr/lib/systemd/system/b2q-siop.service"
+	install -Dm644 "$_src/README.md" "$pkgdir/usr/share/doc/b2q-siop/README.md"
+}
