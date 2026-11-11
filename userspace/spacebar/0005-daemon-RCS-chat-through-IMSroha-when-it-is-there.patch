@@ -1,4 +1,4 @@
-From 28471d013e2daf51d77b1593746afedceea20196 Mon Sep 17 00:00:00 2001
+From 4de3c8d81aecfec3d1fff50853c33395280ed173 Mon Sep 17 00:00:00 2001
 From: Noa Himesaka <himesaka@noa.codes>
 Date: Wed, 11 Nov 2026 17:23:32 +0900
 Subject: [PATCH 5/6] daemon: RCS chat through IMSroha when it is there
@@ -6,7 +6,8 @@ Subject: [PATCH 5/6] daemon: RCS chat through IMSroha when it is there
 A transport next to SMS/MMS: IMSroha's codes.noa.IMSroha.Rcs on the
 system bus (imsroha-rcs, opt-in there). While the service is absent or not
 registered nothing changes. When it is registered, a 1-to-1 text to a number
-whose OPTIONS say chat goes as RCS; SendMessage refusing it, or a failed
+whose capabilities say chat (IMSroha asks: presence or OPTIONS, at most
+5 s) goes as RCS; SendMessage refusing it, or a failed
 status before it was sent, sends the same message as SMS. Received RCS
 messages are stored with transport rcs; delivered and displayed IMDNs land
 in deliveryReport and readReport; reading the chat sends the displayed
@@ -21,8 +22,8 @@ Claude-Session: https://claude.ai/code/session_01L5scTQJJDo2PTt6GBeDFah
  daemon/channellogger.h             |  12 ++-
  daemon/org.kde.spacebar.Daemon.xml |   8 ++
  daemon/rcstransport.cpp            | 150 +++++++++++++++++++++++++++++
- daemon/rcstransport.h              |  60 ++++++++++++
- 6 files changed, 320 insertions(+), 6 deletions(-)
+ daemon/rcstransport.h              |  61 ++++++++++++
+ 6 files changed, 321 insertions(+), 6 deletions(-)
  create mode 100644 daemon/rcstransport.cpp
  create mode 100644 daemon/rcstransport.h
 
@@ -270,7 +271,7 @@ index c5559ac..89955dc 100644
      <method name="ownNumber">
 diff --git a/daemon/rcstransport.cpp b/daemon/rcstransport.cpp
 new file mode 100644
-index 0000000..a20c57a
+index 0000000..6c05a6f
 --- /dev/null
 +++ b/daemon/rcstransport.cpp
 @@ -0,0 +1,150 @@
@@ -359,19 +360,19 @@ index 0000000..a20c57a
 +    }
 +    QDBusMessage call = QDBusMessage::createMethodCall(RCS_SERVICE, RCS_PATH, RCS_IFACE, SL("GetCapabilities"));
 +    call << e164;
-+    const QDBusPendingReply<QVariantMap> pending = QDBusConnection::systemBus().asyncCall(call);
++    // The message waits for this answer: not longer than a few seconds.
++    const QDBusPendingReply<QVariantMap> pending = QDBusConnection::systemBus().asyncCall(call, 5000);
 +    const QDBusPendingReply<QVariantMap> reply = co_await pending;
 +    if (!reply.isValid()) {
 +        qDebug() << "RCS: capabilities of" << e164 << reply.error().message();
++        // Unknown: SMS for a minute, then ask again.
++        m_caps.insert(e164, Caps{false, now.addSecs(60)});
 +        co_return false;
 +    }
 +    const auto caps = reply.value();
 +    const bool known = caps.value(SL("known")).toBool();
 +    const bool chat = caps.value(SL("chat")).toBool();
-+    // An unanswered query is not cached: the next message asks again.
-+    if (known) {
-+        m_caps.insert(e164, Caps{chat, now.addSecs(chat ? 86400 : 600)});
-+    }
++    m_caps.insert(e164, Caps{chat, now.addSecs(!known ? 60 : chat ? 86400 : 600)});
 +    co_return chat;
 +}
 +
@@ -426,10 +427,10 @@ index 0000000..a20c57a
 +}
 diff --git a/daemon/rcstransport.h b/daemon/rcstransport.h
 new file mode 100644
-index 0000000..c9ffd3b
+index 0000000..2d4b92b
 --- /dev/null
 +++ b/daemon/rcstransport.h
-@@ -0,0 +1,60 @@
+@@ -0,0 +1,61 @@
 +// SPDX-FileCopyrightText: 2026 Noa Himesaka <himesaka@noa.codes>
 +//
 +// SPDX-License-Identifier: GPL-2.0-only OR GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
@@ -458,8 +459,9 @@ index 0000000..c9ffd3b
 +    explicit RcsTransport(QObject *parent = nullptr);
 +
 +    bool isRegistered() const;
-+    // Whether the number can chat (OPTIONS through IMSroha), cached a day when
-+    // it can and ten minutes when it cannot.
++    // Whether the number can chat (IMSroha asks the network: presence or
++    // OPTIONS), cached a day when it can, ten minutes when it cannot, and a
++    // minute when nobody answered within 5 s.
 +    QCoro::Task<bool> canChat(const QString &e164);
 +    // The imdn.Message-ID, or nothing when RCS refused it (send it as SMS then).
 +    QCoro::Task<std::optional<QString>> send(const QString &e164, const QString &text);

@@ -1,4 +1,4 @@
-From f1187c0563f6a1a7b1cd09ba6ea03c7b787293f9 Mon Sep 17 00:00:00 2001
+From 069a9418034ccbed3caa1212ae7cab1d717082a9 Mon Sep 17 00:00:00 2001
 From: Noa Himesaka <himesaka@noa.codes>
 Date: Wed, 11 Nov 2026 17:26:34 +0900
 Subject: [PATCH 6/6] app: mark RCS messages, show when the other side is
