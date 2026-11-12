@@ -1,0 +1,131 @@
+# Maintainer: Felix Yan <felixonmars@archlinux.org>
+# Maintainer: Antonio Rojas <arojas@archlinux.org>
+# Contributor: Andrea Scarpino <andrea@archlinux.org>
+# b2q: Arch's kwin 6.8.2-2 plus the "turning screens off" sleep inhibitor fixes in this
+#      directory (see README.md): 0001 is upstream 6a7b78b40, 0002 stops waiting for
+#      non-desktop (leased) outputs, such as the cover display, to turn off. pkgrel 3 so
+#      it wins over the ports repo's 6.8.2-2.
+
+pkgname=kwin
+pkgver=6.8.2
+_dirver=$(echo $pkgver | cut -d. -f1-3)
+pkgrel=3
+pkgdesc='An easy to use, but flexible, Wayland compositor'
+arch=(x86_64 aarch64)
+url='https://kde.org/plasma-desktop/'
+license=(LGPL-2.0-or-later)
+depends=(
+  aurorae
+  breeze
+  glibc
+  iio-sensor-proxy
+  plasma-activities
+  kauth
+  kcmutils
+  kcolorscheme
+  kconfig
+  kcoreaddons
+  kcrash
+  kdbusaddons
+  kdeclarative
+  kdecoration
+  kglobalaccel
+  kglobalacceld
+  kguiaddons
+  ki18n
+  kidletime
+  kirigami
+  kitemmodels
+  knewstuff
+  knighttime
+  knotifications
+  kpackage
+  kquickcharts
+  krunner
+  kscreenlocker
+  kservice
+  ksvg
+  kwayland
+  kwidgetsaddons
+  kwindowsystem
+  kxmlgui
+  lcms2
+  libcanberra
+  libdisplay-info
+  libdrm
+  libei
+  libepoxy
+  libevdev
+  libgcc
+  libinput
+  libpipewire
+  libqaccessibilityclient-qt6
+  libstdc++
+  libxcb
+  libxcvt
+  libxkbcommon
+  mesa
+  milou
+  pipewire-session-manager
+  libplasma
+  qt6-5compat
+  qt6-base
+  qt6-declarative
+  qt6-svg
+  qt6-tools
+  systemd-libs
+  vulkan-icd-loader
+  wayland
+  xcb-util-keysyms
+  xcb-util-wm
+)
+makedepends=(
+  extra-cmake-modules
+  kdoctools
+  krunner
+  plasma-wayland-protocols
+  python
+  vulkan-headers
+  wayland-protocols
+  xorg-xwayland
+)
+optdepends=(
+  'plasma-keyboard: virtual keyboard'
+)
+groups=(
+  plasma
+)
+source=(
+  https://download.kde.org/stable/plasma/$_dirver/$pkgname-$pkgver.tar.xz{,.sig}
+  https://invent.kde.org/plasma/kwin/-/commit/c9d720793bbcef9483ab290673032d39441c0e6f.patch
+  0001-workspace-ignore-dpms-wakeups-once-the-system-is-goi.patch
+  0002-workspace-don-t-wait-for-non-desktop-outputs-to-turn.patch
+)
+sha256sums=('ea5e68d957c7d70abed97222a592d4445fda29129e20942658badd224ee138b4'
+            'SKIP'
+            '667d62447fdbc9fe0a760efee7c44e96c988384a5ad86fac49be7576d52010c2'
+            'd76a4369e17253d908bf1b1cb85ee2ff5433b2976bee38beac26216974dd24ae'
+            'cb3ca01589b0aa74d3d108588bf5385451357c5daf40cc1f9f16e055d2ffaa24')
+validpgpkeys=('E0A3EB202F8E57528E13E72FD7574483BB57B18D'  # Jonathan Esk-Riddell <jr@jriddell.org>
+              '0AAC775BB6437A8D9AF7A3ACFE0784117FBCE11D'  # Bhushan Shah <bshah@kde.org>
+              'D07BD8662C56CB291B316EB2F5675605C74E02CF'  # David Edmundson <davidedmundson@kde.org>
+              '90A968ACA84537CC27B99EAF2C8DF587A6D4AAC1'  # Nicolas Fella <nicolas.fella@kde.org>
+              '1FA881591C26B276D7A5518EEAAF29B42A678C20') # Marco Martin <notmart@gmail.com>
+
+prepare() {
+  patch -d $pkgname-$pkgver -p1 < c9d720793bbcef9483ab290673032d39441c0e6f.patch # Fix crashes
+  # b2q: release the sleep inhibitor once the screens are off (README.md)
+  patch -d $pkgname-$pkgver -Np1 < 0001-workspace-ignore-dpms-wakeups-once-the-system-is-goi.patch
+  patch -d $pkgname-$pkgver -Np1 < 0002-workspace-don-t-wait-for-non-desktop-outputs-to-turn.patch
+}
+
+build() {
+  cmake -B build  -S $pkgname-$pkgver \
+    -DKDE_INSTALL_LIBEXECDIR=lib \
+    -DBUILD_TESTING=OFF
+  cmake --build build
+}
+
+package() {
+  DESTDIR="$pkgdir" cmake --install build
+}

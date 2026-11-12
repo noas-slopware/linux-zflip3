@@ -1,0 +1,136 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ameen Al-Asady <ameenaladdin@gmail.com>
+Date: Mon, 26 Oct 2026 03:11:26 -0400
+Subject: [PATCH 1/2] workspace: ignore dpms wakeups once the system is going
+ to sleep
+
+If input arrives after PrepareForSleep(true) while the outputs are still
+turning off, requestDpmsState(On) cancels the transition but keeps the
+"turning screens off" delay inhibitor. aboutToSleep is only emitted once,
+so nothing turns the outputs off again and logind waits for
+InhibitDelayMaxSec before suspending, with the lock screen visible.
+
+The suspend can't be cancelled at that point, so ignore requests to turn
+the outputs on until logind reports that the system woke up again.
+
+(cherry picked from commit 6a7b78b40b5705d85cf64e0cc968eac18945680a,
+context adjusted for 6.8.2)
+---
+ autotests/integration/outputchanges_test.cpp | 37 ++++++++++++++++++++
+ src/workspace.cpp                            |  9 +++++
+ src/workspace.h                              |  1 +
+ 3 files changed, 47 insertions(+)
+
+diff --git a/autotests/integration/outputchanges_test.cpp b/autotests/integration/outputchanges_test.cpp
+index 3a3410b..f75d181 100644
+--- a/autotests/integration/outputchanges_test.cpp
++++ b/autotests/integration/outputchanges_test.cpp
+@@ -10,6 +10,7 @@
+ #include "core/output.h"
+ #include "core/outputbackend.h"
+ #include "core/outputconfiguration.h"
++#include "core/session.h"
+ #include "outputconfigurationstore.h"
+ #include "pointer_input.h"
+ #include "tiles/tilemanager.h"
+@@ -29,6 +30,8 @@
+ 
+ #include <ranges>
+ 
++#include <linux/input.h>
++
+ using namespace std::chrono_literals;
+ 
+ namespace KWin
+@@ -150,6 +153,7 @@ private Q_SLOTS:
+     void testAutoBrightness();
+     void testPerOutputDesktopsOutputToggle();
+     void testTemporaryDpmsHotplug();
++    void testDpmsWakeDuringSleep();
+ };
+ 
+ void OutputChangesTest::initTestCase()
+@@ -2492,6 +2496,39 @@ void OutputChangesTest::testTemporaryDpmsHotplug()
+     QCOMPARE(workspace()->dpmsState(), Workspace::DpmsState::Off);
+ }
+ 
++void OutputChangesTest::testDpmsWakeDuringSleep()
++{
++    Test::setOutputConfig({
++        Test::OutputInfo{
++            .geometry = Rect(0, 0, 1280, 1024),
++            .connectorName = QStringLiteral("TEST"),
++        },
++    });
++    workspace()->requestDpmsState(Workspace::DpmsState::On);
++    QCOMPARE(workspace()->dpmsState(), Workspace::DpmsState::On);
++
++    // the system is about to suspend, so the outputs get turned off
++    Q_EMIT kwinApp()->session()->aboutToSleep();
++    QCOMPARE(workspace()->dpmsState(), Workspace::DpmsState::AboutToTurnOff);
++
++    // user input while turning off must not wake the outputs again, otherwise
++    // the suspend would stay delayed until the inhibitor times out
++    quint32 timestamp = 1;
++    Test::pointerMotion(QPointF(100, 100), timestamp++);
++    Test::pointerButtonPressed(BTN_LEFT, timestamp++);
++    Test::pointerButtonReleased(BTN_LEFT, timestamp++);
++    QCOMPARE(workspace()->dpmsState(), Workspace::DpmsState::AboutToTurnOff);
++
++    QSignalSpy dpmsChanged(workspace(), &Workspace::dpmsStateChanged);
++    QVERIFY(dpmsChanged.wait());
++    QCOMPARE(workspace()->dpmsState(), Workspace::DpmsState::Off);
++
++    // after resuming, input wakes the outputs again
++    Q_EMIT kwinApp()->session()->awoke();
++    Test::pointerMotion(QPointF(200, 200), timestamp++);
++    QCOMPARE(workspace()->dpmsState(), Workspace::DpmsState::On);
++}
++
+ } // namespace KWin
+ 
+ WAYLANDTEST_MAIN(KWin::OutputChangesTest)
+diff --git a/src/workspace.cpp b/src/workspace.cpp
+index 57cc182..563075f 100644
+--- a/src/workspace.cpp
++++ b/src/workspace.cpp
+@@ -376,8 +376,14 @@ void Workspace::init()
+     });
+ 
+     connect(kwinApp()->session(), &Session::aboutToSleep, this, [this]() {
++        // Once the system is going to sleep, the screens must stay off. Waking
++        // them would leave the delay inhibitor open until logind times out.
++        m_sleepPending = true;
+         requestDpmsState(DpmsState::Off);
+     });
++    connect(kwinApp()->session(), &Session::awoke, this, [this]() {
++        m_sleepPending = false;
++    });
+ 
+     m_sleepInhibitor = kwinApp()->session()->delaySleep("turning screens off");
+ }
+@@ -581,6 +587,9 @@ std::expected<void, OutputError> Workspace::applyOutputConfiguration(OutputConfi
+ 
+ void Workspace::requestDpmsState(DpmsState state)
+ {
++    if (state == DpmsState::On && m_sleepPending) {
++        return;
++    }
+     const bool requestOn = state == DpmsState::On;
+     const bool isOn = m_dpms == DpmsState::On;
+     if (requestOn == isOn) {
+diff --git a/src/workspace.h b/src/workspace.h
+index 12062bc..f1be2b7 100644
+--- a/src/workspace.h
++++ b/src/workspace.h
+@@ -757,6 +757,7 @@ private:
+     QList<QString> m_recentlyRemovedDpmsOffOutputs;
+     QTimer m_dpmsTimer;
+     std::shared_ptr<FileDescriptor> m_sleepInhibitor;
++    bool m_sleepPending = false;
+ 
+ private:
+     friend Workspace *workspace();
+-- 
+2.56.0
+

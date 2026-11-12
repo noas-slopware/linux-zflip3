@@ -1,0 +1,206 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Fri, 13 Nov 2026 02:55:13 +0900
+Subject: [PATCH 2/2] workspace: don't wait for non-desktop outputs to turn off
+
+maybeUpdateDpmsState() went to Off, and released the "turning screens
+off" sleep inhibitor, only once every backend output reported DpmsMode
+Off. applyOutputChanges() leaves non-desktop outputs alone (they are for
+leasing: VR headsets, a phone's cover display), so their dpms mode never
+changes, Off is never reached, and logind waits InhibitDelayMaxSec (5 s)
+on every suspend with the lock screen up. On a Galaxy Z Flip3, whose
+cover display is leased to a client, that was every one of 125 suspends
+in a day.
+
+Skip non-desktop outputs there, and when deciding that there is no
+output to turn off at all. The virtual backend gains non-desktop outputs
+for the test, left alone by applyChanges() as the DRM backend does.
+---
+ autotests/integration/kwin_wayland_test.cpp  |  1 +
+ autotests/integration/kwin_wayland_test.h    |  1 +
+ autotests/integration/outputchanges_test.cpp | 34 ++++++++++++++++++++
+ src/backends/virtual/virtual_backend.cpp     |  2 +-
+ src/backends/virtual/virtual_backend.h       |  1 +
+ src/backends/virtual/virtual_output.cpp      |  6 ++--
+ src/backends/virtual/virtual_output.h        |  2 +-
+ src/workspace.cpp                            | 10 ++++--
+ 8 files changed, 51 insertions(+), 6 deletions(-)
+
+diff --git a/autotests/integration/kwin_wayland_test.cpp b/autotests/integration/kwin_wayland_test.cpp
+index edf2197..7539b6b 100644
+--- a/autotests/integration/kwin_wayland_test.cpp
++++ b/autotests/integration/kwin_wayland_test.cpp
+@@ -319,6 +319,7 @@ void Test::setOutputConfig(const QList<OutputInfo> &infos)
+             .edidIdentifierOverride = info.edidIdentifierOverride,
+             .connectorName = info.connectorName,
+             .mstPath = info.mstPath,
++            .nonDesktop = info.nonDesktop,
+         };
+     });
+     static_cast<VirtualBackend *>(kwinApp()->outputBackend())->setVirtualOutputs(converted);
+diff --git a/autotests/integration/kwin_wayland_test.h b/autotests/integration/kwin_wayland_test.h
+index 23ffda5..83d7290 100644
+--- a/autotests/integration/kwin_wayland_test.h
++++ b/autotests/integration/kwin_wayland_test.h
+@@ -1605,6 +1605,7 @@ struct OutputInfo
+     std::optional<QByteArray> edidIdentifierOverride;
+     std::optional<QString> connectorName;
+     std::optional<QByteArray> mstPath;
++    bool nonDesktop = false;
+ };
+ void setOutputConfig(const QList<Rect> &geometries);
+ void setOutputConfig(const QList<OutputInfo> &infos);
+diff --git a/autotests/integration/outputchanges_test.cpp b/autotests/integration/outputchanges_test.cpp
+index f75d181..6d9248a 100644
+--- a/autotests/integration/outputchanges_test.cpp
++++ b/autotests/integration/outputchanges_test.cpp
+@@ -154,6 +154,7 @@ private Q_SLOTS:
+     void testPerOutputDesktopsOutputToggle();
+     void testTemporaryDpmsHotplug();
+     void testDpmsWakeDuringSleep();
++    void testDpmsOffWithNonDesktopOutput();
+ };
+ 
+ void OutputChangesTest::initTestCase()
+@@ -2529,6 +2530,39 @@ void OutputChangesTest::testDpmsWakeDuringSleep()
+     QCOMPARE(workspace()->dpmsState(), Workspace::DpmsState::On);
+ }
+ 
++void OutputChangesTest::testDpmsOffWithNonDesktopOutput()
++{
++    // a desktop output and a non-desktop one, such as a display leased to a client
++    Test::setOutputConfig({
++        Test::OutputInfo{
++            .geometry = Rect(0, 0, 1280, 1024),
++            .connectorName = QStringLiteral("TEST"),
++        },
++        Test::OutputInfo{
++            .geometry = Rect(1280, 0, 512, 260),
++            .connectorName = QStringLiteral("LEASED"),
++            .nonDesktop = true,
++        },
++    });
++    const auto outputs = kwinApp()->outputBackend()->outputs();
++    QCOMPARE(outputs.size(), 2);
++    QVERIFY(outputs[1]->isNonDesktop());
++    workspace()->requestDpmsState(Workspace::DpmsState::On);
++    QCOMPARE(workspace()->dpmsState(), Workspace::DpmsState::On);
++
++    // turning the outputs off ends in Off, which releases the sleep inhibitor,
++    // even though the non-desktop output is not ours to turn off
++    workspace()->requestDpmsState(Workspace::DpmsState::Off);
++    QCOMPARE(workspace()->dpmsState(), Workspace::DpmsState::AboutToTurnOff);
++    QSignalSpy dpmsChanged(workspace(), &Workspace::dpmsStateChanged);
++    QVERIFY(dpmsChanged.wait());
++    QTRY_COMPARE(workspace()->dpmsState(), Workspace::DpmsState::Off);
++    QCOMPARE(outputs[0]->dpmsMode(), BackendOutput::DpmsMode::Off);
++
++    workspace()->requestDpmsState(Workspace::DpmsState::On);
++    QCOMPARE(workspace()->dpmsState(), Workspace::DpmsState::On);
++}
++
+ } // namespace KWin
+ 
+ WAYLANDTEST_MAIN(KWin::OutputChangesTest)
+diff --git a/src/backends/virtual/virtual_backend.cpp b/src/backends/virtual/virtual_backend.cpp
+index 976b507..4b4d26f 100644
+--- a/src/backends/virtual/virtual_backend.cpp
++++ b/src/backends/virtual/virtual_backend.cpp
+@@ -70,7 +70,7 @@ QList<BackendOutput *> VirtualBackend::outputs() const
+ 
+ VirtualOutput *VirtualBackend::createOutput(const OutputInfo &info)
+ {
+-    VirtualOutput *output = new VirtualOutput(this, info.internal, info.physicalSizeInMM, info.panelOrientation, info.edid, info.edidIdentifierOverride, info.connectorName, info.mstPath, info.capabilities);
++    VirtualOutput *output = new VirtualOutput(this, info.internal, info.physicalSizeInMM, info.panelOrientation, info.edid, info.edidIdentifierOverride, info.connectorName, info.mstPath, info.capabilities, info.nonDesktop);
+     output->init(info.size * info.scale, info.scale, info.modes);
+     m_outputs.append(output);
+     Q_EMIT outputAdded(output);
+diff --git a/src/backends/virtual/virtual_backend.h b/src/backends/virtual/virtual_backend.h
+index 2abe0ea..7f00c4a 100644
+--- a/src/backends/virtual/virtual_backend.h
++++ b/src/backends/virtual/virtual_backend.h
+@@ -48,6 +48,7 @@ public:
+         std::optional<QByteArray> edidIdentifierOverride;
+         std::optional<QString> connectorName;
+         std::optional<QByteArray> mstPath;
++        bool nonDesktop = false;
+     };
+     BackendOutput *addOutput(const OutputInfo &info);
+     void setVirtualOutputs(const QList<OutputInfo> &infos);
+diff --git a/src/backends/virtual/virtual_output.cpp b/src/backends/virtual/virtual_output.cpp
+index bdf2a66..5c6a1ea 100644
+--- a/src/backends/virtual/virtual_output.cpp
++++ b/src/backends/virtual/virtual_output.cpp
+@@ -19,7 +19,7 @@
+ namespace KWin
+ {
+ 
+-VirtualOutput::VirtualOutput(VirtualBackend *parent, bool internal, const QSize &physicalSizeInMM, OutputTransform panelOrientation, const QByteArray &edid, std::optional<QByteArray> edidIdentifierOverride, const std::optional<QString> &connectorName, const std::optional<QByteArray> &mstPath, BackendOutput::Capabilities capabilities)
++VirtualOutput::VirtualOutput(VirtualBackend *parent, bool internal, const QSize &physicalSizeInMM, OutputTransform panelOrientation, const QByteArray &edid, std::optional<QByteArray> edidIdentifierOverride, const std::optional<QString> &connectorName, const std::optional<QByteArray> &mstPath, BackendOutput::Capabilities capabilities, bool nonDesktop)
+     : BackendOutput()
+     , m_backend(parent)
+     , m_vsyncMonitor(std::make_unique<VsyncSource>())
+@@ -35,6 +35,7 @@ VirtualOutput::VirtualOutput(VirtualBackend *parent, bool internal, const QSize
+         .capabilities = capabilities,
+         .panelOrientation = panelOrientation,
+         .internal = internal,
++        .nonDesktop = nonDesktop,
+         .mstPath = mstPath.value_or(QByteArray()),
+     });
+ }
+@@ -80,7 +81,8 @@ void VirtualOutput::init(const QSize &pixelSize, qreal scale, const QList<Output
+ void VirtualOutput::applyChanges(const OutputConfiguration &config)
+ {
+     auto props = config.constChangeSet(this);
+-    if (!props) {
++    // as in the DRM backend: a non-desktop output is for leasing, not ours to configure
++    if (!props || isNonDesktop()) {
+         return;
+     }
+     Q_EMIT aboutToChange(props.get());
+diff --git a/src/backends/virtual/virtual_output.h b/src/backends/virtual/virtual_output.h
+index 91fa4cf..75a3ab9 100644
+--- a/src/backends/virtual/virtual_output.h
++++ b/src/backends/virtual/virtual_output.h
+@@ -24,7 +24,7 @@ class VirtualOutput : public BackendOutput
+     Q_OBJECT
+ 
+ public:
+-    explicit VirtualOutput(VirtualBackend *parent, bool internal, const QSize &physicalSizeInMM, OutputTransform panelOrientation, const QByteArray &edid, std::optional<QByteArray> edidIdentifierOverride, const std::optional<QString> &connectorName, const std::optional<QByteArray> &mstPath, BackendOutput::Capabilities capabilities);
++    explicit VirtualOutput(VirtualBackend *parent, bool internal, const QSize &physicalSizeInMM, OutputTransform panelOrientation, const QByteArray &edid, std::optional<QByteArray> edidIdentifierOverride, const std::optional<QString> &connectorName, const std::optional<QByteArray> &mstPath, BackendOutput::Capabilities capabilities, bool nonDesktop = false);
+     ~VirtualOutput() override;
+ 
+     std::expected<void, OutputError> testPresentation(const std::shared_ptr<OutputFrame> &frame) override;
+diff --git a/src/workspace.cpp b/src/workspace.cpp
+index 563075f..e8f9b37 100644
+--- a/src/workspace.cpp
++++ b/src/workspace.cpp
+@@ -613,7 +613,9 @@ void Workspace::requestDpmsState(DpmsState state)
+         m_dpmsFilter.reset();
+         m_dpmsTimer.stop();
+         m_sleepInhibitor = kwinApp()->session()->delaySleep("turning screens off");
+-    } else if (kwinApp()->outputBackend()->outputs().isEmpty()) {
++    } else if (std::ranges::none_of(kwinApp()->outputBackend()->outputs(), [](BackendOutput *output) {
++                   return !output->isNonDesktop();
++               })) {
+         // Immediately transition to dpms off, to avoid being stuck in the
+         // AboutToTurnOff state, inhibiting sleep forever.
+         m_dpms = DpmsState::Off;
+@@ -634,9 +636,13 @@ void Workspace::maybeUpdateDpmsState()
+     if (m_dpms != DpmsState::TurningOff) {
+         return;
+     }
++    // Non-desktop outputs (VR headsets, leased displays) are never turned
++    // off by us: applyOutputChanges() leaves them alone, so their dpms mode
++    // stays what it was. Waiting for them kept the sleep inhibitor until
++    // logind's InhibitDelayMaxSec ran out, on every suspend.
+     const auto outputs = kwinApp()->outputBackend()->outputs();
+     const bool allOff = std::ranges::all_of(outputs, [](BackendOutput *output) {
+-        return output->dpmsMode() == BackendOutput::DpmsMode::Off;
++        return output->isNonDesktop() || output->dpmsMode() == BackendOutput::DpmsMode::Off;
+     });
+     if (!allOff) {
+         return;
+-- 
+2.56.0
+
