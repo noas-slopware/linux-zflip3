@@ -15,21 +15,22 @@ Packages built natively on the phone (`makepkg` as `<user>`) and given to
 
 | path | version | why |
 |---|---|---|
-| `claire/` | 0.1.0-6 | fingerprint glue for the securefp TA |
-| `callaudiod/` | 0.1.99-4 | switches the call profile for the speaker button |
+| `claire/` | 0.1.0-7 | fingerprint glue for the securefp TA |
+| `callaudiod/` | 0.1.99-5 | switches the call profile for the speaker button, keeps a default headset in calls |
 | `fprintd/` | 1.94.5-3 | closes a reader released while suspended once it resumes |
-| `hexagonrpcd/` | 0.5.0-1 | file server for the sensor hub (SLPI) |
+| `hexagonrpcd/` | 0.5.0-2 | file server for the sensor hub (SLPI) |
 | `iio-sensor-proxy/` | 3.9-2 | SSC sensors |
 | `kscreenlocker/` | 6.8.2-2 | keeps the fingerprint reader armed at the lock screen |
-| `libcamera/` | 0.7.2-8 | IMX374/IMX563 helpers, soft ISP autofocus for the wide camera |
-| `libfprint/` | 1.94.100-5 | `samsung_securefp` driver |
+| `libcamera/` | 0.7.2-9 | IMX374/IMX563 helpers, soft ISP autofocus for the wide camera |
+| `libfprint/` | 1.94.100-7 | `samsung_securefp` driver |
+| `mihari/` | 0.1.0-2 | stock's skin temperature estimate (LRP2) and SIOP CPU/GPU limits |
 | `neard/` | 0.20-1 | NFC |
 | `plasma-camera/` | 26.08.3-2 | cameras named by location |
 | `plasma-mobile/` | 6.8.2-3 | volume popup without a default sink, quick settings fix |
 | `rmtfs/` | 1.3-1 | modem remote filesystem (the AUR has 1.2) |
 | `spacebar/` | 6.3.4-4 | LG U+ MMS send |
 | `tqftpserv/` | 1.3.r4.geb4b9a0-1 | modem TFTP server with populate-readwrite (the AUR has 1.2) |
-| `wireplumber/` | 0.5.18-2 | keeps the call profile picked during a call |
+| `wireplumber/` | 0.5.18-3 | keeps the call profile picked during a call |
 
 IMS (VoLTE, SMS over IMS) is [IMSroha](https://github.com/noas-slopware/imsroha), split out of
 this repository's `userspace/imsd/` on 2026-11-11 and built from its own `packaging/`; the
