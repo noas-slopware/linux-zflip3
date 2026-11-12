@@ -43,6 +43,23 @@
 #define NOTIFICATION_LIFETIME 90
 #define WAKE_SECONDS 8
 
+/* Why kita holds its org.freedesktop.PowerManagement inhibition. */
+#define INHIBIT_COVER (1u << 0) /* the cover is lit */
+#define INHIBIT_CALL (1u << 1)	/* a ModemManager call is not terminated */
+
+#define PM_NAME "org.freedesktop.PowerManagement"
+#define PM_INHIBIT_PATH "/org/freedesktop/PowerManagement/Inhibit"
+#define PM_INHIBIT_IFACE "org.freedesktop.PowerManagement.Inhibit"
+
+#define MM_NAME "org.freedesktop.ModemManager1"
+#define MM_PATH "/org/freedesktop/ModemManager1"
+#define MM_VOICE_IFACE "org.freedesktop.ModemManager1.Modem.Voice"
+#define MM_CALL_IFACE "org.freedesktop.ModemManager1.Call"
+/* MMCallState: 1 dialing .. 6 waiting are live; 0 unknown, 7 terminated. */
+#define MM_CALL_STATE_DIALING 1
+#define MM_CALL_STATE_WAITING 6
+#define MM_CALL_STATE_NOT_READ (-1)
+
 struct notification {
 	guint32 id;
 	gint64 created;
@@ -127,6 +144,32 @@ struct daemon {
 	gboolean dpms_child_state;
 	gboolean dpms_pending;
 	gboolean dpms_pending_state;
+
+	/*
+	 * One org.freedesktop.PowerManagement inhibition on the session bus,
+	 * held while any INHIBIT_* reason is set. At most one Inhibit call is
+	 * in flight; its reply settles the state again. pm_generation drops
+	 * replies from a PowerDevil that has gone away since.
+	 */
+	guint inhibit_reasons;
+	gboolean inhibit_held;
+	gboolean inhibit_in_flight;
+	GVariant *inhibit_cookie;
+	gboolean pm_present;
+	guint pm_generation;
+	guint pm_watch;
+
+	/*
+	 * ModemManager calls on the system bus: object path -> MMCallState,
+	 * MM_CALL_STATE_NOT_READ until its State has been read.
+	 * mm_generation drops replies from a ModemManager that has gone away.
+	 */
+	GHashTable *mm_calls;
+	guint mm_generation;
+	guint mm_watch;
+	guint mm_sub_objects;
+	guint mm_sub_voice;
+	guint mm_sub_call;
 
 	char *dump_path;
 };
@@ -607,12 +650,159 @@ static void setup_touch(struct daemon *d)
 	g_dir_close(dir);
 }
 
+static void update_inhibit(struct daemon *d);
+
+struct inhibit_request {
+	struct daemon *d;
+	guint generation;
+};
+
+static void inhibit_reply(GObject *source, GAsyncResult *res,
+			  gpointer user_data)
+{
+	struct inhibit_request *req = user_data;
+	struct daemon *d = req->d;
+	GError *err = NULL;
+	GVariant *ret;
+
+	ret = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source), res,
+					    &err);
+	if (req->generation != d->pm_generation) {
+		/* That PowerDevil is gone, and its inhibitions with it. */
+		if (ret)
+			g_variant_unref(ret);
+		g_clear_error(&err);
+		g_free(req);
+		return;
+	}
+	g_free(req);
+	d->inhibit_in_flight = FALSE;
+	if (!ret) {
+		/* Not retried here: the next change of reason tries again. */
+		g_message("inhibit: %s", err->message);
+		g_error_free(err);
+		return;
+	}
+	if (g_variant_is_of_type(ret, G_VARIANT_TYPE("(u)")) ||
+	    g_variant_is_of_type(ret, G_VARIANT_TYPE("(i)"))) {
+		/* UnInhibit takes the cookie back with the same type. */
+		d->inhibit_cookie = ret;
+		d->inhibit_held = TRUE;
+		g_message("inhibit: holding");
+	} else {
+		g_message("inhibit: unexpected reply %s",
+			  g_variant_get_type_string(ret));
+		g_variant_unref(ret);
+	}
+	/* The reasons may have gone while the call was in flight. */
+	update_inhibit(d);
+}
+
+static void update_inhibit(struct daemon *d)
+{
+	gboolean want = d->inhibit_reasons != 0;
+
+	if (!d->session_bus || !d->pm_present || d->inhibit_in_flight)
+		return;
+
+	if (want && !d->inhibit_held) {
+		struct inhibit_request *req = g_new0(struct inhibit_request, 1);
+
+		req->d = d;
+		req->generation = d->pm_generation;
+		d->inhibit_in_flight = TRUE;
+		g_message("inhibit: requesting (%s)",
+			  d->inhibit_reasons & INHIBIT_CALL ? "call" : "cover");
+		g_dbus_connection_call(d->session_bus, PM_NAME,
+				       PM_INHIBIT_PATH, PM_INHIBIT_IFACE,
+				       "Inhibit",
+				       g_variant_new("(ss)", "kita",
+						     d->inhibit_reasons &
+								     INHIBIT_CALL ?
+							     "A call is in progress" :
+							     "The cover screen is on"),
+				       NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL,
+				       inhibit_reply, req);
+	} else if (!want && d->inhibit_held) {
+		g_dbus_connection_call(d->session_bus, PM_NAME,
+				       PM_INHIBIT_PATH, PM_INHIBIT_IFACE,
+				       "UnInhibit", d->inhibit_cookie, NULL,
+				       G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL,
+				       NULL);
+		/* Not floating: the call took its own reference. */
+		g_variant_unref(d->inhibit_cookie);
+		d->inhibit_cookie = NULL;
+		d->inhibit_held = FALSE;
+		g_message("inhibit: released");
+	}
+}
+
+static void set_inhibit_reason(struct daemon *d, guint reason, gboolean on)
+{
+	guint old = d->inhibit_reasons;
+
+	if (on)
+		d->inhibit_reasons |= reason;
+	else
+		d->inhibit_reasons &= ~reason;
+	if (d->inhibit_reasons != old)
+		update_inhibit(d);
+}
+
+static void pm_appeared(GDBusConnection *connection, const gchar *name,
+			const gchar *owner, gpointer user_data)
+{
+	struct daemon *d = user_data;
+
+	(void)connection;
+	(void)name;
+	(void)owner;
+	d->pm_present = TRUE;
+	update_inhibit(d);
+}
+
+static void pm_vanished(GDBusConnection *connection, const gchar *name,
+			gpointer user_data)
+{
+	struct daemon *d = user_data;
+
+	(void)connection;
+	(void)name;
+	if (d->inhibit_held || d->inhibit_in_flight)
+		g_message("inhibit: %s went away", PM_NAME);
+	d->pm_present = FALSE;
+	d->pm_generation++;
+	d->inhibit_in_flight = FALSE;
+	d->inhibit_held = FALSE;
+	if (d->inhibit_cookie) {
+		g_variant_unref(d->inhibit_cookie);
+		d->inhibit_cookie = NULL;
+	}
+}
+
+static void setup_inhibit(struct daemon *d)
+{
+	if (!d->session_bus)
+		return;
+	d->pm_watch = g_bus_watch_name_on_connection(d->session_bus, PM_NAME,
+						     G_BUS_NAME_WATCHER_FLAGS_NONE,
+						     pm_appeared, pm_vanished,
+						     d, NULL);
+}
+
+/* Every change of d->awake goes through here. */
+static void set_awake(struct daemon *d, gboolean awake)
+{
+	d->awake = awake;
+	set_inhibit_reason(d, INHIBIT_COVER, awake);
+}
+
 static gboolean sleep_display_cb(gpointer user_data)
 {
 	struct daemon *d = user_data;
 
 	d->sleep_source = 0;
-	d->awake = FALSE;
+	set_awake(d, FALSE);
 	stop_awake_timers(d);
 	set_backlight(d, 0);
 	set_panel_power(d, FALSE);
@@ -627,7 +817,7 @@ static void wake_display(struct daemon *d)
 		g_source_remove(d->sleep_source);
 		d->sleep_source = 0;
 	}
-	d->awake = TRUE;
+	set_awake(d, TRUE);
 	set_panel_power(d, TRUE);
 	set_backlight(d, BACKLIGHT_ON);
 	draw_ui(d);
@@ -701,7 +891,7 @@ static void apply_lid(struct daemon *d)
 			g_source_remove(d->sleep_source);
 			d->sleep_source = 0;
 		}
-		d->awake = FALSE;
+		set_awake(d, FALSE);
 		stop_awake_timers(d);
 		set_backlight(d, 0);
 		set_panel_power(d, FALSE);
@@ -1038,6 +1228,270 @@ static void on_imsd_signal(GDBusConnection *connection, const gchar *sender,
 	}
 }
 
+/*
+ * Calls from ModemManager. IMSroha's VoLTE calls are reported through
+ * ModemManager's Voice interface too, so this sees every call, ringing or
+ * dialing included, whether or not the cover is lit. Event-driven: the
+ * call list is read when ModemManager or a modem appears, and kept up to
+ * date from CallAdded, CallDeleted and each call's StateChanged.
+ */
+struct mm_request {
+	struct daemon *d;
+	guint generation;
+	char *path;
+};
+
+static void mm_request_free(struct mm_request *req)
+{
+	g_free(req->path);
+	g_free(req);
+}
+
+static void mm_update_calls(struct daemon *d)
+{
+	GHashTableIter it;
+	gpointer value;
+	guint live = 0;
+
+	g_hash_table_iter_init(&it, d->mm_calls);
+	while (g_hash_table_iter_next(&it, NULL, &value)) {
+		gint state = GPOINTER_TO_INT(value);
+
+		if (state >= MM_CALL_STATE_DIALING &&
+		    state <= MM_CALL_STATE_WAITING)
+			live++;
+	}
+	if ((live != 0) != !!(d->inhibit_reasons & INHIBIT_CALL))
+		g_message("calls: %u not terminated", live);
+	set_inhibit_reason(d, INHIBIT_CALL, live != 0);
+}
+
+static void mm_state_reply(GObject *source, GAsyncResult *res,
+			   gpointer user_data)
+{
+	struct mm_request *req = user_data;
+	struct daemon *d = req->d;
+	GError *err = NULL;
+	GVariant *ret, *v;
+
+	ret = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source), res,
+					    &err);
+	if (req->generation != d->mm_generation ||
+	    !g_hash_table_contains(d->mm_calls, req->path)) {
+		/* ModemManager restarted, or the call was deleted. */
+		if (ret)
+			g_variant_unref(ret);
+		g_clear_error(&err);
+		mm_request_free(req);
+		return;
+	}
+	if (!ret) {
+		g_message("call %s: %s", req->path, err->message);
+		g_error_free(err);
+		g_hash_table_remove(d->mm_calls, req->path);
+	} else {
+		g_variant_get(ret, "(v)", &v);
+		if (g_variant_is_of_type(v, G_VARIANT_TYPE_INT32))
+			g_hash_table_insert(d->mm_calls, g_strdup(req->path),
+					    GINT_TO_POINTER(g_variant_get_int32(v)));
+		g_variant_unref(v);
+		g_variant_unref(ret);
+	}
+	mm_request_free(req);
+	mm_update_calls(d);
+}
+
+static void mm_read_state(struct daemon *d, const char *path)
+{
+	struct mm_request *req = g_new0(struct mm_request, 1);
+
+	req->d = d;
+	req->generation = d->mm_generation;
+	req->path = g_strdup(path);
+	g_dbus_connection_call(d->system_bus, MM_NAME, path,
+			       "org.freedesktop.DBus.Properties", "Get",
+			       g_variant_new("(ss)", MM_CALL_IFACE, "State"),
+			       G_VARIANT_TYPE("(v)"), G_DBUS_CALL_FLAGS_NONE,
+			       -1, NULL, mm_state_reply, req);
+}
+
+static void mm_objects_reply(GObject *source, GAsyncResult *res,
+			     gpointer user_data)
+{
+	struct mm_request *req = user_data;
+	struct daemon *d = req->d;
+	GError *err = NULL;
+	GVariant *ret, *ifaces;
+	GVariantIter *objects;
+	GHashTable *calls;
+	GHashTableIter it;
+	gpointer key, value;
+	const char *obj;
+
+	ret = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source), res,
+					    &err);
+	if (req->generation != d->mm_generation) {
+		if (ret)
+			g_variant_unref(ret);
+		g_clear_error(&err);
+		mm_request_free(req);
+		return;
+	}
+	mm_request_free(req);
+	if (!ret) {
+		g_message("ModemManager objects: %s", err->message);
+		g_error_free(err);
+		return;
+	}
+
+	/*
+	 * The reply is newer than every signal that came before it, so it
+	 * replaces the list. States already known are kept: StateChanged
+	 * kept them current.
+	 */
+	calls = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+	g_variant_get(ret, "(a{oa{sa{sv}}})", &objects);
+	while (g_variant_iter_loop(objects, "{&o@a{sa{sv}}}", &obj, &ifaces)) {
+		GVariant *voice, *list;
+		GVariantIter li;
+		const char *call;
+
+		voice = g_variant_lookup_value(ifaces, MM_VOICE_IFACE,
+					       G_VARIANT_TYPE("a{sv}"));
+		if (!voice)
+			continue;
+		list = g_variant_lookup_value(voice, "Calls",
+					      G_VARIANT_TYPE("ao"));
+		if (list) {
+			g_variant_iter_init(&li, list);
+			while (g_variant_iter_next(&li, "&o", &call)) {
+				gpointer state;
+
+				if (!g_hash_table_lookup_extended(d->mm_calls,
+								  call, NULL,
+								  &state))
+					state = GINT_TO_POINTER(
+						MM_CALL_STATE_NOT_READ);
+				g_hash_table_insert(calls, g_strdup(call),
+						    state);
+			}
+			g_variant_unref(list);
+		}
+		g_variant_unref(voice);
+	}
+	g_variant_iter_free(objects);
+	g_variant_unref(ret);
+
+	g_hash_table_unref(d->mm_calls);
+	d->mm_calls = calls;
+	g_hash_table_iter_init(&it, d->mm_calls);
+	while (g_hash_table_iter_next(&it, &key, &value))
+		if (GPOINTER_TO_INT(value) == MM_CALL_STATE_NOT_READ)
+			mm_read_state(d, key);
+	g_message("ModemManager: %u calls", g_hash_table_size(d->mm_calls));
+	mm_update_calls(d);
+}
+
+static void mm_resync(struct daemon *d)
+{
+	struct mm_request *req = g_new0(struct mm_request, 1);
+
+	req->d = d;
+	req->generation = d->mm_generation;
+	g_dbus_connection_call(d->system_bus, MM_NAME, MM_PATH,
+			       "org.freedesktop.DBus.ObjectManager",
+			       "GetManagedObjects", NULL,
+			       G_VARIANT_TYPE("(a{oa{sa{sv}}})"),
+			       G_DBUS_CALL_FLAGS_NONE, -1, NULL,
+			       mm_objects_reply, req);
+}
+
+static void on_mm_signal(GDBusConnection *connection, const gchar *sender,
+			 const gchar *path, const gchar *interface,
+			 const gchar *signal, GVariant *params,
+			 gpointer user_data)
+{
+	struct daemon *d = user_data;
+
+	(void)connection;
+	(void)sender;
+
+	if (!g_strcmp0(interface, MM_VOICE_IFACE)) {
+		const char *call;
+
+		if (!g_variant_is_of_type(params, G_VARIANT_TYPE("(o)")))
+			return;
+		g_variant_get(params, "(&o)", &call);
+		if (!g_strcmp0(signal, "CallAdded")) {
+			if (!g_hash_table_contains(d->mm_calls, call)) {
+				g_hash_table_insert(d->mm_calls,
+						    g_strdup(call),
+						    GINT_TO_POINTER(
+							    MM_CALL_STATE_NOT_READ));
+				mm_read_state(d, call);
+			}
+		} else if (!g_strcmp0(signal, "CallDeleted")) {
+			g_hash_table_remove(d->mm_calls, call);
+		}
+		mm_update_calls(d);
+	} else if (!g_strcmp0(interface, MM_CALL_IFACE)) {
+		gint32 old_state, new_state;
+		guint32 reason;
+
+		if (!g_variant_is_of_type(params, G_VARIANT_TYPE("(iiu)")))
+			return;
+		g_variant_get(params, "(iiu)", &old_state, &new_state, &reason);
+		g_hash_table_insert(d->mm_calls, g_strdup(path),
+				    GINT_TO_POINTER(new_state));
+		mm_update_calls(d);
+	} else {
+		/* ObjectManager: a modem (or one of its interfaces) came or went. */
+		mm_resync(d);
+	}
+}
+
+static void mm_appeared(GDBusConnection *connection, const gchar *name,
+			const gchar *owner, gpointer user_data)
+{
+	struct daemon *d = user_data;
+
+	(void)connection;
+	(void)name;
+	(void)owner;
+	mm_resync(d);
+}
+
+static void mm_vanished(GDBusConnection *connection, const gchar *name,
+			gpointer user_data)
+{
+	struct daemon *d = user_data;
+
+	(void)connection;
+	(void)name;
+	d->mm_generation++;
+	g_hash_table_remove_all(d->mm_calls);
+	mm_update_calls(d);
+}
+
+static void setup_modemmanager(struct daemon *d)
+{
+	/* Subscribe first, so nothing between the list and the signals is lost. */
+	d->mm_sub_objects = g_dbus_connection_signal_subscribe(
+		d->system_bus, MM_NAME, "org.freedesktop.DBus.ObjectManager",
+		NULL, MM_PATH, NULL, G_DBUS_SIGNAL_FLAGS_NONE, on_mm_signal, d,
+		NULL);
+	d->mm_sub_voice = g_dbus_connection_signal_subscribe(
+		d->system_bus, MM_NAME, MM_VOICE_IFACE, NULL, NULL, NULL,
+		G_DBUS_SIGNAL_FLAGS_NONE, on_mm_signal, d, NULL);
+	d->mm_sub_call = g_dbus_connection_signal_subscribe(
+		d->system_bus, MM_NAME, MM_CALL_IFACE, "StateChanged", NULL,
+		NULL, G_DBUS_SIGNAL_FLAGS_NONE, on_mm_signal, d, NULL);
+	d->mm_watch = g_bus_watch_name_on_connection(d->system_bus, MM_NAME,
+						     G_BUS_NAME_WATCHER_FLAGS_NONE,
+						     mm_appeared, mm_vanished,
+						     d, NULL);
+}
+
 static void setup_system_bus(struct daemon *d)
 {
 	GError *err = NULL;
@@ -1056,6 +1510,7 @@ static void setup_system_bus(struct daemon *d)
 							 G_DBUS_SIGNAL_FLAGS_NONE,
 							 on_imsd_signal, d,
 							 NULL);
+	setup_modemmanager(d);
 }
 
 static int start_display(struct daemon *d, int fd)
@@ -1170,7 +1625,7 @@ static int start_display(struct daemon *d, int fd)
 	d->scanout = TRUE;
 	drmModeFreeConnector(conn);
 	drmModeFreeResources(res);
-	d->awake = FALSE;
+	set_awake(d, FALSE);
 	set_backlight(d, 0);
 	set_panel_power(d, FALSE);
 	return 0;
@@ -1201,7 +1656,7 @@ static void destroy_display(struct daemon *d)
 		g_source_remove(d->sleep_source);
 		d->sleep_source = 0;
 	}
-	d->awake = FALSE;
+	set_awake(d, FALSE);
 	stop_awake_timers(d);
 	/* Panel off while the lease fd is still open. */
 	set_backlight(d, 0);
@@ -1520,10 +1975,33 @@ static void cleanup(struct daemon *d)
 		g_object_unref(d->logind);
 	if (d->imsd_sub && d->system_bus)
 		g_dbus_connection_signal_unsubscribe(d->system_bus, d->imsd_sub);
+	if (d->mm_watch)
+		g_bus_unwatch_name(d->mm_watch);
+	if (d->system_bus) {
+		if (d->mm_sub_objects)
+			g_dbus_connection_signal_unsubscribe(d->system_bus,
+							     d->mm_sub_objects);
+		if (d->mm_sub_voice)
+			g_dbus_connection_signal_unsubscribe(d->system_bus,
+							     d->mm_sub_voice);
+		if (d->mm_sub_call)
+			g_dbus_connection_signal_unsubscribe(d->system_bus,
+							     d->mm_sub_call);
+	}
+	g_hash_table_unref(d->mm_calls);
+	/* Let go of the inhibition before the session bus connection goes. */
+	d->inhibit_reasons = 0;
+	update_inhibit(d);
+	if (d->pm_watch)
+		g_bus_unwatch_name(d->pm_watch);
+	if (d->inhibit_cookie)
+		g_variant_unref(d->inhibit_cookie);
 	if (d->system_bus)
 		g_object_unref(d->system_bus);
-	if (d->session_bus)
+	if (d->session_bus) {
+		g_dbus_connection_flush_sync(d->session_bus, NULL, NULL);
 		g_object_unref(d->session_bus);
+	}
 	if (d->wl)
 		wl_display_disconnect(d->wl);
 	g_free(d->dump_path);
@@ -1619,6 +2097,8 @@ int main(int argc, char **argv)
 	d->touch_fd = -1;
 	d->dump_path = dump ? g_strdup(dump) : NULL;
 	d->notifications = g_array_new(FALSE, TRUE, sizeof(struct notification));
+	d->mm_calls = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
+					    NULL);
 
 	d->wl = wl_display_connect(NULL);
 	if (!d->wl) {
@@ -1635,6 +2115,7 @@ int main(int argc, char **argv)
 	g_unix_fd_add(wl_fd, G_IO_IN, on_wayland, d);
 
 	d->session_bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, NULL);
+	setup_inhibit(d);
 	setup_system_bus(d);
 	setup_logind(d);
 	setup_power_key(d);

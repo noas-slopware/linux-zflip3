@@ -58,6 +58,25 @@ off helper before waking the cover. PowerDevil's profiles use `LidAction=0`
 and `PowerButtonAction=32` (LockScreen); the mobile default
 `ToggleScreenOnOff` would wake the inside.
 
+## Keeping the phone awake
+
+`kita` holds one `org.freedesktop.PowerManagement.Inhibit` inhibition
+(session bus, `Inhibit("kita", reason)`) while the cover is lit, and while any
+ModemManager call is not terminated: dialing, ringing in or out, active, held
+or waiting (`MMCallState` 1 to 6). Calls come from ModemManager's
+`Modem.Voice` (`CallAdded`, `CallDeleted`, `Calls`) and each call's
+`StateChanged` on the system bus; IMSroha reports VoLTE calls there too, so
+ringing and dialing calls count whether or not the phone is folded. The call
+list is read again when ModemManager or a modem appears and dropped when
+ModemManager goes away. The inhibition is released when neither reason holds,
+and taken again if PowerDevil restarts.
+
+With PowerDevil's patch 0002 (`patches/powerdevil`) a wakeup nobody caused
+suspends again after 10 s. The cover stays lit for its 8 seconds and the
+phone sleeps shortly after it goes dark. PowerDevil enforces an inhibition 5 s
+after it is requested. The journal shows `inhibit: requesting (cover|call)`,
+`inhibit: holding`, `inhibit: released` and `calls: N not terminated`.
+
 ## Heat
 
 `kita` is event-driven. While the cover sleeps no timer runs at all.
