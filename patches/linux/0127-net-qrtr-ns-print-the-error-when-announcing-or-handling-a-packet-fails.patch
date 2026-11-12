@@ -1,0 +1,55 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] net: qrtr: ns: print the error when announcing or handling a packet fails
+
+When the name service cannot announce a local service, it logs "failed
+to announce new service", and qrtr_ns_worker() then logs "failed while
+handling packet from <node>:<port>". Neither says why or which service,
+and the second has no newline, so it runs into the next printk.
+
+That is not enough to tell the HELLO-first gate in qrtr_node_enqueue()
+(-EAGAIN) from a gone endpoint or a full socket. A modem that stalled
+in its init after a restart left only these two lines behind, and the
+errno would have named the cause at once.
+
+Print the errno, the service and instance, and where the announcement
+was going. Say which control command failed in the worker, and end its
+message with a newline.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ net/qrtr/ns.c | 10 ++++++----
+ 1 file changed, 6 insertions(+), 4 deletions(-)
+
+--- a/net/qrtr/ns.c
++++ b/net/qrtr/ns.c
+@@ -231,7 +231,8 @@
+ 			if (ret == -ENODEV)
+ 				continue;
+ 
+-			pr_err("failed to announce new service\n");
++			pr_err("failed to announce new service 0x%x:0x%x to %u: %d\n",
++			       srv->service, srv->instance, sq->sq_node, ret);
+ 			return ret;
+ 		}
+ 	}
+@@ -489,7 +490,8 @@
+ 	if (srv->node == qrtr_ns.local_node) {
+ 		ret = service_announce_new(&qrtr_ns.bcast_sq, srv);
+ 		if (ret < 0) {
+-			pr_err("failed to announce new service\n");
++			pr_err("failed to announce new service 0x%x:0x%x to all: %d\n",
++			       srv->service, srv->instance, ret);
+ 			return ret;
+ 		}
+ 	}
+@@ -690,8 +692,8 @@
+ 		}
+ 
+ 		if (ret < 0)
+-			pr_err_ratelimited("failed while handling packet from %d:%d",
+-			       sq.sq_node, sq.sq_port);
++			pr_err_ratelimited("failed while handling packet %u from %d:%d: %d\n",
++					   cmd, sq.sq_node, sq.sq_port, ret);
+ 	}
+ 
+ 	kfree(recv_buf);
