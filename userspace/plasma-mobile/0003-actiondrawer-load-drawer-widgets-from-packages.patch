@@ -1,0 +1,63 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] actiondrawer: load drawer widgets from packages under the
+ media controls
+
+The action drawer has no slot for a third-party card: quick settings are
+toggles, and the media controls and notifications are fixed. Load every
+/usr/share/plasma/mobiledrawerwidgets/<id>/contents/ui/main.qml under the
+media controls, in name order. A widget hides itself with a
+"wanted: false" property; one that fails to load is skipped with a warning.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+--- a/components/mobileshell/qml/actiondrawer/private/ContentContainer.qml	2026-11-13 01:25:28.758804838 +0900
++++ b/components/mobileshell/qml/actiondrawer/private/ContentContainer.qml	2026-11-13 01:25:28.769857916 +0900
+@@ -5,6 +5,7 @@
+ import QtQuick.Controls 2.15
+ import QtQuick.Window 2.2
+ import QtQuick.Layouts
++import Qt.labs.folderlistmodel
+ 
+ import org.kde.plasma.components 3.0 as PlasmaComponents
+ import org.kde.plasma.private.mobileshell as MobileShell
+@@ -272,8 +273,38 @@
+         opacity: brightnessPressedValue
+     }
+ 
+-    property MobileShell.MediaControlsWidget mediaControlsWidget: MobileShell.MediaControlsWidget {
+-        id: mediaWidget
++    // The media controls, then one widget per package in
++    // /usr/share/plasma/mobiledrawerwidgets/<id>/contents/ui/main.qml (for
++    // apps that want a card in the drawer, e.g. headphone battery). A widget
++    // hides itself with "property bool wanted: false"; one that fails to load
++    // is skipped.
++    property Item mediaControlsWidget: ColumnLayout {
++        id: drawerWidgets
++        spacing: Kirigami.Units.smallSpacing
+         opacity: brightnessPressedValue
++
++        MobileShell.MediaControlsWidget {
++            id: mediaWidget
++            Layout.fillWidth: true
++        }
++
++        Repeater {
++            model: FolderListModel {
++                folder: "file:///usr/share/plasma/mobiledrawerwidgets"
++                showFiles: false
++                showDirs: true
++                showDotAndDotDot: false
++                sortField: FolderListModel.Name
++            }
++            delegate: Loader {
++                required property url fileUrl
++                Layout.fillWidth: true
++                // not item.visible: that is the effective visibility and would
++                // stay false once the Loader hides
++                visible: status === Loader.Ready && item && item.wanted !== false
++                source: fileUrl + "/contents/ui/main.qml"
++                onStatusChanged: if (status === Loader.Error) console.warn("Drawer widget failed to load:", source)
++            }
++        }
+     }
+ }
