@@ -18,6 +18,8 @@ evidence/device/*
 *.zst
 *.dtb
 __pycache__/
+# makepkg's git source mirrors next to a PKGBUILD (source=(name::git+...)).
+userspace/libcamera/libcamera/
 # Native syntax-check builds from userspace/kita/build.sh.
 userspace/kita/kita
 userspace/kita/lease-modeset
