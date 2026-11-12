@@ -1,0 +1,42 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] soc: qcom: smp2p: enable the wakeup when DT has wakeup-source
+
+The SMP2P interrupt is a wake IRQ, but its wakeup is disabled until user
+space enables it. A remote processor which crashes while the system is
+suspended signals it through SMP2P, so the crash is only handled at the
+next resume.
+
+On a Galaxy Z Flip3 (SM8350), the modem asserted while the phone was
+suspended. The fatal error was only handled when the power key was
+pressed, and the phone had no working modem until then.
+
+The downstream kernel arms the SMP2P interrupt for wakeup on every edge
+at probe. Keep the default here, but enable the wakeup when the node has
+"wakeup-source", so that a board with a modem has it from boot.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+Built with W=1 and dtbs_check; not tested on the device yet.
+
+diff --git a/drivers/soc/qcom/smp2p.c b/drivers/soc/qcom/smp2p.c
+index af0ceea..af4102a 100644
+--- a/drivers/soc/qcom/smp2p.c
++++ b/drivers/soc/qcom/smp2p.c
+@@ -733,6 +733,7 @@ static int qcom_smp2p_probe(struct platform_device *pdev)
+ 	 * enable wakeup source from user space, while other devices which
+ 	 * do not have proper autosleep feature may want to handle it with
+ 	 * other wakeup events (e.g. Power button) instead waking up immediately.
++	 * A "wakeup-source" property in DT enables it from the start.
+ 	 */
+ 	device_set_wakeup_capable(&pdev->dev, true);
+ 
+@@ -740,6 +741,9 @@ static int qcom_smp2p_probe(struct platform_device *pdev)
+ 	if (ret)
+ 		goto set_wake_irq_fail;
+ 
++	if (of_property_read_bool(pdev->dev.of_node, "wakeup-source"))
++		device_wakeup_enable(&pdev->dev);
++
+ 	return 0;
+ 
+ set_wake_irq_fail:

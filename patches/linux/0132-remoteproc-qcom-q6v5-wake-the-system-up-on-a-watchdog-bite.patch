@@ -1,0 +1,49 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] remoteproc: qcom: q6v5: wake the system up on a watchdog bite
+
+The watchdog interrupt is a separate interrupt, not an SMP2P one, and it
+is not a wakeup interrupt. A watchdog bite while the system is suspended
+is only handled at the next resume, and the remote processor is dead
+until then.
+
+The downstream kernel (subsys-pil-tz) arms the watchdog bite interrupt
+for wakeup while the subsystem is running.
+
+Register the watchdog interrupt as the device's wake IRQ. The PM core
+arms it during suspend when the device may wake the system up. The PAS
+driver already enables wakeup for its device, to hold off suspend during
+a recovery, so a watchdog bite of a PAS remote processor now wakes the
+system up. Nothing changes for the other drivers until their wakeup is
+enabled.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+Built with W=1 and dtbs_check; not tested on the device yet.
+
+diff --git a/drivers/remoteproc/qcom_q6v5.c b/drivers/remoteproc/qcom_q6v5.c
+index fe148b4..82cc65b 100644
+--- a/drivers/remoteproc/qcom_q6v5.c
++++ b/drivers/remoteproc/qcom_q6v5.c
+@@ -11,6 +11,7 @@
+ #include <linux/interconnect.h>
+ #include <linux/interrupt.h>
+ #include <linux/module.h>
++#include <linux/pm_wakeirq.h>
+ #include <linux/soc/qcom/qcom_aoss.h>
+ #include <linux/soc/qcom/smem.h>
+ #include <linux/soc/qcom/smem_state.h>
+@@ -305,6 +306,14 @@ int qcom_q6v5_init(struct qcom_q6v5 *q6v5, struct platform_device *pdev,
+ 	if (ret)
+ 		return ret;
+ 
++	/*
++	 * A watchdog bite while the system is suspended should start the
++	 * recovery right away, if the remoteproc device may wake the system.
++	 */
++	ret = devm_pm_set_wake_irq(&pdev->dev, q6v5->wdog_irq);
++	if (ret)
++		return ret;
++
+ 	q6v5->fatal_irq = platform_get_irq_byname(pdev, "fatal");
+ 	if (q6v5->fatal_irq < 0)
+ 		return q6v5->fatal_irq;

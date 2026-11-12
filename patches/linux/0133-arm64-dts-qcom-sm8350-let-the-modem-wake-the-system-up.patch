@@ -1,0 +1,36 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] arm64: dts: qcom: sm8350: let the modem wake the system up
+
+Mark the modem's GLINK edge and its SMP2P edge as wakeup-source, so
+that incoming calls, SMS and other QMI indications, and a modem crash,
+wake the system up from suspend, as they do on the downstream kernel.
+
+The ADSP, CDSP and SLPI edges stay capable but disabled. Their traffic
+during suspend (battery status, sensors) can be enabled from user space
+where it is wanted.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+Built with W=1 and dtbs_check; not tested on the device yet.
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8350.dtsi b/arch/arm64/boot/dts/qcom/sm8350.dtsi
+index e32505c..3fe539d 100644
+--- a/arch/arm64/boot/dts/qcom/sm8350.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm8350.dtsi
+@@ -616,6 +616,8 @@
+ 		qcom,local-pid = <0>;
+ 		qcom,remote-pid = <1>;
+ 
++		wakeup-source;
++
+ 		smp2p_modem_out: master-kernel {
+ 			qcom,entry-name = "master-kernel";
+ 			#qcom,smem-state-cells = <1>;
+@@ -2544,6 +2546,7 @@
+ 						IPCC_MPROC_SIGNAL_GLINK_QMP>;
+ 				label = "modem";
+ 				qcom,remote-pid = <1>;
++				wakeup-source;
+ 			};
+ 		};
+ 

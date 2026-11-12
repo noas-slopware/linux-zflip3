@@ -1,0 +1,81 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] rpmsg: glink: smem: wake the system up on incoming messages
+
+The GLINK SMEM interrupt is requested with IRQF_NO_SUSPEND, so it is
+still handled in s2idle, but nothing reports a wakeup event: the message
+is received and queued to a socket whose reader is frozen, and the
+system goes back to sleep. A QMI indication from the modem (an incoming
+call, an SMS on the WMS path, a change of network registration) waits
+for the next unrelated wakeup.
+
+On a Galaxy Z Flip3 (SM8350), the phone slept for 2 h 49 min until the
+power key was pressed. A vendor QMI service on the modem, which sends an
+indication about once a minute while the phone is awake, had sent only
+a handful in that time (six were waiting when it woke up), and the
+modem had already asserted with "ss_qmi_server.c:1200:Never recovery
+from QMI_CSI_CONN_BUSY". qrtr sends RESUME_TX only when the reader
+reads, so with the reader frozen the modem's QMI server could not send
+any more, most likely until it gave up.
+
+The downstream kernel calls pm_system_wakeup() from the GLINK interrupt
+handler for every interrupt after suspend_noirq. Its qrtr also reports a
+hard wakeup event, with a 0 ms timeout (CONFIG_QRTR_WAKEUP_MS=0), for
+each packet it receives, which covers the part of the suspend before
+suspend_noirq.
+
+Do the same for each edge: make every SMEM edge wakeup capable, enable
+the wakeup when the edge node has "wakeup-source", and report a hard
+wakeup event with no timeout from the interrupt handler. The event
+wakes the system up from s2idle, and it also aborts a suspend that is
+still in progress, as the downstream qrtr event does. It goes through
+the edge's own wakeup source, so each edge is listed in
+/sys/class/wakeup and can be turned off in its power/wakeup.
+
+qrtr is not changed: on GLINK, it receives each packet in this
+interrupt handler, after the event has been reported.
+
+The RPM edge is left alone. It carries the replies to requests that
+drivers send late in suspend, and waking up for them would abort every
+suspend.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+Built with W=1 and dtbs_check; not tested on the device yet.
+
+diff --git a/drivers/rpmsg/qcom_glink_smem.c b/drivers/rpmsg/qcom_glink_smem.c
+index 35bb03e..c02a865 100644
+--- a/drivers/rpmsg/qcom_glink_smem.c
++++ b/drivers/rpmsg/qcom_glink_smem.c
+@@ -10,6 +10,7 @@
+ #include <linux/of_irq.h>
+ #include <linux/interrupt.h>
+ #include <linux/platform_device.h>
++#include <linux/pm_wakeup.h>
+ #include <linux/mailbox_client.h>
+ #include <linux/mfd/syscon.h>
+ #include <linux/slab.h>
+@@ -212,6 +213,13 @@ static irqreturn_t qcom_glink_smem_intr(int irq, void *data)
+ {
+ 	struct qcom_glink_smem *smem = data;
+ 
++	/*
++	 * The interrupt is not disabled during system suspend, so that the
++	 * remote can still be served. Report a wakeup event, which wakes
++	 * the system up if this edge is allowed to do so.
++	 */
++	pm_wakeup_hard_event(&smem->dev);
++
+ 	qcom_glink_native_rx(smem->glink);
+ 
+ 	return IRQ_HANDLED;
+@@ -263,6 +271,10 @@ struct qcom_glink_smem *qcom_glink_smem_register(struct device *parent,
+ 
+ 	smem->remote_pid = remote_pid;
+ 
++	device_set_wakeup_capable(dev, true);
++	if (of_property_read_bool(dev->of_node, "wakeup-source"))
++		device_wakeup_enable(dev);
++
+ 	rx_pipe = devm_kzalloc(dev, sizeof(*rx_pipe), GFP_KERNEL);
+ 	tx_pipe = devm_kzalloc(dev, sizeof(*tx_pipe), GFP_KERNEL);
+ 	if (!rx_pipe || !tx_pipe) {
