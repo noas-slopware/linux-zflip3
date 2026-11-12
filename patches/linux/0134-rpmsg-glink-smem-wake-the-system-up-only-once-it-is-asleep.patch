@@ -1,0 +1,102 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] rpmsg: glink: smem: wake the system up only once it is asleep
+
+Reporting a wakeup event for every interrupt of the edge also counts the
+messages that arrive while the system is still on its way to suspend.
+Once userspace has written /sys/power/wakeup_count, as PowerDevil does
+before every suspend, any such event aborts the suspend. A modem that
+is busy at that moment, for example because the system's network
+manager takes the mobile data connection down before suspending, keeps
+the system from ever reaching s2idle: on a Galaxy Z Flip3 (SM8350) the
+edge reported 1345 wakeups in under two hours, with every suspend
+attempt ending within milliseconds.
+
+Report wakeup events only between the edge's suspend_noirq and
+resume_noirq callbacks, when the system is asleep, as the vendor kernel
+does with its should_wake flag. Messages that arrive earlier are
+received and handled as usual.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+---
+ drivers/rpmsg/qcom_glink_smem.c | 45 ++++++++++++++++++++++--
+ 1 file changed, 42 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/rpmsg/qcom_glink_smem.c b/drivers/rpmsg/qcom_glink_smem.c
+index bb9c48e..56eec0f 100644
+--- a/drivers/rpmsg/qcom_glink_smem.c
++++ b/drivers/rpmsg/qcom_glink_smem.c
+@@ -46,6 +46,8 @@ struct qcom_glink_smem {
+ 	struct mbox_chan *mbox_chan;
+ 
+ 	u32 remote_pid;
++
++	bool asleep;
+ };
+ 
+ struct glink_smem_pipe {
+@@ -215,10 +217,13 @@ static irqreturn_t qcom_glink_smem_intr(int irq, void *data)
+ 
+ 	/*
+ 	 * The interrupt is not disabled during system suspend, so that the
+-	 * remote can still be served. Report a wakeup event, which wakes
+-	 * the system up if this edge is allowed to do so.
++	 * remote can still be served. Once the system is asleep, report a
++	 * wakeup event, which wakes it up. Before that, messages are only
++	 * received: reporting them would abort every suspend that the
++	 * remote keeps busy.
+ 	 */
+-	pm_wakeup_hard_event(&smem->dev);
++	if (READ_ONCE(smem->asleep))
++		pm_wakeup_hard_event(&smem->dev);
+ 
+ 	qcom_glink_native_rx(smem->glink);
+ 
+@@ -232,6 +237,39 @@ static void qcom_glink_smem_release(struct device *dev)
+ 	kfree(smem);
+ }
+ 
++static int qcom_glink_smem_suspend_noirq(struct device *dev)
++{
++	struct qcom_glink_smem *smem = container_of(dev, struct qcom_glink_smem, dev);
++
++	if (!device_may_wakeup(dev) || !smem->glink)
++		return 0;
++
++	WRITE_ONCE(smem->asleep, true);
++
++	return 0;
++}
++
++static int qcom_glink_smem_resume_noirq(struct device *dev)
++{
++	struct qcom_glink_smem *smem = container_of(dev, struct qcom_glink_smem, dev);
++
++	if (!smem->asleep)
++		return 0;
++
++	WRITE_ONCE(smem->asleep, false);
++
++	return 0;
++}
++
++static const struct dev_pm_ops qcom_glink_smem_pm_ops = {
++	NOIRQ_SYSTEM_SLEEP_PM_OPS(qcom_glink_smem_suspend_noirq,
++				  qcom_glink_smem_resume_noirq)
++};
++
++static const struct device_type qcom_glink_smem_type = {
++	.pm = &qcom_glink_smem_pm_ops,
++};
++
+ struct qcom_glink_smem *qcom_glink_smem_register(struct device *parent,
+ 						 struct device_node *node)
+ {
+@@ -253,6 +291,7 @@ struct qcom_glink_smem *qcom_glink_smem_register(struct device *parent,
+ 
+ 	dev->parent = parent;
+ 	dev->of_node = node;
++	dev->type = &qcom_glink_smem_type;
+ 	dev->release = qcom_glink_smem_release;
+ 	dev_set_name(dev, "%s:%pOFn", dev_name(parent->parent), node);
+ 	ret = device_register(dev);

@@ -1,0 +1,135 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] rpmsg: glink: report a wakeup on the channel a message is for
+
+When a GLINK edge wakes the system up, userspace sees only the edge
+device in /sys/class/wakeup. That device has no subsystem, so a power
+manager cannot tell a message from the modem from any other wakeup.
+PowerDevil, for one, takes a wakeup by an rpmsg device for telephony
+and leaves the display off for it, but turns the display on for an
+unknown source: on a phone, every modem message during sleep then
+lights up the screen.
+
+Make the channel devices of an edge that may wake the system up wakeup
+capable and enabled, and report a wakeup event on the channel a message
+received while asleep is for, as proposed for waking up on channel rx
+in 2023 [1]. The edge's own event still wakes the system up for every
+interrupt.
+
+[1] https://www.spinics.net/lists/linux-arm-msm/msg139234.html
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+---
+ drivers/rpmsg/qcom_glink_native.c | 31 ++++++++++++++++++++++
+ drivers/rpmsg/qcom_glink_native.h |  1 +
+ drivers/rpmsg/qcom_glink_smem.c   |  2 ++
+ 3 files changed, 34 insertions(+)
+
+diff --git a/drivers/rpmsg/qcom_glink_native.c b/drivers/rpmsg/qcom_glink_native.c
+index 55793fc..68f28ab 100644
+--- a/drivers/rpmsg/qcom_glink_native.c
++++ b/drivers/rpmsg/qcom_glink_native.c
+@@ -12,6 +12,7 @@
+ #include <linux/of.h>
+ #include <linux/of_address.h>
+ #include <linux/platform_device.h>
++#include <linux/pm_wakeup.h>
+ #include <linux/regmap.h>
+ #include <linux/rpmsg.h>
+ #include <linux/sizes.h>
+@@ -101,6 +102,7 @@ struct glink_core_rx_intent {
+  * @tx_avail_notify: Waitqueue for pending tx tasks
+  * @sent_read_notify: flag to check cmd sent or not
+  * @abort_tx:	flag indicating that all tx attempts should fail
++ * @asleep:	the system is asleep, messages received wake it up
+  */
+ struct qcom_glink {
+ 	struct device *dev;
+@@ -126,6 +128,8 @@ struct qcom_glink {
+ 	bool sent_read_notify;
+ 
+ 	bool abort_tx;
++
++	bool asleep;
+ };
+ 
+ enum {
+@@ -1001,6 +1005,14 @@ static int qcom_glink_rx_data(struct qcom_glink *glink, size_t avail)
+ 		}
+ 		spin_unlock(&channel->recv_lock);
+ 
++		/*
++		 * A message received while the system is asleep wakes it up:
++		 * report it on the channel too, so that userspace can tell
++		 * which one did.
++		 */
++		if (READ_ONCE(glink->asleep) && channel->ept.rpdev)
++			pm_wakeup_dev_event(&channel->ept.rpdev->dev, 0, true);
++
+ 		intent->offset = 0;
+ 		channel->buf = NULL;
+ 
+@@ -1241,6 +1253,20 @@ void qcom_glink_native_rx(struct qcom_glink *glink)
+ }
+ EXPORT_SYMBOL(qcom_glink_native_rx);
+ 
++/**
++ * qcom_glink_native_set_asleep() - tell the edge whether the system is asleep
++ * @glink:	the edge
++ * @asleep:	true from the edge's suspend_noirq to its resume_noirq
++ *
++ * While asleep, every message received is reported as a wakeup event of the
++ * channel it is for.
++ */
++void qcom_glink_native_set_asleep(struct qcom_glink *glink, bool asleep)
++{
++	WRITE_ONCE(glink->asleep, asleep);
++}
++EXPORT_SYMBOL_GPL(qcom_glink_native_set_asleep);
++
+ /* Locally initiated rpmsg_create_ept */
+ static struct glink_channel *qcom_glink_create_local(struct qcom_glink *glink,
+ 						     const char *name)
+@@ -1689,6 +1715,11 @@ static int qcom_glink_rx_open(struct qcom_glink *glink, unsigned int rcid,
+ 		if (ret)
+ 			goto rcid_remove;
+ 
++		/* The channels of an edge that wakes the system up do so too */
++		device_set_wakeup_capable(&rpdev->dev, true);
++		if (device_may_wakeup(glink->dev))
++			device_wakeup_enable(&rpdev->dev);
++
+ 		channel->rpdev = rpdev;
+ 	}
+ 
+diff --git a/drivers/rpmsg/qcom_glink_native.h b/drivers/rpmsg/qcom_glink_native.h
+index 8dbec24..767901c 100644
+--- a/drivers/rpmsg/qcom_glink_native.h
++++ b/drivers/rpmsg/qcom_glink_native.h
+@@ -37,5 +37,6 @@ struct qcom_glink *qcom_glink_native_probe(struct device *dev,
+ 					   bool intentless);
+ void qcom_glink_native_remove(struct qcom_glink *glink);
+ void qcom_glink_native_rx(struct qcom_glink *glink);
++void qcom_glink_native_set_asleep(struct qcom_glink *glink, bool asleep);
+ 
+ #endif
+diff --git a/drivers/rpmsg/qcom_glink_smem.c b/drivers/rpmsg/qcom_glink_smem.c
+index 56eec0f..45e0f19 100644
+--- a/drivers/rpmsg/qcom_glink_smem.c
++++ b/drivers/rpmsg/qcom_glink_smem.c
+@@ -245,6 +245,7 @@ static int qcom_glink_smem_suspend_noirq(struct device *dev)
+ 		return 0;
+ 
+ 	WRITE_ONCE(smem->asleep, true);
++	qcom_glink_native_set_asleep(smem->glink, true);
+ 
+ 	return 0;
+ }
+@@ -257,6 +258,7 @@ static int qcom_glink_smem_resume_noirq(struct device *dev)
+ 		return 0;
+ 
+ 	WRITE_ONCE(smem->asleep, false);
++	qcom_glink_native_set_asleep(smem->glink, false);
+ 
+ 	return 0;
+ }
