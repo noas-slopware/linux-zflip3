@@ -17,6 +17,7 @@ Packages built natively on the phone (`makepkg` as `<user>`) and given to
 |---|---|---|
 | `claire/` | 0.1.0-6 | fingerprint glue for the securefp TA |
 | `callaudiod/` | 0.1.99-4 | switches the call profile for the speaker button |
+| `fprintd/` | 1.94.5-3 | closes a reader released while suspended once it resumes |
 | `hexagonrpcd/` | 0.5.0-1 | file server for the sensor hub (SLPI) |
 | `iio-sensor-proxy/` | 3.9-2 | SSC sensors |
 | `kscreenlocker/` | 6.8.2-2 | keeps the fingerprint reader armed at the lock screen |
