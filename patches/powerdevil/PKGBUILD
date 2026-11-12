@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 #
 # Arch's extra/powerdevil 6.8.2-1, rebuilt for the b2q aarch64 rootfs with the
-# lid-switch inhibitor patch in this directory (see README.md).
+# lid-switch inhibitor and re-suspend patches in this directory (see README.md).
 #
 # Build on the phone as the unprivileged `build` user, from this directory:
 #
@@ -14,7 +14,7 @@
 pkgname=powerdevil
 pkgver=6.8.2
 _dirver=$(echo $pkgver | cut -d. -f1-3)
-pkgrel=2
+pkgrel=3
 pkgdesc='Manages the power consumption settings of a Plasma Shell'
 arch=(aarch64)
 url='https://kde.org/plasma-desktop/'
@@ -55,13 +55,16 @@ optdepends=('kinfocenter: for the Energy Information KCM'
             'tlp: alternative power profiles support')
 groups=(plasma)
 source=("https://download.kde.org/stable/plasma/$_dirver/$pkgname-$pkgver.tar.xz"
-        0001-Respect-session-inhibitors-when-the-lid-is-closed.patch)
+        0001-Respect-session-inhibitors-when-the-lid-is-closed.patch
+        0002-Go-back-to-sleep-after-a-wakeup-nobody-caused.patch)
 sha256sums=('c663355adcfdfafe9824f48aa15881679fd71b0b16863a603a62ec0bce628d4a'
-            '04734165f9bfa54c51df14b299b768ae66a3f652aad34287352b592eef4b667f')
+            '04734165f9bfa54c51df14b299b768ae66a3f652aad34287352b592eef4b667f'
+            '6244fb0d01c4d3cb79e95bac0dbac6b92a1426ee4385ef79108f9e332db6e9c2')
 
 prepare() {
   cd $pkgname-$pkgver
   patch -Np1 -i ../0001-Respect-session-inhibitors-when-the-lid-is-closed.patch
+  patch -Np1 -i ../0002-Go-back-to-sleep-after-a-wakeup-nobody-caused.patch
 }
 
 build() {

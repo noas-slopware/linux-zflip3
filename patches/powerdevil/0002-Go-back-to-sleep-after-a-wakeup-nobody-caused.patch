@@ -1,0 +1,292 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] actions: suspendsession: go back to sleep after a wakeup
+ nobody caused
+
+After an idle suspend, a wakeup that no user caused (network or modem
+traffic, a charger being plugged in) leaves the system awake until somebody
+touches it. On a phone that is a whole night of battery.
+
+The resume handler calls KIdleTime::simulateUserActivity() so that the
+idle timeouts start counting again, but the Wayland poller implements it
+as a no-op. KWin's ext_idle_notification_v1 detectors are one-shot: the
+suspend timeout fired its "idled" event before the suspend, and only real
+input resets the detector and starts its timer again. Without input it
+never fires a second time.
+
+Arm a re-suspend when resuming instead:
+
+- Catch the next resume-from-idle event when a suspend begins, so the
+  input that wakes the system is seen even if it reaches the compositor
+  before PowerDevil processes the resume.
+- On resume, unless there was input, an opened lid or a scheduled wakeup
+  since the suspend began, start a 10 s one-shot grace timer.
+- On expiry, apply the same policy as the idle timeout: if the session
+  is inhibited, wait for unavailablePoliciesChanged and try again 2 s
+  after InterruptSession is free; otherwise trigger the profile's
+  auto-suspend action, so the wakeup_count write, the in-progress checks,
+  aboutToSuspend and pausing media players all apply.
+- PolicyAgent enforces new inhibitions only after 5 s, which the policy
+  check cannot see. If one is pending at expiry, look again 6 s later
+  (new PolicyAgent::hasPendingInhibitions()).
+- Do nothing unless the profile suspends or hibernates on idle.
+- User input, opening the lid or a scheduled wakeup (new
+  Core::scheduledWakeupTriggered(), so an alarm clock that schedules a
+  wakeup is not suspended under it) cancel the re-suspend; a new suspend
+  clears it.
+
+The timers run only between a resume and the next decision; nothing runs
+while the system is idle and nothing changes.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+---
+ daemon/actions/bundled/suspendsession.cpp | 102 ++++++++++++++++++++++
+ daemon/actions/bundled/suspendsession.h   |  15 +++-
+ daemon/powerdevilcore.cpp                 |   1 +
+ daemon/powerdevilcore.h                   |   2 +
+ daemon/powerdevilpolicyagent.cpp          |   5 ++
+ daemon/powerdevilpolicyagent.h            |   6 ++
+ 6 files changed, 130 insertions(+), 1 deletion(-)
+
+diff --git a/daemon/actions/bundled/suspendsession.cpp b/daemon/actions/bundled/suspendsession.cpp
+--- a/daemon/actions/bundled/suspendsession.cpp
++++ b/daemon/actions/bundled/suspendsession.cpp
+@@ -26,6 +26,11 @@ using namespace Qt::StringLiterals;
+ 
+ namespace PowerDevil::BundledActions
+ {
++// How long a wakeup nobody caused stays awake before suspending again.
++static constexpr std::chrono::seconds s_resuspendGrace = 10s;
++// PolicyAgent enforces inhibitions 5 s after they are requested.
++static constexpr std::chrono::seconds s_resuspendPendingRecheck = 6s;
++
+ SuspendSession::SuspendSession(QObject *parent)
+     : Action(parent)
+ {
+@@ -34,8 +39,38 @@ SuspendSession::SuspendSession(QObject *parent)
+ 
+     setRequiredPolicies(PowerDevil::PolicyAgent::InterruptSession);
+ 
++    m_resuspendTimer.setSingleShot(true);
++    connect(&m_resuspendTimer, &QTimer::timeout, this, &SuspendSession::tryResuspend);
++
++    // Anything that shows somebody wants the system awake cancels the re-suspend.
++    connect(KIdleTime::instance(), &KIdleTime::resumingFromIdle, this, [this]() {
++        onUserActivity("user input");
++    });
++    connect(core()->lidController(), &LidController::lidClosedChanged, this, [this](bool closed) {
++        if (!closed) {
++            onUserActivity("lid opened");
++        }
++    });
++    connect(core(), &Core::scheduledWakeupTriggered, this, [this]() {
++        onUserActivity("scheduled wakeup");
++    });
++
++    connect(PolicyAgent::instance(), &PolicyAgent::unavailablePoliciesChanged, this, [this](PolicyAgent::RequiredPolicies newPolicies) {
++        if (m_resuspendPending && !(newPolicies & PolicyAgent::InterruptSession)) {
++            m_resuspendPending = false;
++            qCDebug(POWERDEVIL) << "re-suspend: inhibition released, trying again in 2 s";
++            m_resuspendTimer.start(2s);
++        }
++    });
++
+     connect(core()->suspendController(), &SuspendController::aboutToSuspend, this, [this]() {
+         m_isAboutToSuspend = true;
++
++        cancelResuspend();
++        m_activitySinceSuspend = false;
++        // Arm the catch before sleeping, so the input that wakes the system
++        // is reported even when it reaches the compositor before we see the resume.
++        KIdleTime::instance()->catchNextResumeEvent();
+     });
+     connect(core()->suspendController(), &SuspendController::resumeFromSuspend, this, [this]() {
+         m_isAboutToSuspend = false;
+@@ -44,12 +79,76 @@ SuspendSession::SuspendSession(QObject *parent)
+ 
+         PowerDevil::PolicyAgent::instance()->setupSystemdInhibition();
+ 
++        // On Wayland, simulateUserActivity() is a no-op, and the compositor's
++        // idle notifications are one-shot: once the suspend timeout has fired,
++        // only real input arms it again. A wakeup nobody caused (network,
++        // modem, RTC) would otherwise leave the system awake until somebody
++        // touches it. Go back to sleep after a short grace period unless
++        // there is user activity or an inhibition in the meantime.
++        if (!m_activitySinceSuspend) {
++            KIdleTime::instance()->catchNextResumeEvent();
++            m_resuspendTimer.start(s_resuspendGrace);
++            qCDebug(POWERDEVIL) << "resume: armed re-suspend in" << s_resuspendGrace.count() << "s";
++        }
++
+         Q_EMIT resumingFromSuspend();
+     });
+ }
+ 
+ SuspendSession::~SuspendSession() = default;
+ 
++void SuspendSession::onUserActivity(const char *source)
++{
++    m_activitySinceSuspend = true;
++    if (m_resuspendTimer.isActive() || m_resuspendPending) {
++        qCDebug(POWERDEVIL).nospace() << "re-suspend: " << source << ", cancelled";
++    }
++    cancelResuspend();
++}
++
++void SuspendSession::cancelResuspend()
++{
++    m_resuspendTimer.stop();
++    m_resuspendPending = false;
++}
++
++void SuspendSession::tryResuspend()
++{
++    m_resuspendPending = false;
++
++    if (!m_autoSuspendEnabled) {
++        qCDebug(POWERDEVIL) << "re-suspend: the profile does not suspend when idle, staying awake";
++        return;
++    }
++
++    // Same policy as onIdleTimeout()
++    if (PolicyAgent::instance()->requirePolicyCheck(PolicyAgent::InterruptSession) != PolicyAgent::None) {
++        qCDebug(POWERDEVIL) << "re-suspend: inhibited, waiting";
++        m_resuspendPending = true;
++        return;
++    }
++
++    // PolicyAgent enforces a new inhibition only after a delay. One that was
++    // requested during the grace period (an incoming call, a notification)
++    // is not visible to the check above yet, so look again once it would be.
++    if (PolicyAgent::instance()->hasPendingInhibitions()) {
++        qCDebug(POWERDEVIL) << "re-suspend: an inhibition is about to take effect, checking again in" << s_resuspendPendingRecheck.count() << "s";
++        m_resuspendTimer.start(s_resuspendPendingRecheck);
++        return;
++    }
++
++    qCDebug(POWERDEVIL) << "re-suspend: suspending";
++    triggerImpl({{QStringLiteral("Type"), qToUnderlying(m_autoSuspendAction)}});
++}
++
++void SuspendSession::onProfileUnload()
++{
++    // Keep a pending re-suspend: plugging in a charger reloads the profile
++    // in the middle of the grace period. tryResuspend() looks at the profile
++    // that is loaded when it runs.
++    m_autoSuspendEnabled = false;
++}
++
+ void SuspendSession::onIdleTimeout(std::chrono::milliseconds timeout)
+ {
+     Q_UNUSED(timeout);
+@@ -136,6 +235,7 @@ void SuspendSession::triggerImpl(const QVariantMap &args)
+ bool SuspendSession::loadAction(const PowerDevil::ProfileSettings &profileSettings)
+ {
+     m_sleepMode = static_cast<PowerDevil::SleepMode>(profileSettings.sleepMode());
++    m_autoSuspendEnabled = false;
+ 
+     if (profileSettings.autoSuspendAction() == qToUnderlying(PowerDevil::PowerButtonAction::NoAction)) {
+         return false;
+@@ -147,6 +247,8 @@ bool SuspendSession::loadAction(const PowerDevil::ProfileSettings &profileSettin
+         registerIdleTimeout(m_idleTime);
+     }
+     m_autoSuspendAction = static_cast<PowerDevil::PowerButtonAction>(profileSettings.autoSuspendAction());
++    m_autoSuspendEnabled = m_idleTime != 0s
++        && (m_autoSuspendAction == PowerDevil::PowerButtonAction::Sleep || m_autoSuspendAction == PowerDevil::PowerButtonAction::Hibernate);
+ 
+     return true;
+ }
+diff --git a/daemon/actions/bundled/suspendsession.h b/daemon/actions/bundled/suspendsession.h
+--- a/daemon/actions/bundled/suspendsession.h
++++ b/daemon/actions/bundled/suspendsession.h
+@@ -10,6 +10,7 @@
+ #include <powerdevilenums.h>
+ 
+ #include <QScopedPointer>
++#include <QTimer>
+ 
+ namespace PowerDevil
+ {
+@@ -29,6 +30,7 @@ public:
+ 
+ protected:
+     void onIdleTimeout(std::chrono::milliseconds timeout) override;
++    void onProfileUnload() override;
+     void triggerImpl(const QVariantMap &args) override;
+ 
+ public Q_SLOTS:
+@@ -44,9 +46,20 @@ private Q_SLOTS:
+     void triggerSuspendSession(PowerDevil::PowerButtonAction action);
+ 
+ private:
++    void onUserActivity(const char *source);
++    void cancelResuspend();
++    void tryResuspend();
++
+     std::chrono::milliseconds m_idleTime{0};
+     bool m_isAboutToSuspend = false;
+-    PowerDevil::PowerButtonAction m_autoSuspendAction;
++    PowerDevil::PowerButtonAction m_autoSuspendAction = PowerDevil::PowerButtonAction::NoAction;
++    // The profile suspends (or hibernates) after an idle timeout.
++    bool m_autoSuspendEnabled = false;
++    // Real input, an opened lid or a scheduled wakeup since the last suspend began.
++    bool m_activitySinceSuspend = false;
++    // The re-suspend found the session inhibited and waits for the inhibition to go.
++    bool m_resuspendPending = false;
++    QTimer m_resuspendTimer;
+     PowerDevil::SleepMode m_sleepMode = PowerDevil::SleepMode::SuspendToRam;
+ };
+ 
+diff --git a/daemon/powerdevilcore.cpp b/daemon/powerdevilcore.cpp
+--- a/daemon/powerdevilcore.cpp
++++ b/daemon/powerdevilcore.cpp
+@@ -1158,6 +1158,7 @@ uint Core::scheduleWakeup(const QString &service, const QDBusObjectPath &path, q
+ 
+ void Core::wakeup()
+ {
++    Q_EMIT scheduledWakeupTriggered();
+     onResumingFromIdle();
+     PowerDevil::Action *helperAction = action(QStringLiteral("DPMSControl"));
+     if (helperAction) {
+diff --git a/daemon/powerdevilcore.h b/daemon/powerdevilcore.h
+--- a/daemon/powerdevilcore.h
++++ b/daemon/powerdevilcore.h
+@@ -129,6 +129,8 @@ Q_SIGNALS:
+     void chargeStartThresholdChanged(int threshold);
+     void chargeStopThresholdChanged(int threshold);
+     void supportedActionsChanged();
++    /// A wakeup scheduled with scheduleWakeup() fired, or wakeup() was called.
++    void scheduledWakeupTriggered();
+ 
+ private:
+     void loadAllInactiveActions(const QString &previousProfile, const QString &newProfile);
+diff --git a/daemon/powerdevilpolicyagent.cpp b/daemon/powerdevilpolicyagent.cpp
+--- a/daemon/powerdevilpolicyagent.cpp
++++ b/daemon/powerdevilpolicyagent.cpp
+@@ -541,6 +541,11 @@ PolicyAgent::RequiredPolicies PolicyAgent::unavailablePolicies()
+     return retpolicies;
+ }
+ 
++bool PolicyAgent::hasPendingInhibitions() const
++{
++    return !m_pendingInhibitions.isEmpty();
++}
++
+ bool PolicyAgent::screenLockerActive() const
+ {
+     return m_screenLockerActive;
+diff --git a/daemon/powerdevilpolicyagent.h b/daemon/powerdevilpolicyagent.h
+--- a/daemon/powerdevilpolicyagent.h
++++ b/daemon/powerdevilpolicyagent.h
+@@ -99,6 +99,12 @@ public:
+ 
+     RequiredPolicies unavailablePolicies();
+ 
++    /**
++     * Whether an inhibition was requested but is not enforced yet. New inhibitions
++     * take effect after a short delay, and requirePolicyCheck() does not see them until then.
++     */
++    bool hasPendingInhibitions() const;
++
+     bool screenLockerActive() const;
+ 
+     void setupSystemdInhibition();
