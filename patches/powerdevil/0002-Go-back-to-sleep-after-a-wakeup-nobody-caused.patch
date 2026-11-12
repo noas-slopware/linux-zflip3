@@ -41,11 +41,11 @@ Signed-off-by: Noa Himesaka <himesaka@noa.codes>
 ---
  daemon/actions/bundled/suspendsession.cpp | 102 ++++++++++++++++++++++
  daemon/actions/bundled/suspendsession.h   |  15 +++-
- daemon/powerdevilcore.cpp                 |   1 +
+ daemon/powerdevilcore.cpp                 |   3 +
  daemon/powerdevilcore.h                   |   2 +
  daemon/powerdevilpolicyagent.cpp          |   5 ++
  daemon/powerdevilpolicyagent.h            |   6 ++
- 6 files changed, 130 insertions(+), 1 deletion(-)
+ 6 files changed, 132 insertions(+), 1 deletion(-)
 
 diff --git a/daemon/actions/bundled/suspendsession.cpp b/daemon/actions/bundled/suspendsession.cpp
 --- a/daemon/actions/bundled/suspendsession.cpp
@@ -247,6 +247,15 @@ diff --git a/daemon/powerdevilcore.cpp b/daemon/powerdevilcore.cpp
      onResumingFromIdle();
      PowerDevil::Action *helperAction = action(QStringLiteral("DPMSControl"));
      if (helperAction) {
+@@ -1258,6 +1259,8 @@ void Core::timerfdEventHandler()
+     // Before doing anything further, lets set the next set of wakeup alarm
+     resetAndScheduleNextWakeup();
+ 
++    Q_EMIT scheduledWakeupTriggered();
++
+     // Now current wakeup needs to be processed
+     // prepare message for sending back to the consumer
+     QDBusMessage msg = QDBusMessage::createMethodCall(currentWakeup.service,
 diff --git a/daemon/powerdevilcore.h b/daemon/powerdevilcore.h
 --- a/daemon/powerdevilcore.h
 +++ b/daemon/powerdevilcore.h
@@ -254,7 +263,7 @@ diff --git a/daemon/powerdevilcore.h b/daemon/powerdevilcore.h
      void chargeStartThresholdChanged(int threshold);
      void chargeStopThresholdChanged(int threshold);
      void supportedActionsChanged();
-+    /// A wakeup scheduled with scheduleWakeup() fired, or wakeup() was called.
++    /// A wakeup scheduled with scheduleWakeup() fired, or wakeup() was called over D-Bus.
 +    void scheduledWakeupTriggered();
  
  private:

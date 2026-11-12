@@ -59,7 +59,7 @@ source=("https://download.kde.org/stable/plasma/$_dirver/$pkgname-$pkgver.tar.xz
         0002-Go-back-to-sleep-after-a-wakeup-nobody-caused.patch)
 sha256sums=('c663355adcfdfafe9824f48aa15881679fd71b0b16863a603a62ec0bce628d4a'
             '04734165f9bfa54c51df14b299b768ae66a3f652aad34287352b592eef4b667f'
-            '6244fb0d01c4d3cb79e95bac0dbac6b92a1426ee4385ef79108f9e332db6e9c2')
+            'eb4a4513ba6934e66a92d0be320b7c6ed81b1aca4347ffca49dae9ef65bdc79b')
 
 prepare() {
   cd $pkgname-$pkgver
