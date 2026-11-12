@@ -43,7 +43,7 @@ Assisted-by: Claude:claude-opus-5-5
 Built with W=1 and dtbs_check; not tested on the device yet.
 
 diff --git a/drivers/rpmsg/qcom_glink_smem.c b/drivers/rpmsg/qcom_glink_smem.c
-index 35bb03e..c02a865 100644
+index 35bb03e..bb9c48e 100644
 --- a/drivers/rpmsg/qcom_glink_smem.c
 +++ b/drivers/rpmsg/qcom_glink_smem.c
 @@ -10,6 +10,7 @@
@@ -79,3 +79,16 @@ index 35bb03e..c02a865 100644
  	rx_pipe = devm_kzalloc(dev, sizeof(*rx_pipe), GFP_KERNEL);
  	tx_pipe = devm_kzalloc(dev, sizeof(*tx_pipe), GFP_KERNEL);
  	if (!rx_pipe || !tx_pipe) {
+@@ -373,6 +385,12 @@ void qcom_glink_smem_unregister(struct qcom_glink_smem *smem)
+ 
+ 	disable_irq(smem->irq);
+ 
++	/*
++	 * The wakeup source is a child of the edge device, remove it before
++	 * qcom_glink_native_remove() unregisters all children.
++	 */
++	device_init_wakeup(&smem->dev, false);
++
+ 	qcom_glink_native_remove(glink);
+ 
+ 	mbox_free_channel(smem->mbox_chan);

@@ -11,18 +11,14 @@ Assisted-by: Claude:claude-opus-5-5
 Built with W=1 and dtbs_check; not tested on the device yet.
 
 diff --git a/Documentation/devicetree/bindings/remoteproc/qcom,glink-edge.yaml b/Documentation/devicetree/bindings/remoteproc/qcom,glink-edge.yaml
-index e78a89c..67c0455 100644
+index e78a89c..883dc9b 100644
 --- a/Documentation/devicetree/bindings/remoteproc/qcom,glink-edge.yaml
 +++ b/Documentation/devicetree/bindings/remoteproc/qcom,glink-edge.yaml
-@@ -52,6 +52,12 @@ properties:
+@@ -52,6 +52,8 @@ properties:
        ID of the shared memory used by GLINK for communication with remote
        processor.
  
-+  wakeup-source:
-+    description:
-+      Wake the system up when the remote processor sends a message on this
-+      edge, so that messages which need an answer, such as an incoming call,
-+      are handled while the system is suspended.
++  wakeup-source: true
 +
  required:
    - interrupts

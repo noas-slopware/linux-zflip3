@@ -10,18 +10,14 @@ Assisted-by: Claude:claude-opus-5-5
 Built with W=1 and dtbs_check; not tested on the device yet.
 
 diff --git a/Documentation/devicetree/bindings/soc/qcom/qcom,smp2p.yaml b/Documentation/devicetree/bindings/soc/qcom/qcom,smp2p.yaml
-index f912768..770a7ff 100644
+index f912768..542e712 100644
 --- a/Documentation/devicetree/bindings/soc/qcom/qcom,smp2p.yaml
 +++ b/Documentation/devicetree/bindings/soc/qcom/qcom,smp2p.yaml
-@@ -59,6 +59,12 @@ properties:
+@@ -59,6 +59,8 @@ properties:
      description:
        Two identifiers of the inbound and outbound smem items used for this edge.
  
-+  wakeup-source:
-+    description:
-+      Wake the system up when the remote processor changes an inbound entry,
-+      so that a crash of the remote processor is handled while the system is
-+      suspended rather than at the next resume.
++  wakeup-source: true
 +
  patternProperties:
    "^master-kernel|slave-kernel|ipa-ap-to-modem|ipa-modem-to-ap|wlan-ap-to-wpss|wlan-wpss-to-ap$":
