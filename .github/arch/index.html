@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>linux-zflip3 pacman repository</title>
+<style>
+  :root { color-scheme: light dark; --bg: #fff; --fg: #1d1d1f; --code: #f2f2f4; --link: #0b57d0; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #161618; --fg: #e8e8ea; --code: #26262a; --link: #8ab4f8; } }
+  body { background: var(--bg); color: var(--fg); font: 16px/1.5 system-ui, sans-serif; max-width: 46rem; margin: 2rem auto; padding: 0 16px; }
+  pre { background: var(--code); padding: 0.75rem 1rem; overflow-x: auto; border-radius: 6px; }
+  code { font-family: ui-monospace, monospace; font-size: 0.9em; }
+  a { color: var(--link); }
+</style>
+</head>
+<body>
+<h1>linux-zflip3 pacman repository</h1>
+<p>The <code>[zflip3]</code> repository: Arch Linux Ports AArch64 packages for the Samsung Galaxy Z
+Flip3 (SM-F711N), built by GitHub Actions from the
+<a href="https://github.com/noas-slopware/linux-zflip3/tree/arch"><code>arch</code> branch</a> of
+<a href="https://github.com/noas-slopware/linux-zflip3">linux-zflip3</a> (commit <code>@ARCH_SHA@</code>)
+in drzee-only Arch Linux Ports containers (ARMv8.2), with drzee's
+<code>-march=armv8.2-a+fp16+rcpc+dotprod+crypto</code>.</p>
+<p>The repository is unsigned. In <code>/etc/pacman.conf</code>, after <code>[core]</code> and before
+<code>[extra]</code> (the phone's forks of extra packages keep their names and must win):</p>
+<pre><code>[zflip3]
+SigLevel = Never
+Server = https://mirror.funami.tech/linux-zflip3/arch/$arch
+Server = @SITE_URL@/arch/$arch</code></pre>
+<p>Files: <a href="arch/aarch64/zflip3.db">arch/aarch64/zflip3.db</a>,
+<a href="arch/aarch64/packages.txt">package list</a>, <a href="arch/aarch64/built.json">build hashes</a>.</p>
+</body>
+</html>
