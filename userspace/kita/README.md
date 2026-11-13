@@ -15,25 +15,19 @@ leased CRTC deliver no completion events, so redraws use `drmModeDirtyFB`.
 
 ## Build and install
 
-`kita` runs on the phone, so build it there (the phone has
-`aarch64-linux-gnu-gcc` and the libraries):
+The `kita` package (`arch` branch, `kita/PKGBUILD`) builds this directory with meson:
 
 ```sh
-scp kita.c drm-lease-v1-client-protocol.h drm-lease-v1-protocol.c \
-	root@<phone>:/tmp/kita/
-ssh root@<phone> 'cd /tmp/kita && \
-	gcc -O2 -Wall kita.c drm-lease-v1-protocol.c -o kita \
-	$(pkg-config --cflags --libs gio-2.0 wayland-client libdrm cairo pangocairo) -lm && \
-	install -m755 kita /usr/local/bin/kita'
-install -m644 ../rootfs/etc/xdg/autostart/kita.desktop /etc/xdg/autostart/
-install -m644 ../rootfs/usr/lib/udev/rules.d/82-kita-backlight.rules /usr/lib/udev/rules.d/
-install -m644 ../rootfs/usr/lib/udev/rules.d/82-kita-touch.rules /usr/lib/udev/rules.d/
-udevadm control --reload-rules
+meson setup --prefix=/usr --sysconfdir=/etc build && meson compile -C build
+meson install -C build
 ```
 
-`./build.sh` on a development machine only builds x86 binaries for syntax
-checks; those fail on the phone with `Exec format error`. The udev rules give
-group `video` write access to `/sys/class/backlight/ae96000.dsi.0/brightness`
+It installs `/usr/bin/kita`, the two DPMS helpers in `/usr/share/kita/`, the autostart
+file in `/etc/xdg/autostart/` and the udev rules in `/usr/lib/udev/rules.d/`. The
+drm-lease protocol code is generated from wayland-protocols' `drm-lease-v1.xml` at build
+time. `lease-modeset`, the bring-up probe, is built but not installed.
+
+The udev rules give group `video` write access to `/sys/class/backlight/ae96000.dsi.0/brightness`
 and keep libinput off the touchscreen. The daemon runs as the session user, not
 root. The autostart file starts it with the Plasma session.
 
@@ -51,7 +45,7 @@ calls from IMSroha (`codes.noa.IMSroha`) on the system bus, and notifications fr
 on the session bus (`BecomeMonitor`), parsed from the message body.
 
 While folded the main panel is DPMS Off, not just backlight 0: `apply_lid`
-runs `qml6 /usr/local/share/kita/dpms-main-off.qml` on close and `...-on.qml`
+runs `qml6 /usr/share/kita/dpms-main-off.qml` on close and `...-on.qml`
 on open, using the Plasma Mobile `DPMSUtil`. Only one helper runs at a time; a
 fold or unfold during a run is applied when it exits. A folded power-key press runs the
 off helper before waking the cover. PowerDevil's profiles use `LidAction=0`

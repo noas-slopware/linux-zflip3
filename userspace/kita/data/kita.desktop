@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: MIT
+[Desktop Entry]
+Type=Application
+Name=b2q cover daemon
+Comment=Clock, notifications and incoming calls on the cover display
+Exec=/usr/bin/kita
+OnlyShowIn=KDE;
+NoDisplay=true
+X-KDE-autostart-after=panel

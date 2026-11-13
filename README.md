@@ -165,10 +165,9 @@ everything, cellular included, works:
   `userspace/rootfs/`,
 - the NFC userspace stack: `neard` from `userspace/neard` (not in the ports repos),
   which also provides `nfctool` for `/dev/nfc0`,
-- the cover daemon: `userspace/kita/` (`kita`), which leases DSI-2 from KWin,
-  drives the panel with Cairo/Pango and controls its backlight; autostart under
-  `userspace/rootfs/etc/xdg/autostart/` and the backlight udev rule under
-  `userspace/rootfs/usr/lib/udev/rules.d/82-kita-backlight.rules`,
+- the cover daemon: the `kita` package from `userspace/kita/`, which leases DSI-2 from
+  KWin, drives the panel with Cairo/Pango and controls its backlight (it brings its
+  autostart file and udev rules),
 - the personal settings, from `tools/build-rootfs.sh --overlay`: hostname, the carrier's
   data connection and Spacebar MMSC, the user and its autologin (`LockOnStart` is in
   `userspace/rootfs/etc/xdg/`, so the first screen is Plasma Mobile's lock screen),

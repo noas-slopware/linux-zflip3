@@ -37,6 +37,10 @@
 
 #include "drm-lease-v1-client-protocol.h"
 
+#ifndef KITA_DATADIR
+#define KITA_DATADIR "/usr/share/kita"
+#endif
+
 #define BACKLIGHT_PATH "/sys/class/backlight/ae96000.dsi.0/brightness"
 #define BACKLIGHT_ON 160
 #define MAX_NOTIFICATIONS 3
@@ -846,8 +850,8 @@ static void spawn_main_dpms(struct daemon *d, gboolean on)
 {
 	gchar *argv[] = {
 		(gchar *)"/usr/bin/qml6",
-		(gchar *)(on ? "/usr/local/share/kita/dpms-main-on.qml" :
-				 "/usr/local/share/kita/dpms-main-off.qml"),
+		(gchar *)(on ? KITA_DATADIR "/dpms-main-on.qml" :
+				 KITA_DATADIR "/dpms-main-off.qml"),
 		NULL
 	};
 	GError *err = NULL;

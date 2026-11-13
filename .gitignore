@@ -20,9 +20,6 @@ evidence/device/*
 __pycache__/
 # makepkg's git source mirrors next to a PKGBUILD (source=(name::git+...)).
 userspace/libcamera/libcamera/
-# Native syntax-check builds from userspace/kita/build.sh.
-userspace/kita/kita
-userspace/kita/lease-modeset
 
 # Local work that is not part of the project: scratch tests (they carry device
 # identities), other people's AUR packaging trees, tool state.
