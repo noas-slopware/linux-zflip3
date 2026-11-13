@@ -170,9 +170,8 @@ tree overlays and vendor files:
   identifies the fitted one by chip ID. `0137` adds an S5K3L6 driver from stock's settings; the
   device tree still describes only the IMX258, because CAMSS waits for every sensor in its graph
   before it registers any camera, so a node for an absent sensor would take all three cameras
-  away. Picking the node at boot (both nodes `fail-needs-probe`, a probe of the chip IDs with
-  the slot powered as stock powers it, CAMSS skipping the node that lost) is the next step and
-  needs a boot on the phone to confirm the IMX258 path still comes up.
+  away. Picking the node at boot is not done (skipped, 2026-11-13; why it is not simple is in
+  `patches/linux/held/README.md`), so an S5K3L6 unit has no ultrawide camera.
 - **Cover touch firmware**: stock reflashes the ZTW522 when its firmware is older than
   `/vendor/firmware/ztw522_b2.bin` (minor 0x23, register data 0x14) and never downgrades, so a
   unit should still run the firmware of the last stock build it ran (inferred from stock's

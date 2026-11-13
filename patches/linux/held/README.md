@@ -6,7 +6,9 @@ Not applied by `tools/build-kernel.sh --apply` (it only globs `patches/linux/NNN
   Noa's call. Any encode on SM8350 resets the SoC on the first input frame (see STATE.md), so
   `/dev/video1` stays unregistered (0021's SM8350 skip) until the encoder works.
 
-## Not written yet: choosing the rear ultrawide sensor at boot (S5K3L6, 0137)
+## Skipped: choosing the rear ultrawide sensor at boot (S5K3L6, 0137)
+
+Skipped on Noa's call, 2026-11-13; the driver stays in the series, inert without a DT node.
 
 `0137` adds the S5K3L6 driver, but the board DT still has only `camera@1a` (IMX258) on CCI1
 master 0. The S5K3L6 sits at 0x2d on the same bus, behind the same rails (S2MPB02 L12/L4/L10),
