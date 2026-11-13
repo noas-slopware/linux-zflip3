@@ -54,7 +54,7 @@ sha256sums=('e113823cae45ee94212e9d1d06966cb086c570a3d95b09363dcaec63d7d70b92'
             '4ed6ac6759b9c89add216dc2a8a2b97ee249cd4a2891eeb339732242bccdd577'
             '2b9e814d75ef1d3cf023fc479837eb010c48e30d403d15d28a8a4a6207fd5981'
             '3523ee5d1a7ce2ac09fe8baef103198ca879f7019b2ad7b5728a127666aca73c'
-            '7aba8568e4abdc25dc59e166bb7056203e3f9cce97528eb86ffaa4e2b26483fe'
+            'f4a5735b0e1eac9e0cc0432c0351330eb7a3d086c720eb614234738249d37911'
             '32721834bcfa95a4861775f23c04eeb7df77d6afa381fbcc90134505b8f86c16')
 
 _r() { echo "$srcdir/linux-zflip3-$_zf3commit/userspace/rootfs"; }
