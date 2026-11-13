@@ -173,9 +173,11 @@ check() {
       | grep -v single_stream_test \
       | grep -v multi_stream_test \
       | grep -v memory_lifetime_test \
-      | if [ -n "${ZFLIP3_QEMU_USER:-}" ]; then
-          # b2q: libcamera's Process forks with clone3(), which qemu-user does not implement
-          # (ENOSYS), so these fail only in the emulated build container; a native build runs them
+      | if ! unshare --user --net true 2>/dev/null; then
+          # b2q: libcamera's Process forks with clone3(CLONE_NEWUSER | CLONE_NEWNET); where this
+          # process cannot make a user and network namespace (a Docker build container's seccomp
+          # profile refuses them, natively and under qemu-user alike) these three cannot pass.
+          # Anywhere that can (the phone), they run
           grep -vx -e libcamera:unixsocket_ipc -e libcamera:log_process -e libcamera:process_test
         else cat; fi \
   )
