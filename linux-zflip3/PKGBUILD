@@ -1,0 +1,270 @@
+# Maintainer: Noa Himesaka <himesaka@noa.codes>
+# Based on Arch Linux's linux (archlinux/packaging/packages/linux, 7.3.4.arch1-2; Jan Alexander
+# Steffens (heftig)), which Arch Linux Ports' aarch64 linux (arch-linux-repo.drzee.net) rebuilds,
+# and on linux-hiby-rs6 for the aarch64 parts.
+#
+# Kernel for the Samsung Galaxy Z Flip3 5G (SM-F711N, b2q): kernel.org 7.3.1 plus the patch series
+# from patches/linux on the senpai branch of noas-slopware/linux-zflip3 (patches/linux/held/ is not
+# applied). Config: configs/nura-sm8350.config (the Nura sm8350 config the port started from)
+# merged with configs/b2q.fragment, both from the same tarball, exactly what tools/build-kernel.sh
+# makes. Built with GCC like Arch's linux.
+#
+# Packaged like Arch's linux (main, -headers, -dtbs as Arch Linux Ports splits it; no -docs).
+# Deviations: /usr/lib/modules/$kver/vmlinuz is Image.gz, which zflip3-boot packs into the Android
+# boot image U-Boot loads from the recovery partition (`make image_name` is vmlinuz.efi, the EFI
+# zboot image, with CONFIG_EFI_ZBOOT=y); no Rust and no BTF (the fragment turns both off), so no
+# rust makedepends and no bpftool vmlinux.h.
+
+pkgbase=linux-zflip3
+pkgver=7.3.1
+pkgrel=1
+pkgdesc='Linux for the Samsung Galaxy Z Flip3 5G (SM-F711N)'
+url='https://github.com/noas-slopware/linux-zflip3'
+arch=(aarch64)
+license=(GPL-2.0-only)
+makedepends=(
+  bc
+  binutils
+  cpio
+  gettext
+  glibc
+  libelf
+  libgcc
+  openssl
+  pahole
+  perl
+  python
+  tar
+  xxhash
+  xz
+  zlib
+  zstd
+)
+options=(
+  !debug
+  !strip
+)
+_srcname=linux-$pkgver
+# senpai branch (default) of noas-slopware/linux-zflip3
+_zf3commit=8b65637848e51b8a26ef2865d5c0029b1fb76fc7
+source=(
+  "https://cdn.kernel.org/pub/linux/kernel/v${pkgver%%.*}.x/$_srcname.tar."{xz,sign}
+  "linux-zflip3-$_zf3commit.tar.gz::https://github.com/noas-slopware/linux-zflip3/archive/$_zf3commit.tar.gz"
+)
+validpgpkeys=(
+  ABAF11C65A2970B130ABE3C479BE3E4300411886  # Linus Torvalds
+  647F28654894E3BD457199BE38DBBDC86092693E  # Greg Kroah-Hartman
+)
+# https://www.kernel.org/pub/linux/kernel/v7.x/sha256sums.asc
+sha256sums=('fa595aad93734f829c963c2a90ef7c3673224fd7fdae7b49406e397cde2de231'
+            'SKIP'
+            'f95ffc1c2b6f299944e5d64480ff965a98836b14b81aa0eaae1a7c134785c32f')
+
+export KBUILD_BUILD_HOST=archlinux
+export KBUILD_BUILD_USER=$pkgbase
+export KBUILD_BUILD_TIMESTAMP="$(date -Ru${SOURCE_DATE_EPOCH:+d @$SOURCE_DATE_EPOCH})"
+
+_zf3() { echo "$srcdir/linux-zflip3-$_zf3commit"; }
+
+prepare() {
+  cd $_srcname
+
+  echo "Setting version..."
+  echo "-$pkgrel" > localversion.10-pkgrel
+  echo "${pkgbase#linux}" > localversion.20-pkgname
+
+  local p
+  for p in "$(_zf3)"/patches/linux/[0-9][0-9][0-9][0-9]-*.patch; do
+    echo "Applying ${p##*/}..."
+    patch -Np1 < "$p"
+  done
+
+  echo "Setting config..."
+  cp "$(_zf3)"/configs/nura-sm8350.config .config
+  scripts/kconfig/merge_config.sh -m .config "$(_zf3)"/configs/b2q.fragment
+  make olddefconfig
+  diff -u "$(_zf3)"/configs/nura-sm8350.config .config || :
+
+  # what the phone cannot boot without (tools/build-kernel.sh checks the same): the initramfs
+  # has no module for these, U-Boot hands over a framebuffer for simplefb, and simpledrm would
+  # hide the last console lines before a reset
+  local sym
+  for sym in FB_SIMPLE FRAMEBUFFER_CONSOLE PINCTRL_SM8350 SCSI_UFS_QCOM USB_DWC3_QCOM \
+             PHY_QCOM_QMP_COMBO PHY_QCOM_USB_SNPS_FEMTO_V2 USB_CONFIGFS BLK_DEV_DM F2FS_FS \
+             USB_CONFIGFS_ACM MFD_MAX77705; do
+    grep -q "^CONFIG_$sym=y" .config || { echo "CONFIG_$sym did not end up =y" >&2; return 1; }
+  done
+  ! grep -q '^CONFIG_DRM_SIMPLEDRM=y' .config || { echo "simpledrm is on" >&2; return 1; }
+
+  make -s kernelrelease > version
+  echo "Prepared $pkgbase version $(<version)"
+}
+
+build() {
+  cd $_srcname
+  make all Image.gz
+}
+
+_package() {
+  pkgdesc="The $pkgdesc kernel and modules"
+  depends=(
+    coreutils
+    initramfs
+    kmod
+  )
+  optdepends=(
+    "$pkgbase-dtbs: device tree binaries (zflip3-boot needs the b2q one)"
+    "$pkgbase-headers: headers and scripts for building modules"
+    'firmware-zflip3: the phone'"'"'s firmware (GPU, DSPs, Wi-Fi, Bluetooth, amplifiers, sensors)'
+    'wireless-regdb: to set the correct wireless channels of your country'
+  )
+  provides=(
+    KSMBD-MODULE
+    NTSYNC-MODULE
+    WIREGUARD-MODULE
+  )
+  replaces=(
+    wireguard-arch
+  )
+
+  cd $_srcname
+  local modulesdir="$pkgdir/usr/lib/modules/$(<version)"
+
+  echo "Installing boot image..."
+  # Image.gz for the Android boot image (see the header), at the path mkinitcpio and systemd expect
+  install -Dm644 arch/arm64/boot/Image.gz "$modulesdir/vmlinuz"
+
+  # Used by mkinitcpio to name the kernel
+  echo "$pkgbase" | install -Dm644 /dev/stdin "$modulesdir/pkgbase"
+
+  echo "Installing modules..."
+  ZSTD_CLEVEL=19 make INSTALL_MOD_PATH="$pkgdir/usr" INSTALL_MOD_STRIP=1 \
+    DEPMOD=/doesnt/exist modules_install  # Suppress depmod
+
+  # remove build link
+  rm "$modulesdir"/build
+}
+
+_package-headers() {
+  pkgdesc="Headers and scripts for building modules for the $pkgdesc kernel"
+  depends=(
+    binutils
+    glibc
+    libelf
+    libgcc
+    openssl
+    pahole
+    xxhash
+    zlib
+    zstd
+  )
+  provides=(LINUX-HEADERS)
+
+  cd $_srcname
+  local builddir="$pkgdir/usr/lib/modules/$(<version)/build"
+  local karch=arm64
+
+  echo "Installing build files..."
+  install -Dt "$builddir" -m644 .config Makefile Module.symvers System.map \
+    localversion.* version vmlinux
+  install -Dt "$builddir/kernel" -m644 kernel/Makefile
+  install -Dt "$builddir/arch/$karch" -m644 arch/$karch/Makefile
+  cp -t "$builddir" -a scripts
+  ln -srt "$builddir" "$builddir/scripts/gdb/vmlinux-gdb.py"
+
+  if [[ $(scripts/config -s CONFIG_HAVE_STACK_VALIDATION) = y ]]; then
+    install -Dt "$builddir/tools/objtool" tools/objtool/objtool
+  fi
+
+  if [[ $(scripts/config -s CONFIG_DEBUG_INFO_BTF_MODULES) = y ]]; then
+    install -Dt "$builddir/tools/bpf/resolve_btfids" tools/bpf/resolve_btfids/resolve_btfids
+  fi
+
+  echo "Installing headers..."
+  cp -t "$builddir" -a include
+  cp -t "$builddir/arch/$karch" -a arch/$karch/include
+  install -Dt "$builddir/arch/$karch/kernel" -m644 arch/$karch/kernel/asm-offsets.s
+
+  install -Dt "$builddir/drivers/md" -m644 drivers/md/*.h
+  install -Dt "$builddir/net/mac80211" -m644 net/mac80211/*.h
+
+  # https://bugs.archlinux.org/task/13146
+  install -Dt "$builddir/drivers/media/i2c" -m644 drivers/media/i2c/msp3400-driver.h
+
+  # https://bugs.archlinux.org/task/20402
+  install -Dt "$builddir/drivers/media/usb/dvb-usb" -m644 drivers/media/usb/dvb-usb/*.h
+  install -Dt "$builddir/drivers/media/dvb-frontends" -m644 drivers/media/dvb-frontends/*.h
+  install -Dt "$builddir/drivers/media/tuners" -m644 drivers/media/tuners/*.h
+
+  # https://bugs.archlinux.org/task/71392
+  install -Dt "$builddir/drivers/iio/common/hid-sensors" -m644 drivers/iio/common/hid-sensors/*.h
+
+  echo "Installing KConfig files..."
+  find . -name 'Kconfig*' -exec install -Dm644 {} "$builddir/{}" \;
+
+  echo "Installing unstripped VDSO..."
+  make INSTALL_MOD_PATH="$pkgdir/usr" vdso_install \
+    link=  # Suppress build-id symlinks
+
+  echo "Removing unneeded architectures..."
+  local arch
+  for arch in "$builddir"/arch/*/; do
+    [[ $arch = */$karch/ ]] && continue
+    echo "Removing $(basename "$arch")"
+    rm -r "$arch"
+  done
+
+  echo "Removing documentation..."
+  rm -r "$builddir/Documentation"
+
+  echo "Removing broken symlinks..."
+  find -L "$builddir" -type l -printf 'Removing %P\n' -delete
+
+  echo "Removing loose objects..."
+  find "$builddir" -type f -name '*.o' -printf 'Removing %P\n' -delete
+
+  echo "Stripping build tools..."
+  local file
+  while read -rd '' file; do
+    case "$(file -Sib "$file")" in
+      application/x-sharedlib\;*)      # Libraries (.so)
+        strip -v $STRIP_SHARED "$file" ;;
+      application/x-archive\;*)        # Libraries (.a)
+        strip -v $STRIP_STATIC "$file" ;;
+      application/x-executable\;*)     # Binaries
+        strip -v $STRIP_BINARIES "$file" ;;
+      application/x-pie-executable\;*) # Relocatable binaries
+        strip -v $STRIP_SHARED "$file" ;;
+    esac
+  done < <(find "$builddir" -type f -perm -u+x ! -name vmlinux -print0)
+
+  echo "Stripping vmlinux..."
+  strip -v $STRIP_STATIC "$builddir/vmlinux"
+
+  echo "Adding symlink..."
+  mkdir -p "$pkgdir/usr/src"
+  ln -sr "$builddir" "$pkgdir/usr/src/$pkgbase"
+}
+
+_package-dtbs() {
+  pkgdesc="Device tree binaries for the $pkgdesc kernel"
+
+  cd $_srcname
+  local dtbdir="$pkgdir/usr/lib/modules/$(<version)/dtb"
+
+  echo "Installing device tree binaries..."
+  mkdir -p "$dtbdir"
+  make INSTALL_DTBS_PATH="$dtbdir" dtbs_install
+}
+
+pkgname=(
+  "$pkgbase"
+  "$pkgbase-headers"
+  "$pkgbase-dtbs"
+)
+for _p in "${pkgname[@]}"; do
+  eval "package_$_p() {
+    $(declare -f "_package${_p#$pkgbase}")
+    _package${_p#$pkgbase}
+  }"
+done
