@@ -18,7 +18,10 @@
 #   zflip3-xbuild        zflip3-fetch + what gcc and binutils build with (mkxtools-zflip3.sh)
 # With ZFLIP3_ACCEL=xgcc (build-zflip3.sh, x86_64 default) drzee's gcc, binutils and ccache in the
 # builder are swapped for x86_64 builds of the same versions (mkxtools-zflip3.sh, xtools-activate.sh),
-# which the kernel runs natively; everything else stays AArch64, under qemu.
+# which the kernel runs natively; so are python, ninja, bison, flex, m4, zstd, bsdtar, debugedit, xz,
+# gzip, make, bash (= sh), coreutils, sed, gawk, grep, findutils, diffutils, tar, bc, cpio, kmod, file,
+# pahole, faked (mkxtools-tools-zflip3.sh: Arch's x86_64 packages of drzee's versions). perl, rustc,
+# clang and everything else stay AArch64, under qemu.
 # shellcheck shell=bash
 
 W=${ZFLIP3_WORK:-/var/tmp/zflip3-arch-build}	# lots of disk; never /tmp (tmpfs)
@@ -146,25 +149,39 @@ xtools_lock() {
 }
 
 # what in xtools no longer matches drzee's versions in the sync db: the first stage to rerun and why,
-#   "gcc <reason>"   (nothing when everything matches; run after fetch_sync)
-#   gcc    mkxtools-zflip3.sh    gcc, binutils, ccache, fakeroot
+#   "gcc|tools <reason>"   (nothing when everything matches; run after fetch_sync)
+#   gcc    mkxtools-zflip3.sh        gcc, binutils, ccache, fakeroot (it runs the other one after it)
+#   tools  mkxtools-tools-zflip3.sh  python & co. and the libraries they load
 xtools_stale() {
 	local -A B
-	local n v p want
+	local n v p d want deps
 	while read -r n v; do B[$n]=$v; done < <(drzee_versions)
 	[ -e "$W/xtools/.stamp" ] || { echo "gcc no xtools yet"; return; }
 	for p in gcc binutils ccache fakeroot; do
 		want=$(sed -n "s/^$p=//p" "$W/xtools/.stamp")
 		[ "$want" = "${B[$p]:-}" ] || { echo "gcc $p $want -> ${B[$p]:-none}"; return; }
 	done
+	[ -s "$W/xtools/tools/.stamp" ] || { echo "tools no tools yet"; return; }
+	while read -r p v deps; do
+		[ "$v" = "${B[$p]:-}" ] || { echo "tools $p $v -> ${B[$p]:-none}"; return; }
+		for d in $deps; do [ "${d#*=}" = "${B[${d%%=*}]:-}" ] ||
+			{ echo "tools ${d%%=*} ${d#*=} (loaded by $p) -> ${B[${d%%=*}]:-none}"; return; }; done
+	done < "$W/xtools/tools/.stamp"
 }
 
-# rerun that stage
+# rerun that stage; exit status 3 from the tools stage means Arch's x86_64 glibc (or gcc runtime)
+# moved past the one in xtools/lib, which only a full run (mkxtools-zflip3.sh, new zflip3-xbuild
+# image) brings along
 xtools_refresh() {
+	local rc=0
 	case $1 in
 		gcc) "$TOOLS/mkxtools-zflip3.sh" ;;
+		tools) "$TOOLS/mkxtools-tools-zflip3.sh" ;;
 		*) echo "xtools stage $1?" >&2; return 1 ;;
-	esac
+	esac || rc=$?
+	[ $rc -eq 3 ] || return $rc
+	log "xtools: Arch's x86_64 glibc moved, all of them again"
+	"$TOOLS/mkxtools-zflip3.sh"
 }
 
 # build-zflip3.sh, before each ZFLIP3_ACCEL=xgcc build: xtools that match the sync db, refreshed here
@@ -177,10 +194,10 @@ xtools_use() {
 			log "xtools: ${s#* } (drzee moved): rebuilding from ${s%% *} on"
 			xtools_refresh "${s%% *}" || { log "xtools: refresh failed"; return 1; }
 		fi
-		st=$(stat -c %Y "$W/xtools/.stamp" 2>/dev/null || true)
+		st=$(stat -c %Y "$W/xtools/.stamp" "$W/xtools/tools/.stamp" 2>/dev/null || true)
 		exec 8> "$XLOCK"; flock -s 8
 		# a refresh by a parallel build between the check and the lock replaced them: check again
-		[ "$st" = "$(stat -c %Y "$W/xtools/.stamp" 2>/dev/null || true)" ] && return 0
+		[ "$st" = "$(stat -c %Y "$W/xtools/.stamp" "$W/xtools/tools/.stamp" 2>/dev/null || true)" ] && return 0
 		exec 8>&-
 	done
 	return 1

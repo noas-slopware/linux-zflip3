@@ -306,9 +306,12 @@ builder_current -- 'xtools-selftest /tmp/native; xtools-activate; xtools-selftes
 BUILDER_ARGS=()
 grep "^xtools-activate" "$W/logs/xtools-selftest.log" >&2 || true
 tail -1 "$W/logs/xtools-selftest.log"
-# into place (no build runs: xtools_lock); the compiler build trees go, stage/ (what xtools is
-# assembled from) and .for stay for a rerun with the same inputs
+# into place (no build runs: xtools_lock); tools/ is made again on top of it below. The compiler
+# build trees go, stage/ (what xtools is assembled from) and .for stay for a rerun with the same inputs
 "$ENGINE" run --rm -v "$W:/w" localhost/zflip3-xbuild sh -euc 'rm -rf /w/xtools.old; [ ! -e /w/xtools ] || mv /w/xtools /w/xtools.old
 	mv /w/xtools.new /w/xtools; rm -rf /w/xtools.old
 	rm -rf /w/xbuild/b-gcc /w/xbuild/b-binutils /w/xbuild/gcc-src /w/xbuild/binutils-src /w/xbuild/tbin /w/xbuild/sysroot'
 log "xtools ready: $(tr '\n' ' ' < "$W/xtools/.stamp")"
+
+# python, make, bash, coreutils, pahole and the other build tools (mkxtools-tools-zflip3.sh)
+"$TOOLS/mkxtools-tools-zflip3.sh"
