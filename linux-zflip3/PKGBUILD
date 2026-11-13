@@ -17,7 +17,7 @@
 
 pkgbase=linux-zflip3
 pkgver=7.3.1
-pkgrel=1
+pkgrel=2
 pkgdesc='Linux for the Samsung Galaxy Z Flip3 5G (SM-F711N)'
 url='https://github.com/noas-slopware/linux-zflip3'
 arch=(aarch64)
