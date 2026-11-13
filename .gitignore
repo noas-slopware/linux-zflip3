@@ -30,3 +30,11 @@ scratch/
 clatd-git/
 tayga/
 .commandcode/
+
+# Work notes, logs and personal settings live in ~/zflip3-private/linux-zflip3
+# (notes/ is symlinked here so the sessions working in this checkout still read them;
+# rootfs/ is tools/build-rootfs.sh --overlay).
+/AGENTS.md
+/STATE.md
+/HANDOVER*.md
+/odin4.log

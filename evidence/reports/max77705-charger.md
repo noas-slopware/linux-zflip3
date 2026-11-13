@@ -5,7 +5,7 @@ chip ends up in the state Samsung's firmware puts it in and so a cable sets the
 currents Samsung's firmware sets.
 
 Nothing has been run on the phone. All of this is source study against Samsung's
-kernel (`/home/yuifunami/linux-zflip3/.cache/samsung/kernel`, paths below are relative
+kernel (`.cache/samsung/kernel` in this repo, paths below are relative
 to it) and the stock device tree dump (`evidence/raw/dtbo/entry.3.dts`), plus a local
 build and `checkpatch`.
 
@@ -131,7 +131,7 @@ clamped to 100 mA here, while stock writes 0 (25 mA) for anything under 100 mA
 ## How this was checked
 
 ```
-cd /home/yuifunami/linux-zflip3/.cache/linux-7.3.1-chg
+cd .cache/linux-7.3.1-chg
 nice -n 19 ionice -c3 make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j10 \
 	drivers/power/supply/max77705_charger.o      # clean, also with W=1
 scripts/checkpatch.pl --no-signoff --strict <patch>   # 0 errors, 0 warnings

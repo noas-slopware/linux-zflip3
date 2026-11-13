@@ -7,10 +7,9 @@ Files that run on the phone, as opposed to `tools/` which runs on the host.
 | `installer/init` | PID 1 of the bring-up initramfs (USB console on `ttyGS0`, pstore dump) |
 | `installer/install-rootfs.sh` | M3.5: format `super`/`userdata` and unpack the Arch rootfs |
 | `rootfs/` | overlay copied over `/` by `tools/build-rootfs.sh`: units, udev rules, NetworkManager, UCM, cover display |
-| `rootfs-packages.txt` | the phone's explicitly installed repo packages, installed by `tools/build-rootfs.sh` |
 | `kita/` | `kita`, the cover display (leased DRM connector, clock, notifications, calls) |
 
-Packages built natively on the phone (`makepkg` as `<user>`) and given to
+Packages built natively on the phone (`makepkg` as the phone's user) and given to
 `tools/build-rootfs.sh --packages`; each PKGBUILD starts from Arch's or the AUR's:
 
 | path | version | why |

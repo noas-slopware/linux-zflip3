@@ -14,14 +14,14 @@ usage() {
 usage: install-images.sh [--host USER@HOST] [--reboot] PART=IMAGE [PART=IMAGE ...]
 
   PART=IMAGE      e.g. recovery=out/linux.img boot=out/boot.img
-  --host          ssh target (default: $B2Q_SSH or root@Love-Me-for-Who-I-Am)
+  --host          ssh target, root on the phone (default: $B2Q_SSH; one is required)
   --reboot        reboot the phone afterwards
 
-Example: tools/install-images.sh --reboot recovery=out/linux.img
+Example: tools/install-images.sh --host root@phone --reboot recovery=out/linux.img
 EOF
 }
 
-HOST=${B2Q_SSH:-root@Love-Me-for-Who-I-Am}; REBOOT=0; PAIRS=()
+HOST=${B2Q_SSH:-}; REBOOT=0; PAIRS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
@@ -32,8 +32,9 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ "${#PAIRS[@]}" -gt 0 ] || { usage >&2; exit 1; }
+[ -n "$HOST" ] || die "no ssh target: give --host or set B2Q_SSH"
 
-SSH=(ssh -o HostKeyAlias=b2q-noas-z-flip3 "$HOST")
+SSH=(ssh "$HOST")
 
 for pair in "${PAIRS[@]}"; do
   part=${pair%%=*}; img=${pair#*=}

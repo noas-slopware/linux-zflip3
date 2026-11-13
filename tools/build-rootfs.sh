@@ -28,11 +28,16 @@ usage: sudo build-rootfs.sh --authorized-keys FILE [options]
   --packages DIR          install every package in DIR (*.pkg.tar*), the ones built
                           from userspace/ on the phone; their dependencies come from
                           the repos
+  --package-list FILE     repo packages to install after the base set, one per line
+                          (# comments)
+  --overlay DIR           a personal tree copied over / after userspace/rootfs
+                          (hostname, accounts, carrier settings); its etc/hostname,
+                          if any, is the hostname, else zflip3
   --tarball NAME          bootstrap tarball name (default: ARCH_TARBALL from sources.lock)
   --keep-tarball          do not delete the downloaded tarball
 
-Packages: base from the bootstrap, $ROOTFS_PACKAGES from sources.lock, the phone's repo
-packages from userspace/rootfs-packages.txt, then --packages.
+Packages: base from the bootstrap, $ROOTFS_PACKAGES from sources.lock, then
+--package-list, then --packages.
 EOF
 }
 
@@ -41,6 +46,8 @@ TAR="$REPO_ROOT/out/rootfs.tar"
 TREE="$REPO_ROOT/.cache/linux-$LINUX_VERSION"
 FIRMWARE="$REPO_ROOT/out/firmware"
 PACKAGES=""
+PKGLIST=""
+OVERLAY=""
 TARBALL="$ARCH_TARBALL"
 KEYS=""
 KEEP=0
@@ -54,6 +61,8 @@ while [ $# -gt 0 ]; do
     --tree) TREE=${2:?}; shift 2 ;;
     --firmware) FIRMWARE=${2:?}; shift 2 ;;
     --packages) PACKAGES=${2:?}; shift 2 ;;
+    --package-list) PKGLIST=${2:?}; shift 2 ;;
+    --overlay) OVERLAY=${2:?}; shift 2 ;;
     --tarball) TARBALL=${2:?}; shift 2 ;;
     --keep-tarball) KEEP=1; shift ;;
     *) die "unknown option: $1 (try --help)" ;;
@@ -68,6 +77,8 @@ done
 need curl tar zstd sha256sum gpg arch-chroot make systemd-firstboot
 [ -d "$DEST" ] && die "$DEST already exists; remove it first"
 [ -z "$PACKAGES" ] || [ -d "$PACKAGES" ] || die "no such directory: $PACKAGES"
+[ -z "$PKGLIST" ] || [ -f "$PKGLIST" ] || die "no such file: $PKGLIST"
+[ -z "$OVERLAY" ] || [ -d "$OVERLAY" ] || die "no such directory: $OVERLAY"
 mkdir -p "$(dirname -- "$DEST")"
 
 CACHE="$REPO_ROOT/.cache"
@@ -131,9 +142,11 @@ log "installing archports-keyring $ROOTFS_PACKAGES"
 chroot_run pacman -Sy --noconfirm --needed archports-keyring $ROOTFS_PACKAGES
 chroot_run pacman-key --populate archports
 
-mapfile -t phone_pkgs < <(grep -v '^#' "$REPO_ROOT/userspace/rootfs-packages.txt")
-log "installing the phone's ${#phone_pkgs[@]} repo packages (userspace/rootfs-packages.txt)"
-chroot_run pacman -S --noconfirm --needed "${phone_pkgs[@]}"
+if [ -n "$PKGLIST" ]; then
+  mapfile -t list_pkgs < <(grep -v '^#' "$PKGLIST")
+  log "installing ${#list_pkgs[@]} repo packages from $PKGLIST"
+  chroot_run pacman -S --noconfirm --needed "${list_pkgs[@]}"
+fi
 
 if [ -n "$PACKAGES" ]; then
   mapfile -t pkgs < <(find "$PACKAGES" -maxdepth 1 -name '*.pkg.tar*' ! -name '*.sig' \
@@ -159,6 +172,15 @@ fi
 
 log "configuration from userspace/rootfs"
 cp -a --no-preserve=ownership "$REPO_ROOT/userspace/rootfs/." "$DEST/"
+if [ -n "$OVERLAY" ]; then
+  log "personal configuration from $OVERLAY"
+  cp -a --no-preserve=ownership "$OVERLAY/." "$DEST/"
+  # NetworkManager ignores keyfiles anyone but root can read.
+  [ ! -d "$DEST/etc/NetworkManager/system-connections" ] ||
+    find "$DEST/etc/NetworkManager/system-connections" -type f -exec chmod 600 {} +
+fi
+HOSTNAME_=zflip3
+[ ! -s "$DEST/etc/hostname" ] || HOSTNAME_=$(cat "$DEST/etc/hostname")
 install -d -m700 "$DEST/root/.ssh"
 install -m600 "$KEYS" "$DEST/root/.ssh/authorized_keys"
 chroot_run systemctl enable systemd-networkd NetworkManager akari-wifi bluetooth sshd \
@@ -183,7 +205,7 @@ done
 # Without these, systemd-firstboot stops the first boot to ask on the console, and
 # the phone has no keyboard there.
 systemd-firstboot --root="$DEST" --force --locale=C.UTF-8 --keymap=us \
-  --timezone="$ROOTFS_TIMEZONE" --hostname="$(cat "$REPO_ROOT/userspace/rootfs/etc/hostname")"
+  --timezone="$ROOTFS_TIMEZONE" --hostname="$HOSTNAME_"
 
 log "packing $TAR"
 umount "$DEST"

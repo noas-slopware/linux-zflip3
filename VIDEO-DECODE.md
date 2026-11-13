@@ -1,6 +1,6 @@
 # Hardware video decode (Galaxy Z Flip3, SM-F711N)
 
-Device: `<phone>`, user `<user>`, Arch Linux aarch64, Plasma Mobile,
+Device: SM-F711N, Arch Linux Ports aarch64, Plasma Mobile,
 kernel 7.3.1 with a hand-built out-of-tree `qcom_iris` module.
 
 **Status, 2026-11-10 evening: working for H.264, HEVC and VP9.** VP9 and H.264 without

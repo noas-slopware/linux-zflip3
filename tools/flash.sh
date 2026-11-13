@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: MIT
 # Flash images into partitions through Samsung download mode, with heimdall.
 #
-# The phone is plugged into the flash host (yuruyuri-san-hai), not this machine, and
-# usbip cannot carry it reliably, so the images are copied there and flashed natively,
+# The phone may be plugged into another machine (the flash host), and usbip cannot
+# carry it reliably, so the images are copied there and flashed natively,
 # all in one heimdall session (the phone reboots when the session ends).
 # odin4 7.3.0 fails the download-mode handshake on this phone every time; heimdall
 # takes raw images and any PIT partition name.
@@ -17,8 +17,8 @@ usage: B2Q_UNLOCKED=1 flash.sh --partition NAME --image IMG [--partition NAME --
 
   --partition NAME   boot, recovery, vendor_boot, dtbo or vbmeta
   --image PATH       image for the --partition before it
-  --host USER@HOST   flash host the phone is plugged into
-                     (default: $B2Q_FLASH_HOST or yuifunami@192.168.0.6)
+  --host USER@HOST   flash host the phone is plugged into (default: $B2Q_FLASH_HOST;
+                     one of the two, or --local, is required)
   --local            run heimdall on this machine instead
   --dry-run          say what would happen
 
@@ -26,7 +26,7 @@ The phone must already be in download mode (04e8:685d).
 EOF
 }
 
-PARTS=(); IMAGES=(); HOST=${B2Q_FLASH_HOST:-yuifunami@192.168.0.6}; LOCAL=0; DRY=0
+PARTS=(); IMAGES=(); HOST=${B2Q_FLASH_HOST:-}; LOCAL=0; DRY=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -43,10 +43,12 @@ done
 [ "${#PARTS[@]}" -gt 0 ] && [ "${#PARTS[@]}" = "${#IMAGES[@]}" ] || { usage >&2; exit 1; }
 [ "${B2Q_UNLOCKED:-0}" = 1 ] || die "set B2Q_UNLOCKED=1 once the bootloader is unlocked and the stock images are saved"
 
+[ "$LOCAL" = 1 ] || [ -n "$HOST" ] || die "no flash host: give --host, set B2Q_FLASH_HOST or use --local"
+
 if [ "$LOCAL" = 1 ]; then
   run() { bash -c "$1"; }
 else
-  # The flash host's login shell is fish, so the script goes to bash on stdin.
+  # The script goes to bash on stdin, whatever the flash host's login shell is.
   run() { ssh "$HOST" bash -s <<<"$1"; }
 fi
 

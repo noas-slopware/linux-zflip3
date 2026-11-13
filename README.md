@@ -16,8 +16,7 @@ the lock screen; [`FINGERPRINT.md`](FINGERPRINT.md)), NFC, and all three cameras
 capture through CAMSS, pictures through libcamera's software ISP;
 [`CAMERA.md`](CAMERA.md)). Not yet: hardware video encode, autofocus and OIS, wireless
 charging, the hinge angle beyond open/closed, and a tuned thermal policy.
-[`STATE.md`](STATE.md) has the details. The roadmap and the reasoning behind each step live on
-the `docs` branch
+The roadmap and the reasoning behind each step live on the `docs` branch
 ([`docs/plan.md`](https://github.com/noas-slopware/linux-zflip3/blob/docs/docs/plan.md)).
 
 ## The device
@@ -132,7 +131,6 @@ Priority order for a daily driver:
   wireless; a thermal policy.
 - Idle power, round two: system suspend once the temporary sleep inhibitor goes, modem and
   Wi-Fi power save, RPMh rails nothing votes for.
-- The rest of the list in `STATE.md`.
 
 ### For the rootfs rebuild
 
@@ -155,7 +153,7 @@ everything, cellular included, works:
   the UCM files under `userspace/rootfs/usr/share/alsa/ucm2/`, the WirePlumber drop-in
   under `userspace/rootfs/etc/wireplumber/`, and the CS35L41 module once the 15 ms
   mailbox build is final,
-- IMSroha's device settings for this phone in `userspace/rootfs/etc/imsroha/imsroha.conf`
+- IMSroha's device settings, `/etc/imsroha/imsroha.conf`, from `--overlay` for now
   (its units create `/var/lib/imsroha/inbox` and `/run/imsroha`; an inbox left in
   `/var/lib/b2q-imsd` is moved over once),
 - the sensors: `tools/extract-qcom-firmware.sh ... slpi` and
@@ -171,11 +169,9 @@ everything, cellular included, works:
   drives the panel with Cairo/Pango and controls its backlight; autostart under
   `userspace/rootfs/etc/xdg/autostart/` and the backlight udev rule under
   `userspace/rootfs/usr/lib/udev/rules.d/82-kita-backlight.rules`,
-- the Spacebar MMSC default for `<user>` (`http://omammsc.uplus.co.kr:9084`,
-  no proxy) so a reimage can send MMS without opening settings,
-- user `<user>` (groups wheel, video, audio, input, render), no password set by the
-  build, and `plasmalogin.service` enabled; the autologin and `LockOnStart` files are
-  already in `userspace/rootfs/etc/`, so the first screen is Plasma Mobile's lock screen,
+- the personal settings, from `tools/build-rootfs.sh --overlay`: hostname, the carrier's
+  data connection and Spacebar MMSC, the user and its autologin (`LockOnStart` is in
+  `userspace/rootfs/etc/xdg/`, so the first screen is Plasma Mobile's lock screen),
 - mobile-config-firefox 5.5.0 with the four Fenix patches from linux-hiby-rs6
   (`patches/mobile-config-firefox/`), `make install` into `/`.
 

@@ -83,7 +83,7 @@ pictures with auto exposure.
 - IFE SMMU stream mask: stock 0x440 against sm8250's 0x400; no faults seen.
 - Wide camera autofocus (2026-11-11, 0099/0100, libcamera 0.7.2-6): the AK7377 at CCI1
   master 1, 0x0c, through ak7375 (standby before active, as stock); libcamera's soft ISP Af
-  scans it, convergence not yet seen in light (`STATE.md` header). OIS: the MCU on QUP SE2
+  scans it, convergence not yet seen in light. OIS: the MCU on QUP SE2
   has no driver.
 - `cam` at full resolution and 1080p works on all three cameras since 0105 (384 MiB CMA).
 - Autofocus speed (libcamera 0.7.2-9, 0017): the soft ISP measures every 4th frame and the

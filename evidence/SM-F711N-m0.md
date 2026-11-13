@@ -153,7 +153,7 @@ timestamp leaves it.
 
 ## USB needs no re-plug once the MAX77705 data switch is closed (2026-11-06)
 
-After a warm reboot the phone never connected over USB (san-hai dmesg: no connect at
+After a warm reboot the phone never connected over USB (flash host dmesg: no connect at
 all on 7-3.2, not even failed descriptor reads) until the cable was re-plugged; only
 boots straight out of download mode enumerated. The USB-C D+/D- lines run through the
 MAX77705's Type-C block (I2C 0x25 on the `i2c7`/0x99c000 bus, PMIC at 0x66 reads
@@ -358,7 +358,7 @@ Ported by two subagents; their source-cited reports are `evidence/reports/max777
 and `evidence/reports/s2asl01-limiter.md`. Patches 0010 (charger setup like stock, BC1.2
 from the USB-C block, cable-info currents), 0011 (binding), 0012 (S2ASL01 driver).
 
-Kernel #48 (+ DT), phone on san-hai's USB port (a PC port, SDP):
+Kernel #48 (+ DT), phone on the flash host's USB port (a PC port, SDP):
 - charger: online, input 475 mA / charge 550 mA (stock cable-info USB), CNFG_02 0x4b,
   CNFG_03 0xb8 (150 mA / 70 min), CNFG_04 0x1c (4440 mV), CNFG_08 0x00 (3 MHz), CNFG_09
   0x92 (CHGIN_LIM 475 mA, stock encoding), CNFG_12 0x68 (VCHGIN 4.6 V, CHGINSEL).

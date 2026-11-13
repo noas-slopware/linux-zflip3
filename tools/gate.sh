@@ -10,7 +10,7 @@
 set -euo pipefail
 . "$(dirname -- "${BASH_SOURCE[0]}")/lib.sh"
 
-HOST=${B2Q_HOST:-yuifunami@192.168.0.6}
+HOST=${B2Q_HOST:-}
 SERIAL=${B2Q_SERIAL:-}
 
 usage() {
@@ -30,6 +30,7 @@ while [ $# -gt 0 ]; do
     *) die "unknown option: $1 (try --help)" ;;
   esac
 done
+[ -n "$HOST" ] || die "no host: set B2Q_HOST or pass --host (the machine the phone is plugged into)"
 [ -n "$SERIAL" ] || die "no adb serial: set B2Q_SERIAL or pass --serial ('adb devices -l' on the host lists it)"
 
 q() {
