@@ -109,7 +109,8 @@ sync
 echo "installed: $(du -sm "$MOUNT" | cut -f1) MiB"
 
 # the account, with the image's own useradd and passwd (PAM, yescrypt as Arch sets it)
-for d in proc sys dev; do mount --bind "/$d" "$MOUNT/$d"; done
+# dev/pts too: passwd talks to the telnet shell's pty
+for d in proc sys dev dev/pts; do mount --bind "/$d" "$MOUNT/$d"; done
 chroot "$MOUNT" useradd -m -G wheel,video,audio,input,render -s /bin/bash "$USER_NAME"
 echo "password for $USER_NAME:"
 until chroot "$MOUNT" passwd "$USER_NAME"; do echo "again:"; done
@@ -118,7 +119,7 @@ if [ -e "$MOUNT/usr/lib/systemd/system/plasmalogin.service" ]; then
   printf '[Autologin]\nUser=%s\nSession=plasma-mobile.desktop\n' "$USER_NAME" \
     > "$MOUNT/etc/plasmalogin.conf.d/autologin.conf"
 fi
-for d in dev sys proc; do umount "$MOUNT/$d"; done
+for d in dev/pts dev sys proc; do umount "$MOUNT/$d"; done
 sync
 umount "$MOUNT"
 echo "done. Reboot; the initramfs mounts /dev/$VG/$LV and switches to it."
