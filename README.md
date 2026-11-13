@@ -14,8 +14,10 @@ sensors, the SX9360 grip sensor that also provides proximity, GNSS through Modem
 QMI LOC, the fingerprint sensor (Samsung's own TrustZone app, enroll in Settings, unlock at
 the lock screen; [`FINGERPRINT.md`](FINGERPRINT.md)), NFC, and all three cameras (raw
 capture through CAMSS, pictures through libcamera's software ISP;
-[`CAMERA.md`](CAMERA.md)). Not yet: hardware video encode, autofocus and OIS, wireless
-charging, the hinge angle beyond open/closed, and a tuned thermal policy.
+[`CAMERA.md`](CAMERA.md)), the main panel at 120, 96, 60 and 48 Hz, s2idle suspend, and 5 W
+wireless charging. Not yet: hardware video encode, OIS and focusing on a real scene, Samsung
+fast wireless and reverse wireless charging seen working, the hinge angle beyond open/closed,
+and charge curves of our own.
 The roadmap and the reasoning behind each step live on the `docs` branch
 ([`docs/plan.md`](https://github.com/noas-slopware/linux-zflip3/blob/docs/docs/plan.md)).
 
@@ -39,8 +41,8 @@ unlockable.
 
 ## What works
 
-"Verified" means seen working on the unit. Kernel 7.3.1 build #7 from the patch series
-0001-0081 (0043 held), 2026-11-10.
+"Verified" means seen working on the unit. Kernel 7.3.1 from the patch series 0001-0137
+(0043 held, 0119 unused), as the `linux-zflip3` package since 2026-11-13.
 
 | Subsystem | Status |
 |---|---|
@@ -49,8 +51,13 @@ unlockable.
 | UFS, rootfs (Arch Linux Ports aarch64) | verified |
 | Wi-Fi, Bluetooth, GPU (a660/freedreno) | verified |
 | Main display, touchscreen | verified |
+| Main display refresh rates | verified: 120, 96, 60 and 48 Hz with stock's 96/48 Hz gamma compensation read from the panel's flash (0120, 0124), the display-on sequence and 96 Hz offsets picked by panel revision (0136; only rev D tried); variable refresh is reported (0121, 0122) but KWin does not use it yet |
+| Suspend (s2idle) | verified: Wi-Fi stays associated with Wake-on-WLAN (0104), incoming calls, SMS and modem messages wake it (0020, 0128-0135), the RTC alarm wakes it |
+| Haptics (MAX77705, feedbackd) | verified |
 | Fold sensor: closing suspends, opening wakes | verified |
-| Charging, dual cells, fuel gauge | verified |
+| Charging, dual cells, fuel gauge | verified: BC1.2, AFC 9 V, USB PD 9 V (15 W, stock's wired ceiling), stock's cold charging limits (0097, 0098) |
+| Wireless charging (IDT P9320, Qi BPP 5 W) | verified 2026-11-11 (0083-0087) |
+| Thermal limits | stock's kernel thermal limits (0106) and stock's skin temperature estimate and SIOP limits (`mihari`) |
 | Speakers, earpiece, microphones | verified |
 | Cellular data (LG U+ LTE, IPv6 + CLAT) | verified |
 | IMS registration (ISIM AKA) | verified |
@@ -79,11 +86,11 @@ not that the hardware is broken on this unit.
 | Subsystem | State |
 |---|---|
 | 5G NR | the modem reports the capability; data and voice have only been verified on LTE |
-| Cameras: autofocus, OIS, calibration | the wide camera's lens actuator (CCI1 0x18) and OIS MCU (QUP SE2) have no driver, so it is fixed-focus; no lens-shading/AWB calibration from the module EEPROMs and no libcamera tuning files; the hardware ISP (IFE pixel path) is not pursued |
+| Cameras: autofocus, OIS, calibration | the wide camera's AK7377 lens moves under libcamera's software ISP autofocus (0099, 0100), but focusing on a real scene in light has not been seen; the OIS MCU (QUP SE2) has no driver; no lens-shading/AWB calibration from the module EEPROMs; the hardware ISP (IFE pixel path) is not pursued |
 | Hardware video encode | not registered on SM8350: any encode resets the SoC on the first input frame, so `/dev/video1` stays skipped (0043 held) |
-| Wireless charging and reverse wireless charging | 5 W (Qi BPP) verified 2026-11-11 through the IDT P9320 receiver (0084, 0085) and the MAX77705 wireless input (0083), no Samsung fast wireless (10 V) yet; reverse wireless not ported |
+| Samsung fast wireless and reverse wireless charging | the 10 V fast wireless handshake is built (0114, 0115) but no Samsung fast wireless pad has been tried; reverse wireless (0101-0103) refuses correctly with a cable in, transmitting is untested |
 | Hinge angle | only open/closed via `SW_LID`, no angle sensor |
-| Idle power, thermal limits, charge curves | not tuned; QC 2.0 is in (0082) but not yet seen on a QC charger (wired tops out at 15 W like stock: USB PD 9 V fixed PDO or AFC; stock never asks for a PPS APDO, it has no direct charger) |
+| Idle and suspend power, charge curves | idle draws 217 mA with the screens off, suspend drain is not measured; charge curves and termination are stock defaults; QC 2.0 is in (0082) but not yet seen on a QC charger (stock never asks for a PPS APDO, it has no direct charger) |
 
 ## Boot chain
 
@@ -98,12 +105,11 @@ ABL ──> boot      U-Boot (header v0: gzip'd U-Boot with the b2q dtb appended
 
 U-Boot reads `recovery` from UFS and boots it. If that fails it sits in fastboot, so
 `fastboot boot out/linux.img` from the host always works; holding Volume Down while it
-starts opens its menu. A new kernel goes in from the running phone, with no download mode:
-`tools/install-images.sh --reboot recovery=out/linux.img`.
-
-The `recovery` slot is the bring-up slot: Android stays in `boot` until Arch works, and even after
-the phone is dedicated, `recovery` keeps a rescue image that can fsck, reinstall and dump
-partitions over USB.
+starts opens its menu. On the installed system a new kernel is a package update:
+`zflip3-boot` packs the kernel, a mkinitcpio initramfs and the device tree into `recovery` and
+reads it back. Before that, `tools/install-images.sh --reboot recovery=out/linux.img` writes an
+image from the running phone, with no download mode, and the bring-up initramfs
+(`userspace/installer/`) is what a fresh install boots.
 
 ## Roadmap
 
@@ -113,7 +119,7 @@ partitions over USB.
 | M1 | Our image boots from `recovery` reliably |
 | M2 | UFS, USB networking, Wi-Fi, GPU: `ssh` into the phone |
 | M3 | Arch Linux Ports aarch64 rootfs, `pacman -Syu` over that ssh |
-| M3.5 | Wipe and dedicate: `super` → `/`, `userdata` → `/home`, no GPT surgery |
+| M3.5 | Wipe and dedicate: `super` and `userdata` as one LVM volume group with one F2FS `/`, no GPT surgery |
 | M4 | Display + touch: 60 Hz first, then 120 Hz |
 | M5 | Charging, audio (stretch) |
 
@@ -127,10 +133,10 @@ Priority order for a daily driver:
 - Hardware video encode: any encode resets the SoC on the first input frame (0043 held).
 - Cameras: the wide camera's autofocus actuator (CCI1 0x18) and OIS (QUP SE2), calibration
   from the module EEPROMs, libcamera tuning files, and flash tied into capture.
-- Wireless charging: see it work on a pad, then Samsung fast wireless (10 V) and reverse
-  wireless; a thermal policy.
-- Idle power, round two: system suspend once the temporary sleep inhibitor goes, modem and
-  Wi-Fi power save, RPMh rails nothing votes for.
+- Wireless charging: Samsung fast wireless (10 V) on a Samsung pad, and reverse wireless
+  transmitting.
+- Idle power, round two: suspend drain, modem and Wi-Fi power save, RPMh rails nothing votes
+  for.
 
 ### The packaged system
 
@@ -150,8 +156,7 @@ Not packaged yet:
 
 - hardware video decode: `qcom-va-driver 1.1.1` from `github.com/nyanmisaka/libva-v4l2-qcom`,
   built with `tools/build-qcom-va-driver.sh` after the local patch (`VIDEO-DECODE.md`),
-- mobile-config-firefox 5.5.0 with the four Fenix patches from linux-hiby-rs6,
-- the CS35L41 module with the 15 ms mailbox, once it is final.
+- mobile-config-firefox 5.5.0 with the four Fenix patches from linux-hiby-rs6.
 
 ### Hardware variants
 
@@ -181,25 +186,23 @@ tree overlays and vendor files:
 - Stock's dtbo also lists other main and cover panels (S6E3HA9, S6E3FAC, S6E36W3 AMB114EU09)
   that its kernel builds drivers for; whether any retail F711N has one is not known.
 
-### Far future
-
-- **96 and 48 Hz on the main panel.** Stock's VRR sets switch the S6E3HAD to 96HS, 48HS and
-  48NS live (measured over debugfs: TE 96 / 48 / 49), but stock also corrects the gamma at
-  those rates with values computed from the panel's flash, so the driver leaves them out.
-  Porting it means `ss_gm2_gamma_comp_init()` in Samsung's
-  `ss_dsi_panel_S6E3HAD_AMF670ZA01.c`: the flash reads of the HS120 HBM and normal gamma,
-  `MTP_OFFSET_96HS_VAL_revC` (this unit is rev D) and `aor_table_96` /
-  `aor_table_120`. Measurements are in `evidence/SM-F711N-m0.md`, section "The main panel is
-  S6E3HAD_AMF670ZA01 rev D".
-
 ## Repository
 
 | branch | contents |
 |---|---|
 | `senpai` | `patches/`, `tools/`, `userspace/`: the port |
 | `arch` | the PKGBUILDs of every package the phone runs, and the tools that build them and the image |
+| `ci` | the GitHub Actions workflow that builds `arch` on arm64 runners and publishes `[zflip3]` |
 | `docs` | write-ups: plan, boot chain, panel, storage, cellular, evidence policy |
 | `firmware` | a README; `firmware-zflip3` (`arch`) extracts the files from the stock firmware instead |
+
+The packages are published as the pacman repository `[zflip3]` (unsigned, `SigLevel = Never`),
+listed in `zflip3-mirrorlist`:
+
+```
+Server = https://noas-slopware.github.io/linux-zflip3/arch/$arch
+Server = https://mirror.funami.tech/linux-zflip3/arch/$arch
+```
 
 ```
 patches/linux/           numbered series against sources.lock's LINUX_VERSION
@@ -245,8 +248,20 @@ B2Q_UNLOCKED=1 tools/flash.sh --partition dtbo --image out/dtbo-empty.img \
 tools/install-images.sh --reboot recovery=out/linux.img
 ```
 
-USB enumerates only after the cable is re-plugged once the kernel runs; the shell is then on
-`ttyACM0`. `tools/flash.sh` refuses to run until `B2Q_UNLOCKED=1` says the device is unlocked
+The bring-up initramfs offers a shell on the USB serial gadget (`ttyACM0` on the host) and
+over telnet at `172.16.42.1`. To install the generic Arch Linux Ports image (`tools/mkimage-zflip3.sh`
+on `arch`), run the installer in the telnet shell, since it asks for the new user's password:
+
+```sh
+install-rootfs --yes-wipe --user NAME                                  # on the phone
+zstdcat archlinux-zflip3-rootfs.tar.zst | nc 172.16.42.1 5555          # on the host
+```
+
+The image has no accounts, as Arch Linux Ports' own root file system: root is locked, there is
+no user and no sshd. `--user` makes the one user (in `wheel`, for `sudo`) and its Plasma Mobile
+autologin; the lock screen asks for that password. The installer then writes the image's boot image
+(`/boot/linux-zflip3.img`, its own kernel) to `recovery` and reads it back, so the next boot is
+the installed system. `tools/flash.sh` refuses to run until `B2Q_UNLOCKED=1` says the device is unlocked
 and the stock firmware is saved.
 
 ## Licenses
