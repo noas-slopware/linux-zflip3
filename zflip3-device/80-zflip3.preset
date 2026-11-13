@@ -26,3 +26,6 @@ enable imsroha-bearer.service
 enable imsroha-vss-samsung.service
 enable imsroha-rcs.service
 enable plasmalogin.service
+# nothing uses systemd-homed here: switch off what systemd's own 90-systemd.preset enables
+disable systemd-homed.service
+disable systemd-homed-activate.service

@@ -27,7 +27,8 @@ if [ -z "${ZFLIP3_IN_CONTAINER:-}" ]; then
 	. "$(dirname "$(realpath "$0")")/lib-zflip3.sh"
 	mkdir -p "$out"; out=$(realpath "$out")
 	root=$W/image-root
-	[ ! -e "$root" ] || { echo "$root exists (a previous run); remove it first" >&2; exit 1; }
+	# root-owned after a run: tools/clean-image-root-zflip3.sh removes it
+	[ ! -e "$root" ] || { echo "$root exists (a previous run): tools/clean-image-root-zflip3.sh" >&2; exit 1; }
 	mkdir -p "$root"
 	"$ENGINE" run --rm --privileged "${EMU[@]}" -e ZFLIP3_IN_CONTAINER=1 \
 		-e USERNAME -e PASSWORD -e ROOT_PASSWORD -e ZFLIP3_IMAGE_PKGS -e REPO_URL="$REPO_URL" \
@@ -56,6 +57,10 @@ fi
 [ "$1" = /target ] || { echo "inside the container the target is /target, not $1" >&2; exit 1; }
 t=/target
 pacman -Sy --noconfirm >/dev/null
+# the directory comes from the host user; a root owned by anyone but root makes systemd-tmpfiles
+# refuse every path under it ("unsafe path transition")
+chown 0:0 /target
+chmod 755 /target
 mountpoint -q "$t" || mount --bind "$t" "$t"
 pacstrap -C /etc/pacman.conf -K "$t" "${PKGS[@]}"
 

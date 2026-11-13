@@ -51,7 +51,10 @@ build_one() {
 		su builder -c "makepkg --printsrcinfo" > .SRCINFO
 		mine=$(sed -n "s/^pkgname = //p" .SRCINFO)
 		keys="depends|makedepends"; [ -n "$NOCHECK" ] || keys="$keys|checkdepends"
-		deps=$(sed -nE "s/^\t($keys) = //p" .SRCINFO | sed -E "s/[<>=].*//" | sort -u | grep -vxF "$mine" || :)
+		# the pkgbase section only, as makepkg -s does: split packages'"'"' own depends are
+		# runtime ones, which makepkg does not install
+		deps=$(sed -n "/^pkgname = /q;p" .SRCINFO | sed -nE "s/^\t($keys) = //p" |
+			sed -E "s/[<>=].*//" | sort -u | grep -vxF "$mine" || :)
 		[ -z "$deps" ] || pacman -S --noconfirm --needed --asdeps $deps
 		su builder -c "CCACHE_DIR=/ccache SRCDEST=/srcdest PKGDEST=/out makepkg -f --noconfirm ${NOCHECK:+--nocheck}"
 	' > "$log" 2>&1 || { log "$pkg: FAILED, see $log"; return 1; }

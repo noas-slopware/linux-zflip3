@@ -28,7 +28,7 @@ pkgname=(
   zflip3-plasma
 )
 pkgver=1
-pkgrel=1
+pkgrel=2
 pkgdesc='Samsung Galaxy Z Flip3 5G (SM-F711N)'
 url='https://github.com/noas-slopware/linux-zflip3'
 arch=(aarch64)
@@ -52,7 +52,7 @@ sha256sums=('08ad2bc3cde6e524254b4ea05f38488b800d931b03a321da9c388f49ca7f1291'
             '4ed6ac6759b9c89add216dc2a8a2b97ee249cd4a2891eeb339732242bccdd577'
             '2b9e814d75ef1d3cf023fc479837eb010c48e30d403d15d28a8a4a6207fd5981'
             '3523ee5d1a7ce2ac09fe8baef103198ca879f7019b2ad7b5728a127666aca73c'
-            '7f4aa6acf2cfb6c5fcd90459988770d5cfda7d0cad9bfeb4886650fafb505ca6')
+            '74a5026551de171800103d4ae201304cba11b6cd40d417fdc47c005c06f9eabd')
 
 _r() { echo "$srcdir/linux-zflip3-$_zf3commit/userspace/rootfs"; }
 
@@ -140,6 +140,8 @@ package_zflip3-boot() {
   pkgdesc="$pkgdesc (boot image for U-Boot on the recovery partition, initramfs)"
   depends=(
     android-tools
+    # mkbootimg is a Python script, and android-tools only optdepends on it
+    python
     bash
     coreutils
     f2fs-tools
