@@ -55,6 +55,8 @@ makedepends=(
   sdl2
   systemd
 )
+# b2q: the v4l2_compat test imports packaging
+checkdepends=(python-packaging)
 source=(
   "git+$_url#tag=v$pkgver"
   "$pkgbase-fix-python3.14-macro-redefinition.patch"
@@ -171,6 +173,11 @@ check() {
       | grep -v single_stream_test \
       | grep -v multi_stream_test \
       | grep -v memory_lifetime_test \
+      | if [ -n "${ZFLIP3_QEMU_USER:-}" ]; then
+          # b2q: libcamera's Process forks with clone3(), which qemu-user does not implement
+          # (ENOSYS), so these fail only in the emulated build container; a native build runs them
+          grep -vx -e libcamera:unixsocket_ipc -e libcamera:log_process -e libcamera:process_test
+        else cat; fi \
   )
   # shellcheck disable=SC2068
   meson test -C build ${tests[@]}

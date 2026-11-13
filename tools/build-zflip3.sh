@@ -11,6 +11,8 @@
 #                  GitHub, or to build offline)
 #   NOCHECK=1      skip check() (makepkg --nocheck)
 #   VERIFYSOURCE=1 only download and verify the sources (checksums, PGP signatures), build nothing
+# makepkg sees ZFLIP3_QEMU_USER=1 when it runs under qemu-user (x86_64 hosts): a check() can leave
+# out tests of what qemu-user cannot do (clone3, namespaces) and still run them on the phone.
 #   ZFLIP3_ACCEL   how C/C++ gets compiled in the builder:
 #                    xgcc  (default on x86_64) drzee's exact gcc + binutils (+ ccache) rebuilt as
 #                          x86_64 cross tools (mkxtools-zflip3.sh) and run natively inside the AArch64
@@ -64,7 +66,8 @@ build_one() {
 	"$ENGINE" run --rm "${EMU[@]}" "${xt[@]}" \
 		-v "$src/$pkg:/pkgsrc:ro" -v "$REPO:/repo" -v "$W/pkgcache:/var/cache/pacman/pkg" \
 		-v "$W/srcdest:/srcdest" -v "$W/ccache:/ccache" -v "$W/out/$pkg:/out" -e ACCEL="$ACCEL" \
-		-e NOCHECK="${NOCHECK:-}" -e VERIFYSOURCE="${VERIFYSOURCE:-}" localhost/zflip3-builder bash -euc '
+		-e NOCHECK="${NOCHECK:-}" -e VERIFYSOURCE="${VERIFYSOURCE:-}" \
+		-e ZFLIP3_QEMU_USER="$([ "$HOSTARCH" = aarch64 ] || echo 1)" localhost/zflip3-builder bash -euc '
 		pacman -Syu --noconfirm >/dev/null
 		cp -r /pkgsrc /build && chown -R builder: /build /out /srcdest /ccache
 		cd /build
@@ -91,7 +94,41 @@ build_one() {
 		echo "zflip3-timing: makepkg $(date +%s)"
 		# the PATH a login shell gets from /etc/profile.d/perlbin.sh: the perl tools (pod2man & co.) are
 		# in /usr/bin/core_perl, and su -c is no login shell
-		su builder -c "PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/bin/site_perl:/usr/bin/vendor_perl:/usr/bin/core_perl CCACHE_DIR=/ccache SRCDEST=/srcdest PKGDEST=/out makepkg -f --noconfirm ${NOCHECK:+--nocheck}"
+		ENVS="PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/bin/site_perl:/usr/bin/vendor_perl:/usr/bin/core_perl CCACHE_DIR=/ccache SRCDEST=/srcdest PKGDEST=/out ZFLIP3_QEMU_USER=$ZFLIP3_QEMU_USER"
+		# the build tree goes with the container: keep what failed tests wrote
+		testlogs() {
+			for t in $(find /build/src -name testlog.txt -path "*meson-logs*" 2>/dev/null); do
+				echo "==> $t (failed tests)"
+				# one section per test from its "==== N/M ====" header: those whose result is
+				# neither a pass nor a skip (77)
+				awk "function out() { if (buf != \"\" && bad) printf \"%s\", buf }
+					/^=+ [0-9]+\/[0-9]+ =+\$/ { out(); buf=\"\"; bad=0 }
+					/^result: / && !/exit status 0\$/ && !/exit status 77\$/ && !/skipped/ { bad=1 }
+					{ buf = buf \$0 \"\n\" } END { out() }" "$t" | tail -n 400
+			done
+		}
+		if [ "$ACCEL" = xgcc ] && [ -z "$NOCHECK" ]; then
+			# Tests run what the package just built, and the x86_64 python from xtools can load
+			# neither its AArch64 python modules nor an AArch64 LD_PRELOAD (libcamera'"'"'s
+			# pybindings and v4l2-compat tests). So: build and package with the native tools,
+			# put drzee'"'"'s own python back, then run check() by itself as makepkg does (in
+			# $srcdir, its makepkg.conf environment, errexit); the packages only reach the repo
+			# if it passes.
+			su builder -c "$ENVS makepkg -f --noconfirm --nocheck" || { testlogs; exit 1; }
+			pacman -S --noconfirm python > /dev/null
+			echo "zflip3: check() with drzee'"'"'s python"
+			su builder -c "$ENVS bash -euc '"'"'
+				source /etc/makepkg.conf
+				for f in /etc/makepkg.conf.d/*.conf; do [ -e \"\$f\" ] && source \"\$f\"; done
+				export CFLAGS CXXFLAGS LDFLAGS MAKEFLAGS NINJAFLAGS CHOST CARCH
+				cd /build && source ./PKGBUILD
+				srcdir=/build/src startdir=/build
+				declare -F check > /dev/null || exit 0
+				cd \"\$srcdir\" && check
+			'"'"'" || { testlogs; exit 1; }
+		else
+			su builder -c "$ENVS makepkg -f --noconfirm ${NOCHECK:+--nocheck}" || { testlogs; exit 1; }
+		fi
 	' >> "$log" 2>&1 || { exec 8>&-; log "$pkg: FAILED, see $log"; return 1; }
 	exec 8>&-	# xtools_use's lock
 	local t1 td tm; t1=$(date +%s)
