@@ -80,7 +80,12 @@ build_one() {
 			sed -E "s/[<>=].*//" | sort -u | grep -vxF "$mine" || :)
 		# the keys a signed source is checked against (kernel.org tarballs: Linus, Greg)
 		pgpkeys=$(sed -n "s/^\tvalidpgpkeys = //p" .SRCINFO | sort -u | tr "\n" " ")
-		[ -z "$pgpkeys" ] || su builder -c "gpg --batch --keyserver hkps://keyserver.ubuntu.com --recv-keys $pgpkeys"
+		# one key at a time, from keys.openpgp.org when keyserver.ubuntu.com does not have it (Tom
+		# Rini'"'"'s U-Boot key), as the CI build does
+		for k in $pgpkeys; do
+			su builder -c "gpg -q --batch --keyserver hkps://keyserver.ubuntu.com --recv-keys $k ||
+				gpg -q --batch --keyserver hkps://keys.openpgp.org --recv-keys $k"
+		done
 		if [ -n "$VERIFYSOURCE" ]; then
 			su builder -c "SRCDEST=/srcdest makepkg --verifysource -f"
 			exit 0
