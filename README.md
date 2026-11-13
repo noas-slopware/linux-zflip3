@@ -175,7 +175,8 @@ tree overlays and vendor files:
   needs a boot on the phone to confirm the IMX258 path still comes up.
 - **Cover touch firmware**: stock reflashes the ZTW522 when its firmware is older than
   `/vendor/firmware/ztw522_b2.bin` (minor 0x23, register data 0x14) and never downgrades, so a
-  unit that last ran stock One UI 7 already runs that firmware; the port does not flash it.
+  unit should still run the firmware of the last stock build it ran (inferred from stock's
+  driver, not read off another unit); the port does not flash it.
 - **Wide camera**: stock has a DV0/DV1 module description without autofocus actuator or OIS
   next to the retail DV2 one; DV0/DV1 look like development modules.
 - Stock's dtbo also lists other main and cover panels (S6E3HA9, S6E3FAC, S6E36W3 AMB114EU09)
