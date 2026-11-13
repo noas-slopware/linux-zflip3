@@ -6,35 +6,19 @@ Files that run on the phone, as opposed to `tools/` which runs on the host.
 |---|---|
 | `installer/init` | PID 1 of the bring-up initramfs (USB console on `ttyGS0`, pstore dump) |
 | `installer/install-rootfs.sh` | M3.5: format `super`/`userdata` and unpack the Arch rootfs |
-| `rootfs/` | overlay copied over `/` by `tools/build-rootfs.sh`: units, udev rules, NetworkManager, UCM, cover display |
+| `rootfs/` | the phone's configuration: units, udev rules, NetworkManager, UCM, IMSroha's drop-in (`zflip3-device` on `arch`; `tools/build-rootfs.sh` copies it over `/`) |
 | `kita/` | `kita`, the cover display (leased DRM connector, clock, notifications, calls) |
 
-Packages built natively on the phone (`makepkg` as the phone's user) and given to
-`tools/build-rootfs.sh --packages`; each PKGBUILD starts from Arch's or the AUR's:
-
-| path | version | why |
-|---|---|---|
-| `claire/` | 0.1.0-7 | fingerprint glue for the securefp TA |
-| `callaudiod/` | 0.1.99-5 | switches the call profile for the speaker button, keeps a default headset in calls |
-| `fprintd/` | 1.94.5-4 | closes a reader released while suspended once it resumes, claims made while suspended complete on resume |
-| `gtk4/` | 1:4.24.1-2 | GTK menus (GtkPopoverMenu) scroll with a finger: menu items no longer claim a touch on press |
-| `hexagonrpcd/` | 0.5.0-2 | file server for the sensor hub (SLPI) |
-| `iio-sensor-proxy/` | 3.9-2 | SSC sensors |
-| `kscreenlocker/` | 6.8.2-2 | keeps the fingerprint reader armed at the lock screen |
-| `libcamera/` | 0.7.2-9 | IMX374/IMX563 helpers, soft ISP autofocus for the wide camera |
-| `libfprint/` | 1.94.100-7 | `samsung_securefp` driver |
-| `mihari/` | 0.1.0-2 | stock's skin temperature estimate (LRP2) and SIOP CPU/GPU limits |
-| `neard/` | 0.20-1 | NFC |
-| `plasma-camera/` | 26.08.3-2 | cameras named by location |
-| `plasma-mobile/` | 6.8.2-3 | volume popup without a default sink, quick settings fix |
-| `rmtfs/` | 1.3-1 | modem remote filesystem (the AUR has 1.2) |
-| `spacebar/` | 6.3.4-4 | LG U+ MMS send |
-| `tqftpserv/` | 1.3.r4.geb4b9a0-1 | modem TFTP server with populate-readwrite (the AUR has 1.2) |
-| `wireplumber/` | 0.5.18-3 | keeps the call profile picked during a call |
+Our own programs are here: `claire/` (fingerprint secure-world glue), `mihari/` (stock's skin
+temperature estimate and SIOP limits) and `kita/`; `rootfs/` is the phone's configuration.
+They are packaged on the `arch` branch (`claire`, `mihari`, `kita`, the `zflip3-device` split
+packages from `rootfs/`), which builds each from a tarball of this branch. The patches for
+other projects' packages (libcamera, libfprint, fprintd, gtk4, ...) are under `patches/`,
+one directory per package; their PKGBUILDs are on `arch`, each based on Arch's or the AUR's.
 
 IMS (VoLTE, SMS over IMS) is [IMSroha](https://github.com/noas-slopware/imsroha), split out of
-this repository's `userspace/imsd/` on 2026-11-11 and built from its own `packaging/`; the
-ModemManager it needs is that repository's `modemmanager/`. This phone's side of it is
+this repository's `userspace/imsd/` on 2026-11-11; `arch` builds it, and the ModemManager and
+Spacebar forks it needs, from that repository's tarball. This phone's side of it is
 `rootfs/usr/share/imsroha/imsroha.conf.d/50-zflip3.conf` and the `imsroha-vss-samsung.service.d/b2q.conf` drop-in.
 
 `installer/init` is copied into the initramfs by `tools/build-initramfs.sh`; it is not
