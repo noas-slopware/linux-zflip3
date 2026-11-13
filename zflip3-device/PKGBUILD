@@ -9,9 +9,10 @@
 #
 #   zflip3-device    meta package: everything below but zflip3-plasma (optional), plus kernel,
 #                    DTBs and firmware; needs no particular desktop
-#   zflip3-system    Wi-Fi/Bluetooth addresses from efs (Akari), sensor hub tree (Renge), USB
-#                    network and serial console, NetworkManager and Wi-Fi settings, zram, lid, preset
-#   zflip3-boot      Android boot image for U-Boot (recovery partition), mkinitcpio config
+#   zflip3-system    Wi-Fi/Bluetooth addresses from efs (Akari), sensor hub tree (Renge), the USB
+#                    network's addresses, NetworkManager and Wi-Fi settings, zram, lid, preset
+#   zflip3-boot      Android boot image for U-Boot (recovery partition), mkinitcpio config, and
+#                    the USB gadget (network, serial console) the bring-up initramfs used to make
 #   zflip3-audio     UCM for the SM-F711N sound card, PipeWire and WirePlumber drop-ins
 #   zflip3-cellular  USIM provisioning (SIMamura), a generic mobile data profile, CLAT for IPv6-only
 #                    carriers, IMSroha's phone settings, ModemManager/81voltd ordering
@@ -28,7 +29,7 @@ pkgname=(
   zflip3-plasma
 )
 pkgver=1
-pkgrel=3
+pkgrel=4
 pkgdesc='Samsung Galaxy Z Flip3 5G (SM-F711N)'
 url='https://github.com/noas-slopware/linux-zflip3'
 arch=(aarch64)
@@ -124,10 +125,6 @@ package_zflip3-system() {
     usr/lib/NetworkManager/dispatcher.d/50-wifi-no-v6-leak.sh \
     usr/lib/NetworkManager/dispatcher.d/60-wifi-wowlan.sh
 
-  # USB gadget (network at 172.16.42.1, serial console on ttyGS0)
-  install -Dm755 "$srcdir"/zflip3-usbnet -t "$pkgdir"/usr/lib/zflip3/
-  install -Dm644 "$srcdir"/zflip3-usbnet.service -t "$pkgdir"/usr/lib/systemd/system/
-  install -Dm644 "$srcdir"/90-zflip3-usbnet.rules -t "$pkgdir"/usr/lib/udev/rules.d/
   _ov usr/lib/systemd/network/50-usb0.network \
     usr/lib/systemd/networkd.conf.d/50-keep-foreign.conf
 
@@ -153,6 +150,7 @@ package_zflip3-boot() {
     f2fs-tools
     lvm2
     mkinitcpio
+    systemd
   )
   backup=(etc/mkinitcpio.conf.d/zflip3.conf)
 
@@ -160,6 +158,12 @@ package_zflip3-boot() {
   install -Dm644 "$srcdir"/95-zflip3-bootimg.hook -t "$pkgdir"/usr/share/libalpm/hooks/
   install -Dm644 "$srcdir"/linux-zflip3-$_zf3commit/configs/cmdline -t "$pkgdir"/usr/share/zflip3/
   install -Dm644 "$srcdir"/mkinitcpio-zflip3.conf "$pkgdir"/etc/mkinitcpio.conf.d/zflip3.conf
+
+  # the USB gadget the bring-up initramfs used to make (network at 172.16.42.1, serial console on
+  # ttyGS0), now from the running system
+  install -Dm755 "$srcdir"/zflip3-usbnet -t "$pkgdir"/usr/lib/zflip3/
+  install -Dm644 "$srcdir"/zflip3-usbnet.service -t "$pkgdir"/usr/lib/systemd/system/
+  install -Dm644 "$srcdir"/90-zflip3-usbnet.rules -t "$pkgdir"/usr/lib/udev/rules.d/
 }
 
 package_zflip3-audio() {
