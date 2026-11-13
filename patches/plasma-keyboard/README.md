@@ -25,7 +25,7 @@ Authors: Noa Himesaka <himesaka@noa.codes>.
 `libhangul` dependency and the two patches applied in `prepare()`. It builds on the
 phone as the `build` user (see the top of the PKGBUILD) and installs over the ports
 package with `pacman -U`. The same patches and recipe are in `linux-hiby-rs6`
-(pmOS: Alpine APKBUILD on 6.8.1); keep the two in sync.
+(Nura: Alpine APKBUILD on 6.8.1); keep the two in sync.
 
 The patches are `git format-patch` output against the upstream release; apply with `patch -p1` or `git am`.
 They are licensed like the project they patch. The PKGBUILD is MIT.

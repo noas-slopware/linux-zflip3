@@ -431,7 +431,7 @@ No device action yet; nothing on the phone has changed.
   SM8350, mainline 7.3, 145 patches) has working LTE data and VoLTE with upstream's
   655 and no IRQ patch. If IPA probes but never interrupts, 654 is the first thing
   to try, as a `sm8350.dtsi` patch.
-- Userspace stack chosen (as in the OnePlus 9 Pro port and pmOS): `rmtfs -r -P -s`
+- Userspace stack chosen (as in the OnePlus 9 Pro port and Nura): `rmtfs -r -P -s`
   serving modemst1/modemst2/fsc/fsg by partlabel (read-only NV: the modem's writes
   stay in RAM, the partitions are never written from Linux, which keeps the
   never-write-to-modemst rule), rmtfs itself starting the mpss remoteproc; `qrtr-ns`;
@@ -558,7 +558,7 @@ After a phone reboot (allowed: after a crash) with the active SIM (the iPhone
   fields are current (2026-11-07, set by ModemManager), and NAS network time
   is right.
 - OpenIMSD (gitlab.postmarketos.org/modem/openimsd) is the working open IMS
-  enabler (pmOS v26.06 ships VoLTE on OnePlus 6 out of the box), but its repo
+  enabler (Nura v26.06 ships VoLTE on OnePlus 6 out of the box), but its repo
   needs auth from here; its PDC+IMS-settings approach is the next lead. Also
   relevant: Biktorgj/imsd, "hyphae", XDA thread "Qualcomm IMS/VoLTE
   configuration demystify" (IMS config lives in modem EFS).
