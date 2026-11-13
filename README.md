@@ -153,7 +153,8 @@ everything, cellular included, works:
   the UCM files under `userspace/rootfs/usr/share/alsa/ucm2/`, the WirePlumber drop-in
   under `userspace/rootfs/usr/share/wireplumber/`, and the CS35L41 module once the 15 ms
   mailbox build is final,
-- IMSroha's device settings, `/etc/imsroha/imsroha.conf`, from `--overlay` for now
+- IMSroha's phone settings, `userspace/rootfs/usr/share/imsroha/imsroha.conf.d/50-zflip3.conf`
+  (the carrier that sold the phone and RCS go in `/etc/imsroha/imsroha.conf`)
   (its units create `/var/lib/imsroha/inbox` and `/run/imsroha`; an inbox left in
   `/var/lib/b2q-imsd` is moved over once),
 - the sensors: `tools/extract-qcom-firmware.sh ... slpi` and

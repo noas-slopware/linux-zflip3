@@ -35,7 +35,7 @@ Packages built natively on the phone (`makepkg` as the phone's user) and given t
 IMS (VoLTE, SMS over IMS) is [IMSroha](https://github.com/noas-slopware/imsroha), split out of
 this repository's `userspace/imsd/` on 2026-11-11 and built from its own `packaging/`; the
 ModemManager it needs is that repository's `modemmanager/`. This phone's side of it is
-`rootfs/etc/imsroha/imsroha.conf` and the `imsroha-vss-samsung.service.d/b2q.conf` drop-in.
+`rootfs/usr/share/imsroha/imsroha.conf.d/50-zflip3.conf` and the `imsroha-vss-samsung.service.d/b2q.conf` drop-in.
 
 `installer/init` is copied into the initramfs by `tools/build-initramfs.sh`; it is not
 duplicated in the build.
