@@ -15,8 +15,9 @@ C and later _revC (ss_gm2_gamma_comp_init()).
 Do the same: read DAh to DCh once after the first reset, then VBIAS and
 VAINT for A to C, send that revision's display-on sequence, and add
 revA's offsets (the same 18 columns as revC's are the only non-zero
-ones). A revision D panel, the only one tried, gets exactly what it got
-before; A to C follow stock's code and are untested.
+ones). A revision D panel, the only one tried, gets the same display-on
+sequence and offsets as before, plus three one-byte ID reads (DAh to DCh)
+after the first reset; A to C follow stock's code and are untested.
 
 Assisted-by: Claude:claude-opus-5-5
 Signed-off-by: Noa Himesaka <himesaka@noa.codes>
