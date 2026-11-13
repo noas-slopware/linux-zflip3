@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: MIT
 # Build the cover daemon and the lease probe. Run in userspace/kita.
 set -eu
 cd "$(dirname "$0")"

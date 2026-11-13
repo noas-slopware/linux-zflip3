@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 [AC][SuspendAndShutdown]
 LidAction=0
 PowerButtonAction=32

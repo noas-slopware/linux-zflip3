@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: MIT
 # Build and install qcom-va-driver (nyanmisaka/libva-v4l2-qcom) on the phone.
 #
 # Run this on the phone as <user>, from a checkout of this repo (or point

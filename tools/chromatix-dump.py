@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
 """Dump a Qualcomm CamX/CHI "Parameter Parser V2.0.0" binary (e.g. Samsung
 com.samsung.sensormodule.*.bin) as a nested JSON tree.
 

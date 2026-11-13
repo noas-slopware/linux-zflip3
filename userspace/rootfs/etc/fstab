@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 # / is one F2FS on LVM: VG b2q spans the old super and userdata partitions.
 /dev/b2q/root  /  f2fs  rw,noatime  0 0
 /swapfile none swap defaults,pri=10 0 0

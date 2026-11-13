@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import ghidra.app.script.GhidraScript;
 import ghidra.program.model.address.*;
 import ghidra.program.model.mem.*;

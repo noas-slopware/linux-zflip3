@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import ghidra.app.script.GhidraScript;
 public class ProgInfo extends GhidraScript {
     @Override

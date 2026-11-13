@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import ghidra.app.script.GhidraScript;
 import ghidra.program.model.listing.*;
 import ghidra.app.decompiler.DecompInterface;

@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: MIT
 # Activate the first USIM as the modem's primary GW provisioning session.
 # The modem firmware boots with none open; on stock Android the radio layer
 # opens one. Without it ModemManager reports "GW primary session index

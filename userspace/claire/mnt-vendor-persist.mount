@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 [Unit]
 Description=Samsung persist partition (secnvm, the SPSS's NVM copies)
 Documentation=file:///usr/share/doc/claire/README.md
