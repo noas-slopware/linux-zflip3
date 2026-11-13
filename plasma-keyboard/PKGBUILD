@@ -1,0 +1,64 @@
+# Maintainer: Noa Himesaka <himesaka@noa.codes>
+# SPDX-License-Identifier: MIT
+#
+# Arch's extra/plasma-keyboard 6.8.2-1, rebuilt for the b2q aarch64 rootfs with
+# the Korean input patches in this directory (see README.md).
+#
+# Build on the phone as the unprivileged `build` user, from this directory:
+#
+#   su build -c 'cd /home/build/plasma-keyboard && makepkg -s'
+#
+# Then install the resulting package as root with `pacman -U`. pkgrel is above
+# the ports repo's, so the patched build wins.
+
+pkgname=plasma-keyboard
+pkgver=6.8.2
+_dirver=$(echo $pkgver | cut -d. -f1-3)
+pkgrel=2
+arch=(aarch64)
+pkgdesc='Virtual Keyboard for Qt based desktops'
+url='https://kde.org/plasma-desktop/'
+license=(GPL-2.0-or-later)
+depends=(glibc
+         kcmutils
+         kconfig
+         kcoreaddons
+         kcrash
+         ki18n
+         kirigami
+         kirigami-addons
+         kitemmodels
+         libhangul
+         libplasma
+         libstdc++
+         libxkbcommon
+         qt6-base
+         qt6-declarative
+         qt6-virtualkeyboard
+         wayland)
+makedepends=(extra-cmake-modules
+             pkgconf
+             qt6-wayland
+             wayland-protocols)
+groups=(plasma)
+source=("https://download.kde.org/stable/plasma/$_dirver/$pkgname-$pkgver.tar.xz"
+        0001-Compose-Korean-syllables-in-the-preedit.patch
+        0002-Pass-content-type-changes-on-to-Qt-Virtual-Keyboard.patch)
+sha256sums=('4a48f97a1aa1c58fa9f1ae3160f770f5a223f73d66b3e7306c01318a2a562479'
+            '67a5eda72405b94fc73c48095eeb61b530f88feb14a7d52415e6666835d38cbe'
+            '7584df2e72bfb76920a1e4f22d650262c2233962d055a19d76886c1939b6968d')
+
+prepare() {
+  cd $pkgname-$pkgver
+  patch -Np1 -i ../0001-Compose-Korean-syllables-in-the-preedit.patch
+  patch -Np1 -i ../0002-Pass-content-type-changes-on-to-Qt-Virtual-Keyboard.patch
+}
+
+build() {
+  cmake -B build -S $pkgname-$pkgver
+  cmake --build build
+}
+
+package() {
+  DESTDIR="$pkgdir" cmake --install build
+}

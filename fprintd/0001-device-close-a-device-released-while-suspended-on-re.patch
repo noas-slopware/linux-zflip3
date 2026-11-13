@@ -1,0 +1,259 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Thu, 12 Nov 2026 23:26:59 +0900
+Subject: [PATCH] device: close a device released while suspended on resume
+
+libfprint refuses to open or close a suspended device: both fail with
+FP_DEVICE_ERROR_BUSY until the resume. When a suspend cancels a running
+verification, as it does on a lock screen when the system goes to sleep
+while it waits for a finger, the client usually releases the device right
+away, while it is still suspended. The close then fails with "The device
+is still busy with another operation", but fprintd drops the claim
+anyway. The device stays open with nobody owning it, so every later Claim
+fails with "The device is already open" until fprintd restarts. A client
+that disconnects while the device is suspended hits the same thing in
+the disconnect handler, with a critical warning.
+
+Remember such a release instead, and close the device once it has been
+resumed. A Claim that comes before the resume takes over the device that
+is still open, and one that comes while the close runs waits for it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/device.c     | 106 ++++++++++++++++++++++++++++++++++++++++++++++-
+ tests/fprintd.py |  54 ++++++++++++++++++++++++
+ 2 files changed, 159 insertions(+), 1 deletion(-)
+
+diff --git a/src/device.c b/src/device.c
+index 4de4a10..bd46d5e 100644
+--- a/src/device.c
++++ b/src/device.c
+@@ -119,6 +119,11 @@ typedef struct
+   FprintDeviceAction     current_action;
+   GCancellable          *current_cancellable;
+   GDBusMethodInvocation *current_cancel_invocation;
++
++  /* Between the suspend request and the end of the resume */
++  gboolean               suspended;
++  /* Released while suspended: still open, to be closed on resume */
++  gboolean               close_on_resume;
+ } FprintDevicePrivate;
+ 
+ G_DEFINE_TYPE_WITH_CODE (FprintDevice, fprint_device,
+@@ -492,15 +497,65 @@ suspend_cb (GObject      *source_obj,
+     g_task_return_boolean (task, TRUE);
+ }
+ 
++static void
++resume_close_cb (GObject      *source_obj,
++                 GAsyncResult *res,
++                 gpointer      user_data)
++{
++  g_autoptr(GTask) task = user_data;
++  g_autoptr(GError) error = NULL;
++  FprintDevice *rdev = g_task_get_source_object (task);
++  FprintDevicePrivate *priv = fprint_device_get_instance_private (rdev);
++  GError *resume_error = g_task_get_task_data (task);
++
++  priv->current_action = ACTION_NONE;
++
++  if (!fp_device_close_finish (FP_DEVICE (source_obj), res, &error))
++    {
++      /* Still open: the next claim takes it over */
++      g_warning ("Closing device %d on resume failed: %s", priv->id, error->message);
++      priv->close_on_resume = TRUE;
++    }
++  else
++    {
++      g_debug ("closed device %d on resume", priv->id);
++    }
++
++  if (resume_error)
++    g_task_return_error (task, g_error_copy (resume_error));
++  else
++    g_task_return_boolean (task, TRUE);
++}
++
+ static void
+ resume_cb (GObject      *source_obj,
+            GAsyncResult *res,
+            gpointer      user_data)
+ {
+   g_autoptr(GTask) task = user_data;
++  FprintDevice *rdev = g_task_get_source_object (task);
++  FprintDevicePrivate *priv = fprint_device_get_instance_private (rdev);
++  g_autoptr(SessionData) session = NULL;
+   GError *error = NULL;
+ 
+   fp_device_resume_finish (FP_DEVICE (source_obj), res, &error);
++  priv->suspended = FALSE;
++  session = session_data_get (priv);
++
++  /*
++   * libfprint refuses to close a suspended device, so a device released
++   * while suspended has been left open until now.
++   */
++  if (priv->close_on_resume && !session)
++    {
++      priv->close_on_resume = FALSE;
++      if (error)
++        g_task_set_task_data (task, error, (GDestroyNotify) g_error_free);
++      priv->current_action = ACTION_CLOSE;
++      fp_device_close (priv->dev, NULL, resume_close_cb, g_steal_pointer (&task));
++      return;
++    }
++
+   if (error)
+     g_task_return_error (task, error);
+   else
+@@ -518,6 +573,7 @@ fprint_device_suspend (FprintDevice       *rdev,
+   /* Just forward to libfprint. */
+ 
+   task = g_task_new (rdev, NULL, callback, user_data);
++  priv->suspended = TRUE;
+   fp_device_suspend (priv->dev, NULL, suspend_cb, task);
+ }
+ 
+@@ -993,7 +1049,19 @@ _fprint_device_client_vanished (GDBusConnection *connection,
+       g_clear_pointer (&session, session_data_unref);
+       session = session_data_get (priv);
+       if (session && !fp_device_close_sync (priv->dev, NULL, &error))
+-        g_critical ("Error closing device after disconnect: %s", error->message);
++        {
++          if (priv->suspended &&
++              g_error_matches (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_BUSY))
++            {
++              g_debug ("device %d released by a disconnect while suspended, "
++                       "closing it on resume", priv->id);
++              priv->close_on_resume = TRUE;
++            }
++          else
++            {
++              g_critical ("Error closing device after disconnect: %s", error->message);
++            }
++        }
+ 
+       session_data_set_new (priv, NULL, NULL);
+     }
+@@ -1108,6 +1176,19 @@ fprint_device_claim (FprintDBusDevice      *dbus_dev,
+       return TRUE;
+     }
+ 
++  /* Wait for a close deferred to the resume, then check again */
++  if (priv->current_action == ACTION_CLOSE)
++    {
++      while (priv->current_action == ACTION_CLOSE)
++        g_main_context_iteration (NULL, TRUE);
++
++      if (!_fprint_device_check_claimed (rdev, invocation, &error))
++        {
++          g_dbus_method_invocation_return_gerror (invocation, error);
++          return TRUE;
++        }
++    }
++
+   user = g_object_steal_qdata (G_OBJECT (invocation), quark_auth_user);
+   g_assert (user);
+   g_assert (g_str_equal (username, "") || g_str_equal (user, username));
+@@ -1120,6 +1201,18 @@ fprint_device_claim (FprintDBusDevice      *dbus_dev,
+ 
+   g_debug ("user '%s' claiming the device: %d", session->username, priv->id);
+ 
++  /* Released while suspended, the device is still open: take it over */
++  if (priv->close_on_resume)
++    {
++      g_autoptr(GDBusMethodInvocation) claim_invocation = NULL;
++
++      priv->close_on_resume = FALSE;
++      claim_invocation = g_steal_pointer (&session->invocation);
++      g_debug ("claimed device %d, still open since its release", priv->id);
++      fprint_dbus_device_complete_claim (FPRINT_DBUS_DEVICE (rdev), claim_invocation);
++      return TRUE;
++    }
++
+   priv->current_action = ACTION_OPEN;
+   fp_device_open (priv->dev, NULL, (GAsyncReadyCallback) dev_open_cb, rdev);
+ 
+@@ -1146,6 +1239,17 @@ dev_close_cb (FpDevice *dev, GAsyncResult *res, void *user_data)
+     {
+       g_autoptr(GError) dbus_error = NULL;
+ 
++      /* libfprint refuses to close a suspended device: close it on resume */
++      if (priv->suspended &&
++          g_error_matches (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_BUSY))
++        {
++          g_debug ("released device %d while suspended, closing it on resume", priv->id);
++          priv->close_on_resume = TRUE;
++          fprint_dbus_device_complete_release (FPRINT_DBUS_DEVICE (rdev),
++                                               invocation);
++          return;
++        }
++
+       dbus_error = g_error_new (FPRINT_ERROR,
+                                 FPRINT_ERROR_INTERNAL,
+                                 "Release failed with error: %s", error->message);
+diff --git a/tests/fprintd.py b/tests/fprintd.py
+index 8d8fe6e..b89893d 100644
+--- a/tests/fprintd.py
++++ b/tests/fprintd.py
+@@ -1706,6 +1706,60 @@ class FPrintdVirtualDeviceTest(FPrintdVirtualDeviceBaseTest):
+ 
+         self.device.Release()
+ 
++    def suspend_cancelling_verify(self, device):
++        device.Claim('(s)', 'testuser')
++        self.enroll_image('whorl', device=device)
++        device.VerifyStart('(s)', 'any')
++
++        # Suspend cancels the verification, as on a lock screen
++        self.logind_obj.EmitSignal("", "PrepareForSleep", "b", [True])
++
++        self.daemon_log.check_line('Preparing devices for sleep', timeout=1)
++        self.wait_for_result(expected='verify-unknown-error')
++        self.wait_released_delay_inhibitor(timeout=1)
++
++    def resume_and_verify_again(self):
++        self.logind_obj.EmitSignal("", "PrepareForSleep", "b", [False])
++
++        self.daemon_log.check_line('Preparing devices for resume', timeout=1)
++        self.wait_got_delay_inhibitor(timeout=1)
++
++        # The device must have been closed, so that it can be claimed again
++        self.device.Claim('(s)', 'testuser')
++        self.device.VerifyStart('(s)', 'any')
++        self.send_image('whorl')
++        self.wait_for_result(expected='verify-match')
++        self.device.VerifyStop()
++        self.device.Release()
++
++    def test_suspend_release_while_suspended(self):
++        self.suspend_cancelling_verify(self.device)
++
++        # libfprint refuses to close a suspended device
++        self.device.Release()
++        self.daemon_log.check_line('closing it on resume', timeout=1)
++
++        self.resume_and_verify_again()
++
++    def test_suspend_claim_while_suspended(self):
++        self.suspend_cancelling_verify(self.device)
++        self.device.Release()
++
++        # The device is still open: a new claim takes it over
++        self.device.Claim('(s)', 'testuser')
++        self.device.Release()
++
++        self.resume_and_verify_again()
++
++    def test_suspend_disconnect_while_suspended(self):
++        bus, dev = self.get_secondary_bus_and_device()
++        self.suspend_cancelling_verify(dev)
++
++        bus.close_sync()
++        self.daemon_log.check_line('closing it on resume', timeout=2)
++
++        self.resume_and_verify_again()
++
+ 
+ class FPrintdVirtualDeviceStorageTest(FPrintdVirtualStorageDeviceBaseTest,
+                                       FPrintdVirtualDeviceTest):

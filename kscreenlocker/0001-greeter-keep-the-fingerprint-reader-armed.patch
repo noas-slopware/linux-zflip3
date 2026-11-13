@@ -1,0 +1,105 @@
+From 857f8471c9d7e9920c971e0dcd331bc6126721d0 Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Tue, 10 Nov 2026 23:26:27 +0900
+Subject: [PATCH] greeter: keep the fingerprint reader armed
+
+Two ways left the fingerprint reader unarmed on the lock screen:
+
+- PamAuthenticator::tryUnlock() returned when the worker had not pinged
+  yet. The greeter asks to authenticate right after constructing the
+  authenticators, before the workers are listening, so the first request
+  was dropped. Plasma Mobile retries until the password prompt appears,
+  which often comes before the fingerprint worker is ready. Remember the
+  request and run it on the ping.
+
+- pam_fprintd returns after its timeout or max-tries, and nothing started
+  the reader again until a password attempt failed. Restart it while the
+  greeter is authenticating. The quick-failure guard in PamAuthenticator
+  still marks a broken service unavailable.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ greeter/pamauthenticator.cpp  | 13 ++++++++++++-
+ greeter/pamauthenticator.h    |  2 ++
+ greeter/pamauthenticators.cpp |  7 +++++++
+ 3 files changed, 21 insertions(+), 1 deletion(-)
+
+diff --git a/greeter/pamauthenticator.cpp b/greeter/pamauthenticator.cpp
+index 30ccab0..d46c028 100644
+--- a/greeter/pamauthenticator.cpp
++++ b/greeter/pamauthenticator.cpp
+@@ -7,6 +7,8 @@
+ 
+ #include "pamauthenticator.h"
+ 
++#include <utility>
++
+ #include <QDBusConnection>
+ #include <QDBusPendingCallWatcher>
+ #include <QDBusServer>
+@@ -82,7 +84,11 @@ void PamAuthenticator::tryUnlock()
+     }
+ 
+     if (!m_ready) {
+-        qCWarning(KSCREENLOCKER_GREET) << "Worker not ready yet, cannot authenticate.";
++        // The worker is started in the constructor and pings once it is listening, which is
++        // usually after the greeter first asks to authenticate. Dropping the request here left
++        // the fingerprint reader unarmed until something else retried.
++        qCDebug(KSCREENLOCKER_GREET) << "Worker not ready yet, authenticating once it is.";
++        m_unlockPending = true;
+         return;
+     }
+ 
+@@ -157,6 +163,7 @@ void PamAuthenticator::respond(const QByteArray &response)
+ 
+ void PamAuthenticator::cancel()
+ {
++    m_unlockPending = false;
+     m_prompt.clear();
+     m_promptForSecret.clear();
+     m_infoMessage.clear();
+@@ -222,6 +229,10 @@ void PamAuthenticator::Ping(const QString &message)
+     Q_ASSERT(!m_ready); // only one ping ever. thank you!
+     m_ready = true;
+     Q_EMIT readyChanged();
++
++    if (std::exchange(m_unlockPending, false)) {
++        tryUnlock();
++    }
+ }
+ 
+ QString PamAuthenticator::Prompt(const QString &msg)
+diff --git a/greeter/pamauthenticator.h b/greeter/pamauthenticator.h
+index d70064c..59852ae 100644
+--- a/greeter/pamauthenticator.h
++++ b/greeter/pamauthenticator.h
+@@ -131,6 +131,8 @@ private:
+     QString m_infoMessage;
+     QString m_service;
+     bool m_ready = false;
++    // tryUnlock() came in before the worker pinged; run it once it does
++    bool m_unlockPending = false;
+     bool m_busy = false;
+     bool m_unlocked = false;
+     bool m_unavailable = false;
+diff --git a/greeter/pamauthenticators.cpp b/greeter/pamauthenticators.cpp
+index e46392c..fb7ace5 100644
+--- a/greeter/pamauthenticators.cpp
++++ b/greeter/pamauthenticators.cpp
+@@ -153,6 +153,13 @@ void PamAuthenticators::onAuthenticatorChanged()
+         connect(d->m_fingerprintAuthenticator.get(), &PamAuthenticator::failed, this, [this] {
+             qCDebug(KSCREENLOCKER_GREET) << "PamAuthenticators: Non-interactive authenticator" << qUtf8Printable(d->m_fingerprintAuthenticator->service()) << "failed";
+             Q_EMIT failed(d->m_fingerprintAuthenticator->authenticatorType(), d->m_fingerprintAuthenticator.get());
++            // pam_fprintd returns after its timeout (30 s) or max-tries, and nothing else starts the
++            // reader again, so a fingerprint stopped working on a lock screen left alone for a while.
++            // Keep it armed for as long as we are authenticating. PamAuthenticator marks itself
++            // unavailable if it fails in quick succession, which ends a broken loop.
++            if (d->state == AuthenticatorsState::Authenticating && !d->graceLocked && d->m_fingerprintAuthenticator->isAvailable()) {
++                QMetaObject::invokeMethod(d->m_fingerprintAuthenticator.get(), &PamAuthenticator::tryUnlock, Qt::QueuedConnection);
++            }
+         });
+         connect(d->m_fingerprintAuthenticator.get(), &PamAuthenticator::loginFailedDelayStarted, this, [this](const uint uSecDelay) noexcept -> void {
+             qCDebug(KSCREENLOCKER_GREET) << "PamAuthenticators: Delay started on login failure for non-interactive authenticator"
+-- 
+2.56.0
+

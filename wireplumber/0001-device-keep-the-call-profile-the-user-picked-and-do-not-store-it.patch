@@ -1,0 +1,80 @@
+From ed497306e10b97a5c368ecfdaee00e37e20e865d Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Tue, 10 Nov 2026 23:51:41 +0900
+Subject: [PATCH] device: keep the call profile the user picked, and do not
+ store it
+
+When the earpiece and the speaker of a phone share a PCM, ACP gives each
+a Voice Call profile of its own, and switching to the speaker during a
+call is a profile change (callaudiod does it for the dialer). Two things
+undid that:
+
+- find-voice-call-profile chose the highest-priority Voice Call profile
+  on every select-profile event during a call, putting the call back on
+  the earpiece. Keep the Voice Call profile that is active instead.
+
+- the profile change from a client has save set, so state-profile stored
+  the Voice Call profile as the default, and find-stored-profile restored
+  it once the call had ended, leaving the card in the call verb. Voice
+  Call profiles follow the call state; do not store them.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ .../device/find-voice-call-profile.lua        | 22 +++++++++++++++++++
+ src/scripts/device/state-profile.lua          |  7 ++++--
+ 2 files changed, 27 insertions(+), 2 deletions(-)
+
+diff --git a/src/scripts/device/find-voice-call-profile.lua b/src/scripts/device/find-voice-call-profile.lua
+index 09e30d8e..58e8b56e 100644
+--- a/src/scripts/device/find-voice-call-profile.lua
++++ b/src/scripts/device/find-voice-call-profile.lua
+@@ -59,6 +59,28 @@ SimpleEventHook {
+     local device = event:get_subject ()
+     local dev_name = device.properties["device.name"] or ""
+ 
++    -- Keep the Voice Call profile in use while the call lasts. When the
++    -- earpiece and the speaker share a PCM, each has a Voice Call profile of
++    -- its own, and the user (through callaudiod or the dialer) switches
++    -- between them during the call; any later select-profile event would
++    -- otherwise put the call back on the highest-priority one.
++    for p in device:iterate_params ("Profile") do
++      local current = cutils.parseParam (p, "Profile")
++      if current and current.name and
++          string.find (current.name, "^Voice Call") ~= nil then
++        for e in device:iterate_params ("EnumProfile") do
++          local profile = cutils.parseParam (e, "EnumProfile")
++          if profile.index == current.index and profile.available ~= "no" then
++            log:info (device, string.format (
++                "Keeping calling profile '%s' (%d) for device %s",
++                profile.name, profile.index, dev_name))
++            event:set_data ("selected-profile", profile)
++            return
++          end
++        end
++      end
++    end
++
+     for p in device:iterate_params ("EnumProfile") do
+       local profile = cutils.parseParam (p, "EnumProfile")
+       log:debug (device, string.format (
+diff --git a/src/scripts/device/state-profile.lua b/src/scripts/device/state-profile.lua
+index 89e4b127..c52671f0 100644
+--- a/src/scripts/device/state-profile.lua
++++ b/src/scripts/device/state-profile.lua
+@@ -77,8 +77,11 @@ store_user_selected_profile_hook = SimpleEventHook {
+ 
+     for p in device:iterate_params ("Profile") do
+       local profile = cutils.parseParam (p, "Profile")
+-      if profile.save then
+-        -- store only if this was a user-generated action (save == true)
++      -- store only if this was a user-generated action (save == true), and
++      -- never a Voice Call profile: find-voice-call-profile picks those from
++      -- the call state, and a stored one would be restored with no call
++      if profile.save and
++          string.find (profile.name or "", "^Voice Call") == nil then
+         updateStoredProfile (device, profile)
+       end
+     end
+-- 
+2.56.0
+

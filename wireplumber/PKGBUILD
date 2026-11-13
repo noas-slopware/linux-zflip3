@@ -1,0 +1,160 @@
+# Maintainer: David Runge <dvzrv@archlinux.org>
+# Maintainer: Jan Alexander Steffens (heftig) <heftig@archlinux.org>
+
+pkgbase=wireplumber
+pkgname=(
+  wireplumber
+  libwireplumber
+  wireplumber-docs
+  wireplumber-system-services
+)
+pkgver=0.5.18
+pkgrel=3
+pkgdesc="Session / policy manager implementation for PipeWire"
+url="https://pipewire.pages.freedesktop.org/wireplumber/"
+arch=(x86_64 aarch64)
+license=(MIT)
+makedepends=(
+  doxygen
+  git
+  glib2
+  glib2-devel
+  glibc
+  gobject-introspection
+  graphviz
+  libgcc
+  libpipewire
+  lua
+  meson
+  pipewire
+  python-breathe
+  python-lxml
+  python-sphinx
+  python-sphinx_rtd_theme
+  systemd
+  systemd-libs
+)
+checkdepends=(pipewire-audio)
+source=(
+  "git+https://gitlab.freedesktop.org/pipewire/$pkgbase.git#tag=$pkgver"
+  0001-device-keep-the-call-profile-the-user-picked-and-do-not-store-it.patch
+  0002-monitors-alsa-do-not-store-a-node-removed-while-it-w.patch
+)
+b2sums=('eea6a3e022c0b8918a72b56a9cdb1c02bca4411a9394fc2a8732faad2c0c71d1443b2a37b22e60467aaab62c154150d18b185b2690271d1d4830dee6513e2e8c'
+        'a8e59fccde5701b1fd234ac1d3156d3d4ca6956dda8b58cb3135d7608b0f81e240bb2055ecdc023db389bf08f033fb82992fbfc5d081d911269949d93dcc4cb4'
+        '0ae4ae821ab77ac6c0b87da309f8bdbc736283aed0fda8ba5f20eeec469e9e8c0fef2a8b9c0769fb7a87ecef420c2d81eee6fa52908a8897f2c5052c582db809')
+
+prepare() {
+  cd $pkgbase
+
+  # b2q: keep the Voice Call profile picked during a call, never store it
+  git apply ../0001-device-keep-the-call-profile-the-user-picked-and-do-not-store-it.patch
+
+  # b2q: two profile changes in a row left a stale ALSA node behind
+  git apply ../0002-monitors-alsa-do-not-store-a-node-removed-while-it-w.patch
+}
+
+build() {
+  local meson_options=(
+    -D elogind=disabled
+    -D system-lua=true
+    -D systemd-system-service=true
+  )
+
+  arch-meson $pkgbase build "${meson_options[@]}"
+  meson compile -C build
+}
+
+check() {
+  meson test -C build --print-errorlogs
+}
+
+_pick() {
+  local p="$1" f d; shift
+  for f; do
+    d="$srcdir/$p/${f#$pkgdir/}"
+    mkdir -p "$(dirname "$d")"
+    mv "$f" "$d"
+    rmdir -p --ignore-fail-on-non-empty "$(dirname "$f")"
+  done
+}
+
+_ver=${pkgver:0:3}
+
+package_wireplumber() {
+  depends=(
+    "libwireplumber=$pkgver-$pkgrel"
+    glibc
+    libgcc
+    libg{lib,object,io}-2.0.so
+    libpipewire
+    libpipewire-0.3.so
+    libsystemd.so
+    lua
+    pipewire
+    systemd-libs
+  )
+  optdepends=(
+    'wireplumber-docs: Documentation'
+    'wireplumber-system-services: System daemon (not recommended)'
+  )
+  provides=(pipewire-session-manager)
+  conflicts=(pipewire-media-session)
+  install=wireplumber.install
+
+  meson install -C build --destdir "$pkgdir"
+
+  (
+    cd "$pkgdir"
+
+    _pick libw usr/lib/libwireplumber-$_ver.so*
+    _pick libw usr/lib/girepository-1.0
+    _pick libw usr/lib/pkgconfig
+    _pick libw usr/include
+    _pick libw usr/share/gir-1.0
+
+    _pick docs usr/share/doc/wireplumber/html
+
+    _pick system usr/lib/systemd/system
+  )
+
+  install -Dt "$pkgdir/usr/share/doc/$pkgname" -m644 $pkgbase/{NEWS,README}*
+  install -Dt "$pkgdir/usr/share/licenses/$pkgname" -m644 $pkgbase/LICENSE
+}
+
+package_libwireplumber() {
+  pkgdesc+=" - client library"
+  depends=(
+    glibc
+    libgcc
+    libg{lib,module,object,io}-2.0.so
+    libpipewire-0.3.so
+  )
+  provides=(libwireplumber-$_ver.so)
+
+  mv libw/* "$pkgdir"
+
+  install -Dt "$pkgdir/usr/share/licenses/$pkgname" -m644 $pkgbase/LICENSE
+}
+
+package_wireplumber-docs() {
+  pkgdesc+=" - documentation"
+
+  mv docs/* "$pkgdir"
+
+  install -Dt "$pkgdir/usr/share/licenses/$pkgname" -m644 $pkgbase/LICENSE
+}
+
+package_wireplumber-system-services() {
+  pkgdesc+=" - system services"
+  depends=(
+    "wireplumber=$pkgver-$pkgrel"
+    pipewire-system-services
+  )
+
+  mv system/* "$pkgdir"
+
+  install -Dt "$pkgdir/usr/share/licenses/$pkgname" -m644 $pkgbase/LICENSE
+}
+
+# vim:set sw=2 sts=-1 et:

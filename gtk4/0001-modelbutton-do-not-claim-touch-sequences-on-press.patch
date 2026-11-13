@@ -1,0 +1,48 @@
+From 4c14f04d602b757772fab07c69a0a89b0d4ac061 Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Fri, 13 Nov 2026 03:35:58 +0900
+Subject: [PATCH] modelbutton: Don't claim touch sequences on press
+
+GtkModelButton's click gesture runs in the capture phase and claimed
+every sequence in its "pressed" handler. For a touch sequence that
+denies it to the GtkScrolledWindow of the GtkPopoverMenu, so a menu
+longer than the screen cannot be scrolled with a finger: the swipe
+only highlights the row it started on.
+
+Claim on press only for pointer events, which keeps press-drag-release
+selection with a mouse. A touch sequence stays open: if it turns into
+a drag, the scrolled window claims it and the item is not activated;
+if not, "released" still emits clicked, as GtkButton does.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ gtk/gtkmodelbutton.c | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/gtk/gtkmodelbutton.c b/gtk/gtkmodelbutton.c
+index 2646d5e..d3b990f 100644
+--- a/gtk/gtkmodelbutton.c
++++ b/gtk/gtkmodelbutton.c
+@@ -1505,10 +1505,18 @@ gesture_pressed (GtkGestureClick *gesture,
+                  double           y,
+                  GtkWidget       *widget)
+ {
++  GdkEventSequence *sequence;
++
+   if (gtk_widget_get_focus_on_click (widget) && !gtk_widget_has_focus (widget))
+     gtk_widget_grab_focus (widget);
+ 
+-  gtk_gesture_set_state (GTK_GESTURE (gesture), GTK_EVENT_SEQUENCE_CLAIMED);
++  sequence = gtk_gesture_single_get_current_sequence (GTK_GESTURE_SINGLE (gesture));
++
++  /* A touch sequence that starts on an item of a long menu has to stay open to the
++   * GtkScrolledWindow around it, or the menu cannot be scrolled with a finger. If the
++   * sequence is not taken over, "released" still arrives and activates the item. */
++  if (sequence == NULL)
++    gtk_gesture_set_state (GTK_GESTURE (gesture), GTK_EVENT_SEQUENCE_CLAIMED);
+ }
+ 
+ static void
+-- 
+2.56.0
+

@@ -1,0 +1,94 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Wed, 11 Nov 2026 03:23:58 +0900
+Subject: [PATCH 12/14] ipa: libipa: af: Scale the scan steps to the lens range
+
+The coarse and fine steps are sized for the 1023-step IPU3 lens, and
+the fine scan is clamped to 1023 even when the lens reports a larger
+range. Scale both steps with the lens range and clamp to it.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ src/ipa/libipa/af.cpp | 16 ++++++++++++----
+ src/ipa/libipa/af.h   |  3 +++
+ 2 files changed, 15 insertions(+), 4 deletions(-)
+
+diff --git a/src/ipa/libipa/af.cpp b/src/ipa/libipa/af.cpp
+index fc71bcd7..aec8130c 100644
+--- a/src/ipa/libipa/af.cpp
++++ b/src/ipa/libipa/af.cpp
+@@ -7,6 +7,8 @@
+ 
+ #include "af.h"
+ 
++#include <algorithm>
++
+ #include <linux/v4l2-controls.h>
+ 
+ namespace libcamera {
+@@ -46,7 +48,10 @@ namespace af {
+  */
+ static constexpr uint32_t kMaxFocusSteps = 1023;
+ 
+-/* Minimum focus step for searching appropriate focus */
++/*
++ * Minimum focus step for searching appropriate focus, for a lens with
++ * kMaxFocusSteps steps. Lenses with a different range scale them.
++ */
+ static constexpr uint32_t kCoarseSearchStep = 30;
+ static constexpr uint32_t kFineSearchStep = 1;
+ 
+@@ -85,7 +90,7 @@ void AfAlgorithm::afCoarseScan(af::ActiveState &state)
+ 	if (afNeedIgnoreFrame())
+ 		return;
+ 
+-	if (afScan(state, kCoarseSearchStep)) {
++	if (afScan(state, coarseStep_)) {
+ 		coarseCompleted_ = true;
+ 		state.maxVariance = 0;
+ 		focus_ = state.focus -
+@@ -93,7 +98,7 @@ void AfAlgorithm::afCoarseScan(af::ActiveState &state)
+ 		state.focus = focus_;
+ 		previousVariance_ = 0;
+ 		maxStep_ = std::clamp(focus_ + static_cast<uint32_t>((focus_ * kFineRange)),
+-				      0U, kMaxFocusSteps);
++				      0U, initMaxStep_);
+ 	}
+ }
+ 
+@@ -111,7 +116,7 @@ void AfAlgorithm::afFineScan(af::ActiveState &state)
+ 	if (afNeedIgnoreFrame())
+ 		return;
+ 
+-	if (afScan(state, kFineSearchStep)) {
++	if (afScan(state, fineStep_)) {
+ 		state.stable = true;
+ 		fineCompleted_ = true;
+ 	}
+@@ -275,8 +280,11 @@ void AfAlgorithm::configure(af::ActiveState &state, const ControlInfoMap &lensCo
+ 	}
+ 
+ 	maxStep_ = initMaxStep_;
++	coarseStep_ = std::max(1U, kCoarseSearchStep * initMaxStep_ / kMaxFocusSteps);
++	fineStep_ = std::max(1U, kFineSearchStep * initMaxStep_ / kMaxFocusSteps);
+ 
+ 	LOG(Af, Debug) << "Configured focus parameters: max=" << initMaxStep_
++		       << " steps=" << coarseStep_ << "/" << fineStep_
+ 		       << " focus=" << state.focus;
+ }
+ 
+diff --git a/src/ipa/libipa/af.h b/src/ipa/libipa/af.h
+index 464fc0f7..8396882d 100644
+--- a/src/ipa/libipa/af.h
++++ b/src/ipa/libipa/af.h
+@@ -68,6 +68,9 @@ private:
+ 	uint32_t maxStep_;
+ 	/* Initial value of maxStep_ */
+ 	uint32_t initMaxStep_;
++	/* Coarse and fine scan steps, scaled to the lens range */
++	uint32_t coarseStep_ = 30;
++	uint32_t fineStep_ = 1;
+ 	/* If the coarse scan completes, it is set to true. */
+ 	bool coarseCompleted_;
+ 	/* If the fine scan completes, it is set to true. */

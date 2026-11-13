@@ -1,0 +1,79 @@
+From fca89b8d50cb06081895de7760a0448a593b69ce Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Wed, 11 Nov 2026 01:50:41 +0900
+Subject: [PATCH] Name cameras by the side they face, not by sensor model
+
+The camera list showed libcamera's Model property, which is the sensor's
+model name ("imx563", "imx258") and, as libcamera documents, is not meant
+to be displayed to the user. Name built-in cameras "Front camera" and
+"Back camera" from their Location, numbered when several face the same
+way, and keep the model for external cameras, where it is the product
+name.
+---
+ src/plasmacamera.cpp | 42 +++++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 39 insertions(+), 3 deletions(-)
+
+diff --git a/src/plasmacamera.cpp b/src/plasmacamera.cpp
+index c67502c..3e0ed9e 100644
+--- a/src/plasmacamera.cpp
++++ b/src/plasmacamera.cpp
+@@ -7,6 +7,8 @@
+ #include <sys/mman.h>
+ #include <plasmacameramanager.h>
+ 
++#include <KLocalizedString>
++
+ #include "plasmacamera.h"
+ 
+ PlasmaCamera::PlasmaCamera(QObject *parent) : QObject(parent)
+@@ -151,10 +153,44 @@ QList<QString> PlasmaCamera::cameraDeviceIds() const
+ 
+ QList<QString> PlasmaCamera::cameraDeviceNames() const
+ {
+-    // camera names are more human-readable strings
++    // libcamera's Model is the sensor's model name ("imx563") and is not
++    // meant to be shown to the user. Name built-in cameras by the side they
++    // face, numbered when several face the same way; external cameras keep
++    // their model, which for them is the product name.
++    const auto cameras = m_cameraManager->cameras();
++    const auto locationOf = [](const std::shared_ptr<libcamera::Camera> &camera) {
++        return camera->properties().get(libcamera::properties::Location).value_or(libcamera::properties::CameraLocationExternal);
++    };
++
++    std::map<int, int> perLocation;
++    for (const auto &camera : cameras) {
++        perLocation[locationOf(camera)]++;
++    }
++
+     QList<QString> devices;
+-    for (const auto &camera : m_cameraManager->cameras()) {
+-        devices.push_back(QString::fromStdString(std::string(*camera->properties().get(libcamera::properties::Model))));
++    std::map<int, int> numbered;
++    for (const auto &camera : cameras) {
++        const int location = locationOf(camera);
++        QString name;
++
++        switch (location) {
++        case libcamera::properties::CameraLocationFront:
++            name = i18nc("@item:inlistbox camera facing the user", "Front camera");
++            break;
++        case libcamera::properties::CameraLocationBack:
++            name = i18nc("@item:inlistbox camera on the back", "Back camera");
++            break;
++        default: {
++            const auto model = camera->properties().get(libcamera::properties::Model);
++            name = model ? QString::fromStdString(std::string(*model)) : i18nc("@item:inlistbox", "External camera");
++            break;
++        }
++        }
++
++        if (perLocation[location] > 1) {
++            name = i18nc("@item:inlistbox camera name, its number among those facing the same way", "%1 %2", name, ++numbered[location]);
++        }
++        devices.push_back(name);
+     }
+ 
+     return devices;
+-- 
+2.56.0
+

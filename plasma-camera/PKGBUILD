@@ -1,0 +1,52 @@
+# Maintainer: Balló György <ballogyor+arch at gmail dot com>
+
+pkgname=plasma-camera
+pkgver=26.08.3
+pkgrel=2
+pkgdesc='Camera application for Plasma Mobile'
+arch=(x86_64 aarch64)
+url='https://apps.kde.org/plasma.camera/'
+license=(GPL-3.0-or-later)
+groups=(kde-applications)
+depends=(
+  exiv2
+  glibc
+  kconfig
+  kcoreaddons
+  ki18n
+  kirigami
+  kirigami-addons
+  libcamera
+  libgcc
+  libstdc++
+  qt6-base
+  qt6-declarative
+  qt6-multimedia
+  qt6-sensors
+)
+makedepends=(
+  cmake
+  extra-cmake-modules
+)
+source=(https://download.kde.org/stable/release-service/$pkgver/src/$pkgname-$pkgver.tar.xz{,.sig}
+        0001-Name-cameras-by-the-side-they-face-not-by-sensor-model.patch)
+sha256sums=('2f67e75b3c5973be3beaaaea4c9a5e1165813bc6f35311bb9e4fce51b1079996'
+            'SKIP'
+            '674e5c559a3c5a3b427d4eebe03558d2632449d81e6ed22a399dec32f9e3473a')
+validpgpkeys=(CA262C6C83DE4D2FB28A332A3A6A4DB839EAA6D7  # Albert Astals Cid <aacid@kde.org>
+              F23275E4BF10AFC1DF6914A6DBD2CE893E2D1C87  # Christoph Feck <cfeck@kde.org>
+              D81C0CB38EB725EF6691C385BB463350D6EF31EF) # Heiko Becker <heiko.becker@kde.org>
+
+prepare() {
+  # b2q: the camera list showed sensor models ("imx563")
+  patch -d $pkgname-$pkgver -Np1 < 0001-Name-cameras-by-the-side-they-face-not-by-sensor-model.patch
+}
+
+build() {
+  cmake -B build -S $pkgname-$pkgver
+  cmake --build build
+}
+
+package() {
+  DESTDIR="$pkgdir" cmake --install build
+}

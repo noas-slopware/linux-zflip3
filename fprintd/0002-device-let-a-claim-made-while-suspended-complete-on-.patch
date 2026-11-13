@@ -1,0 +1,169 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Fri, 13 Nov 2026 02:57:49 +0900
+Subject: [PATCH] device: let a claim made while suspended complete on resume
+
+libfprint can neither open a suspended device nor run anything on it.
+A lock screen whose scan was cancelled by the suspend releases and
+claims again right away, while logind is still waiting for the delay
+inhibitors: the claim used to take over the still open device and
+succeed, and the VerifyStart after it failed with "The device is still
+busy with another operation", three times in a row on a Galaxy Z Flip3
+before the system went to sleep.
+
+Hold such a claim and complete it once the device has resumed, so that
+the client never gets a reader it cannot use. It still takes over a
+device released while suspended, which then stays open. A second claim
+meanwhile is refused as already in use. Operations started on a device
+claimed before the suspend still fail as before.
+---
+ src/device.c     | 48 ++++++++++++++++++++++++++++++++++++++++++++++++
+ tests/fprintd.py | 43 ++++++++++++++++++++++++++++++++++++++++---
+ 2 files changed, 88 insertions(+), 3 deletions(-)
+
+diff --git a/src/device.c b/src/device.c
+index bd46d5e..8ed87a2 100644
+--- a/src/device.c
++++ b/src/device.c
+@@ -124,6 +124,9 @@ typedef struct
+   gboolean               suspended;
+   /* Released while suspended: still open, to be closed on resume */
+   gboolean               close_on_resume;
++  /* Claimed while suspended: the claim completes on resume */
++  GDBusMethodInvocation *claim_on_resume;
++  char                  *claim_on_resume_username;
+ } FprintDevicePrivate;
+ 
+ G_DEFINE_TYPE_WITH_CODE (FprintDevice, fprint_device,
+@@ -255,6 +258,8 @@ fprint_device_finalize (GObject *object)
+   g_hash_table_destroy (priv->clients);
+   session_data_set_new (priv, NULL, NULL);
+   g_clear_object (&priv->auth);
++  g_clear_object (&priv->claim_on_resume);
++  g_clear_pointer (&priv->claim_on_resume_username, g_free);
+   g_clear_object (&priv->dev);
+ 
+   if (priv->current_action != ACTION_NONE ||
+@@ -527,6 +532,10 @@ resume_close_cb (GObject      *source_obj,
+     g_task_return_boolean (task, TRUE);
+ }
+ 
++static gboolean fprint_device_claim (FprintDBusDevice      *dbus_dev,
++                                     GDBusMethodInvocation *invocation,
++                                     const char            *username);
++
+ static void
+ resume_cb (GObject      *source_obj,
+            GAsyncResult *res,
+@@ -542,6 +551,25 @@ resume_cb (GObject      *source_obj,
+   priv->suspended = FALSE;
+   session = session_data_get (priv);
+ 
++  /*
++   * A claim made while suspended: it can go ahead now. It takes over a
++   * device released while suspended, which then stays open.
++   */
++  if (priv->claim_on_resume)
++    {
++      g_autoptr(GDBusMethodInvocation) invocation = g_steal_pointer (&priv->claim_on_resume);
++      g_autofree char *username = g_steal_pointer (&priv->claim_on_resume_username);
++
++      if (error)
++        g_task_return_error (task, error);
++      else
++        g_task_return_boolean (task, TRUE);
++
++      g_debug ("resumed, claiming device %d", priv->id);
++      fprint_device_claim (FPRINT_DBUS_DEVICE (rdev), invocation, username);
++      return;
++    }
++
+   /*
+    * libfprint refuses to close a suspended device, so a device released
+    * while suspended has been left open until now.
+@@ -1189,6 +1217,26 @@ fprint_device_claim (FprintDBusDevice      *dbus_dev,
+         }
+     }
+ 
++  /*
++   * libfprint can neither open a suspended device nor run anything on it,
++   * so a claim would only hand out a reader that answers "busy" until the
++   * resume. Let the claim complete on resume instead.
++   */
++  if (priv->suspended)
++    {
++      if (priv->claim_on_resume)
++        {
++          g_dbus_method_invocation_return_error (invocation, FPRINT_ERROR,
++                                                 FPRINT_ERROR_ALREADY_IN_USE,
++                                                 "Device was already claimed");
++          return TRUE;
++        }
++      g_debug ("device %d claimed while suspended, claiming it on resume", priv->id);
++      priv->claim_on_resume = g_object_ref (invocation);
++      priv->claim_on_resume_username = g_strdup (username);
++      return TRUE;
++    }
++
+   user = g_object_steal_qdata (G_OBJECT (invocation), quark_auth_user);
+   g_assert (user);
+   g_assert (g_str_equal (username, "") || g_str_equal (user, username));
+diff --git a/tests/fprintd.py b/tests/fprintd.py
+index b89893d..b6fc17e 100644
+--- a/tests/fprintd.py
++++ b/tests/fprintd.py
+@@ -1745,11 +1745,48 @@ class FPrintdVirtualDeviceTest(FPrintdVirtualDeviceBaseTest):
+         self.suspend_cancelling_verify(self.device)
+         self.device.Release()
+ 
+-        # The device is still open: a new claim takes it over
+-        self.device.Claim('(s)', 'testuser')
++        # Nothing can run on a suspended device: the claim completes on resume
++        self.call_device_method_async('Claim', '(s)', ['testuser'])
++        self.daemon_log.check_line('claiming it on resume', timeout=1)
++        time.sleep(0.5)
++        self.assertEqual(self.get_all_async_replies(), [])
++
++        # A second claim meanwhile is refused
++        with self.assertFprintError('AlreadyInUse'):
++            self.device.Claim('(s)', 'testuser')
++
++        self.logind_obj.EmitSignal("", "PrepareForSleep", "b", [False])
++        self.daemon_log.check_line('Preparing devices for resume', timeout=1)
++        self.wait_for_device_reply(method='Claim')
++        self.daemon_log.check_line('still open since its release', timeout=1)
++        self.wait_got_delay_inhibitor(timeout=1)
++
++        # and the device it took over verifies
++        self.device.VerifyStart('(s)', 'any')
++        self.send_image('whorl')
++        self.wait_for_result(expected='verify-match')
++        self.device.VerifyStop()
+         self.device.Release()
+ 
+-        self.resume_and_verify_again()
++    def test_suspend_claim_unopened_while_suspended(self):
++        # Not open at all when the system went to sleep
++        self.logind_obj.EmitSignal("", "PrepareForSleep", "b", [True])
++        self.daemon_log.check_line('Preparing devices for sleep', timeout=1)
++        self.wait_released_delay_inhibitor(timeout=1)
++
++        self.call_device_method_async('Claim', '(s)', ['testuser'])
++        self.daemon_log.check_line('claiming it on resume', timeout=1)
++
++        self.logind_obj.EmitSignal("", "PrepareForSleep", "b", [False])
++        self.wait_for_device_reply(method='Claim')
++        self.wait_got_delay_inhibitor(timeout=1)
++
++        self.enroll_image('whorl')
++        self.device.VerifyStart('(s)', 'any')
++        self.send_image('whorl')
++        self.wait_for_result(expected='verify-match')
++        self.device.VerifyStop()
++        self.device.Release()
+ 
+     def test_suspend_disconnect_while_suspended(self):
+         bus, dev = self.get_secondary_bus_and_device()
+-- 
+2.56.0
+
