@@ -40,7 +40,9 @@ docker run --rm --security-opt no-new-privileges -v "$src/$pkg:/pkg:ro" -v "$ARC
 	runuser -u builder -- env HOME=/home/builder KEYS="$KEYS" bash -euc "for k in \$KEYS; do
 		gpg -q --keyserver hkps://keyserver.ubuntu.com --recv-keys \"\$k\" ||
 		gpg -q --keyserver hkps://keys.openpgp.org --recv-keys \"\$k\"; done"
-	runuser -u builder -- env HOME=/home/builder bash -euc "cp -r /pkg ~/p && cd ~/p && PKGDEST=/out makepkg --noconfirm --cleanbuild"'
+	# a login shell: /etc/profile.d puts /usr/bin/core_perl (pod2man & co.) and the other package
+	# paths on PATH, as on any Arch system makepkg runs on
+	runuser -u builder -- env HOME=/home/builder bash -leuc "cp -r /pkg ~/p && cd ~/p && PKGDEST=/out makepkg --noconfirm --cleanbuild"'
 echo "::endgroup::"
 echo "$pkg built in $(( ($(date +%s) - start) / 60 )) min"
 [ -z "${GITHUB_STEP_SUMMARY:-}" ] || echo "- \`$pkg\`: built in $(( ($(date +%s) - start) / 60 )) min" >> "$GITHUB_STEP_SUMMARY"
