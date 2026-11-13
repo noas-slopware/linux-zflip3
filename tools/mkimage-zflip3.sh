@@ -3,9 +3,11 @@
 # mkimage-zflip3.sh: build the generic Galaxy Z Flip3 (SM-F711N) Arch Linux Ports root file system
 # from [zflip3] (the repo build-zflip3.sh fills) and drzee's repos, inside a privileged
 # zflip3-builder container (mounts for pacstrap), check it with verify-zflip3-image.sh and pack it.
-# No personal settings: hostname zflip3, one user (wheel), C.UTF-8, Asia/Seoul (every SM-F711N is
-# Korean), an empty machine-id (made at first boot), no ssh keys, no carrier but the generic one.
-#   [USERNAME=archlinux PASSWORD=archlinux ROOT_PASSWORD=root] mkimage-zflip3.sh <outdir>
+# No personal settings: hostname zflip3, C.UTF-8, Asia/Seoul (every SM-F711N is Korean), an empty
+# machine-id (made at first boot), no ssh keys, no carrier but the generic one. Accounts as in Arch
+# Linux Ports' own root file system (the bootstrap tarball): root locked, no user, no sshd; the
+# installer creates the one user (install-rootfs --user), with the password typed there.
+#   mkimage-zflip3.sh <outdir>
 # Out: <outdir>/archlinux-zflip3-rootfs.tar.zst, the tar userspace/installer/install-rootfs.sh
 #      (senpai branch) unpacks onto the F2FS on LVM, and linux-zflip3.img, the boot image zflip3-boot
 #      made for the recovery partition (on the phone it writes it there itself on every update).
@@ -19,11 +21,9 @@
 set -euo pipefail
 
 out=${1:?usage: $0 <outdir>}
-user=${USERNAME:-archlinux}
-export USERNAME="$user" PASSWORD=${PASSWORD:-archlinux} ROOT_PASSWORD=${ROOT_PASSWORD:-root}
 REPO_URL=${ZFLIP3_REPO_URL:-https://noas-slopware.github.io/linux-zflip3/arch/\$arch}
 PKGS=(base linux-zflip3 linux-zflip3-dtbs mkinitcpio firmware-zflip3 zflip3-device
-	networkmanager openssh sudo vim nano)
+	networkmanager sudo vim nano)
 [ -z "${ZFLIP3_IMAGE_PKGS:-}" ] || read -ra PKGS <<< "$ZFLIP3_IMAGE_PKGS"
 
 if [ -z "${ZFLIP3_IN_CONTAINER:-}" ]; then
@@ -44,7 +44,7 @@ if [ -z "${ZFLIP3_IN_CONTAINER:-}" ]; then
 	[ -n "$own" ] || { echo "no package names from the arch branch" >&2; exit 1; }
 	"$ENGINE" run --rm --privileged "${EMU[@]}" -e ZFLIP3_IN_CONTAINER=1 \
 		-e ZFLIP3_OWN="$own" -e ZFLIP3_ALLOW_FOREIGN \
-		-e USERNAME -e PASSWORD -e ROOT_PASSWORD -e ZFLIP3_IMAGE_PKGS -e REPO_URL="$REPO_URL" \
+		-e ZFLIP3_IMAGE_PKGS -e REPO_URL="$REPO_URL" \
 		-v "$REPO:/repo:ro" -v "$W/pkgcache:/var/cache/pacman/pkg" -v "$TOOLS:/tools:ro" \
 		-v "$root:/target" localhost/zflip3-builder /tools/mkimage-zflip3.sh /target
 	# as root in the container: the image's files are root's, and a check that cannot read
@@ -99,16 +99,10 @@ echo LANG=C.UTF-8 > "$t/etc/locale.conf"
 ln -sf /usr/share/zoneinfo/Asia/Seoul "$t/etc/localtime"
 : > "$t/etc/machine-id"
 
-arch-chroot "$t" useradd -m -G wheel,video,audio,input,render -s /bin/bash "$USERNAME"
-printf '%s:%s\n' "$USERNAME" "$PASSWORD" root "$ROOT_PASSWORD" | arch-chroot "$t" chpasswd
+# no accounts (root stays locked, as filesystem ships it): install-rootfs --user makes the one user,
+# in wheel, and its Plasma Mobile autologin
 echo '%wheel ALL=(ALL:ALL) ALL' > "$t/etc/sudoers.d/10-wheel"
 chmod 440 "$t/etc/sudoers.d/10-wheel"
-# Plasma Mobile starts on its own (lock screen first: zflip3-plasma's kscreenlockerrc)
-if [ -e "$t/usr/lib/systemd/system/plasmalogin.service" ]; then
-	mkdir -p "$t/etc/plasmalogin.conf.d"
-	printf '[Autologin]\nUser=%s\nSession=plasma-mobile.desktop\n' "$USERNAME" \
-		> "$t/etc/plasmalogin.conf.d/autologin.conf"
-fi
 
 systemctl --root="$t" preset-all
 # nothing the build left behind

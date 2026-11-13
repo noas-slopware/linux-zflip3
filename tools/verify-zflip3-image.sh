@@ -4,7 +4,9 @@
 #   verify-zflip3-image.sh [--deny FILE] <root dir>
 # Checks: an empty machine-id; no pacman keyring; the firmware the phone loads; no ssh host keys, no authorized_keys anywhere; no NetworkManager
 # profile in /etc (Wi-Fi passwords, a carrier's APN); no package cache, pacman log or shell
-# history; the hostname is zflip3; exactly one user with a home; the kernel, its device tree and the
+# history; the hostname is zflip3; accounts as Arch Linux Ports' bootstrap has them (no password
+# anywhere, no home, no Plasma autologin, sshd not enabled: install-rootfs --user makes the user);
+# the kernel, its device tree and the
 # boot image are there. --deny FILE: fixed strings (one per line, # comments) that must not appear
 # in any file: keep your own hostname, addresses and names in such a file outside git, so the
 # check itself never publishes them.
@@ -24,8 +26,14 @@ compgen -G "$r/etc/ssh/ssh_host_*" >/dev/null && bad "ssh host keys in the image
 [ -z "$(find "$r/var/cache/pacman/pkg" -type f 2>/dev/null)" ] || bad "package cache not empty"
 [ ! -e "$r/var/log/pacman.log" ] || bad "pacman.log in the image"
 [ -z "$(find "$r/root" "$r/home" -name '.*_history' 2>/dev/null)" ] || bad "shell history in the image"
-homes=$(find "$r/home" -mindepth 1 -maxdepth 1 -type d | wc -l)
-[ "$homes" -eq 1 ] || bad "$homes home directories, not 1"
+# no account with a password ('*' and '!' lock), so no login the image itself hands out
+pw=$(awk -F: '$2 != "" && $2 !~ /^[*!]/ { print $1 }' "$r/etc/shadow" | tr '\n' ' ')
+[ -z "$pw" ] || bad "accounts with a password: $pw"
+[ -z "$(awk -F: '$2 == "" { print $1 }' "$r/etc/shadow")" ] || bad "accounts with an empty password"
+homes=$(find "$r/home" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l)
+[ "$homes" -eq 0 ] || bad "$homes entries in /home (the installer makes the user)"
+[ ! -e "$r/etc/plasmalogin.conf.d/autologin.conf" ] || bad "a Plasma autologin in the image"
+[ -z "$(find "$r/etc/systemd/system" -name 'sshd*' 2>/dev/null)" ] || bad "sshd enabled"
 compgen -G "$r/usr/lib/modules/*-zflip3/vmlinuz" >/dev/null || bad "no linux-zflip3 kernel"
 compgen -G "$r/usr/lib/modules/*-zflip3/dtb/qcom/sm8350-samsung-b2q.dtb" >/dev/null || bad "no b2q device tree"
 [ -s "$r/boot/linux-zflip3.img" ] || bad "no boot image (zflip3-boot)"

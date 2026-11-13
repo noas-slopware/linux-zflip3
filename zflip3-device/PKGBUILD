@@ -29,7 +29,7 @@ pkgname=(
   zflip3-plasma
 )
 pkgver=1
-pkgrel=4
+pkgrel=5
 pkgdesc='Samsung Galaxy Z Flip3 5G (SM-F711N)'
 url='https://github.com/noas-slopware/linux-zflip3'
 arch=(aarch64)

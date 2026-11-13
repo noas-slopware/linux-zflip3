@@ -6,7 +6,6 @@ enable NetworkManager-wait-online.service
 enable systemd-resolved.service
 enable systemd-timesyncd.service
 enable bluetooth.service
-enable sshd.service
 enable serial-getty@.service ttyGS0
 # systemd-networkd only runs usb0 (50-usb0.network), which never decides whether the phone is
 # online: its wait-online could only time out and hold network-online.target for 2 minutes.
