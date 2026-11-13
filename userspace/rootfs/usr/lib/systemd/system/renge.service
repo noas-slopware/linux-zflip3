@@ -6,7 +6,7 @@ Before=hexagonrpcd-sdsp.service iio-sensor-proxy.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/libexec/renge
+ExecStart=/usr/lib/renge/renge
 
 [Install]
 WantedBy=multi-user.target

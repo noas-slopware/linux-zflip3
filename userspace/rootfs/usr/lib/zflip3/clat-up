@@ -1,0 +1,58 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+set -e
+
+IFACE="qmapmux0.0"
+PREFIX=$(ip -6 addr show dev $IFACE scope global 2>/dev/null | grep inet6 | head -n1 | awk '{print $2}' | cut -d/ -f1 | cut -d: -f1-4)
+if [ -z "$PREFIX" ]; then
+    echo "No global IPv6 on $IFACE, cannot start CLAT"
+    exit 0
+fi
+
+CLAT_IP6="${PREFIX}::464"
+echo "Starting CLAT with prefix $PREFIX (CLAT IPv6: $CLAT_IP6)"
+
+mkdir -p /run/tayga
+cat << TCONF > /run/tayga/tayga.conf
+tun-device clat0
+ipv4-addr 192.0.0.1
+ipv6-addr 2001:db8::1
+prefix 64:ff9b::/96
+map 192.0.0.4 $CLAT_IP6
+data-dir /tmp
+TCONF
+
+# NetworkManager 1.58 applies a bearer's MTU only from its IPv4 config, so an
+# IPv6-only bearer (LG U+: 1400) leaves the link at its 1496 default and every
+# bigger packet is lost. Take the MTU ModemManager reports for this link.
+for b in $(mmcli -m any -K 2>/dev/null | grep -oE '/org/freedesktop/ModemManager1/Bearer/[0-9]+' | sort -u); do
+    KV=$(mmcli -b "${b##*/}" -K 2>/dev/null) || continue
+    printf '%s\n' "$KV" | grep -qE "bearer\.status\.interface +: $IFACE\$" || continue
+    BMTU=$(printf '%s\n' "$KV" | awk -F': ' '/bearer\.ipv6-config\.mtu/ {print $2}')
+    case "$BMTU" in
+        ''|--) ;;
+        *) ip link set "$IFACE" mtu "$BMTU" && echo "$IFACE MTU $BMTU from the bearer" ;;
+    esac
+done
+
+# IPv4 packets grow by 20 bytes into IPv6: size clat0 so that a full-size
+# IPv4 packet still fits the IPv6 link, as Android's clatd does, instead of
+# every big packet going through path MTU discovery.
+LINK_MTU=$(cat /sys/class/net/$IFACE/mtu)
+ip tuntap add dev clat0 mode tun 2>/dev/null || true
+ip link set clat0 mtu $((LINK_MTU - 20))
+ip link set clat0 up
+ip addr add 192.0.0.4/32 dev clat0 2>/dev/null || true
+ip route replace 192.0.0.1 dev clat0
+ip -6 route replace $CLAT_IP6 dev clat0
+ip -6 route replace 64:ff9b::/96 dev $IFACE
+
+sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null
+sysctl -w net.ipv6.conf.clat0.forwarding=1 >/dev/null
+
+killall tayga 2>/dev/null || true
+tayga -c /run/tayga/tayga.conf
+
+# Add default IPv4 route with metric 700 (behind WiFi metric 600)
+ip route replace default via 192.0.0.1 dev clat0 metric 700
+echo "CLAT up and running"

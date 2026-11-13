@@ -1,0 +1,76 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# Build the tree hexagonrpcd serves to the SLPI's sensor hub (sdsp).
+#
+# The vendor files (DSP skels, sensor configs, sns_reg.conf) are installed by
+# tools/extract-sensor-files.sh under /usr/share/qcom/sm8350/Samsung/b2q. What
+# is missing is per-unit: the factory calibration registry lives on the stock
+# persist partition, and the sensor hub selects its config from the SoC's
+# platform info, which mainline only exposes through debugfs.
+#
+# Runs once per boot, before hexagonrpcd-sdsp. Nothing on persist is written.
+
+set -eu
+tree=/usr/share/qcom/sm8350/Samsung/b2q
+mnt=/run/renge-persist
+
+[ -d "$tree/sensors/config" ] || exit 0
+
+if [ ! -e "$tree/sensors/registry/.from-persist" ] && [ -e /dev/disk/by-partlabel/persist ]; then
+	mkdir -p "$mnt"
+	mountpoint -q "$mnt" || mount -o ro /dev/disk/by-partlabel/persist "$mnt" || true
+	src=$mnt/sensors/registry/registry
+	if [ -d "$src" ]; then
+		mkdir -p "$tree/sensors/registry"
+		cp -a "$src/." "$tree/sensors/registry/"
+		touch "$tree/sensors/registry/.from-persist"
+	fi
+	mountpoint -q "$mnt" && umount "$mnt" || true
+	rmdir "$mnt" 2>/dev/null || true
+fi
+mkdir -p "$tree/sensors/registry"
+
+# The sensor hub's own platform selection. Mainline's soc0 has soc_id,
+# revision, family and machine; hw_platform and the version live in socinfo's
+# debugfs. The fallbacks are Qualcomm's MTP/2.0 values, which is what Samsung's
+# bootloader reports on a phone and what the vendor configs select.
+dbg=/sys/kernel/debug/socinfo
+if [ ! -d "$dbg" ]; then
+	mount -t debugfs debugfs /sys/kernel/debug 2>/dev/null || true
+fi
+
+read_sys() { [ -r "$1" ] && cat "$1" || echo "$2"; }
+
+plat=$(read_sys "$dbg/hardware_platform" "")
+case "$plat" in
+1) plat=Surf ;; 2) plat=FFA ;; 3) plat=Fluid ;; 4) plat=SVLTE_FFA ;;
+5) plat=SLVTE_SURF ;; 7) plat=MDM_MTP_NO_DISPLAY ;; 8) plat=MTP ;; 9) plat=Liquid ;;
+10) plat=Dragon ;; 11) plat=QRD ;; 13) plat=HRD ;; 14) plat=DTV ;; 21) plat=RCM ;;
+23) plat=STP ;; 24) plat=SBC ;; 25) plat=ADP ;; 31) plat=HDK ;; 33) plat=ATP ;;
+34) plat=IDP ;; *) plat=MTP ;;
+esac
+
+ver=$(read_sys "$dbg/platform_version" 131072)
+sub=$(read_sys "$dbg/hardware_platform_subtype" 0)
+
+mkdir -p "$tree/socinfo"
+printf '%s\n' "$(read_sys /sys/devices/soc0/soc_id 439)" > "$tree/socinfo/soc_id"
+printf '%s\n' "$(read_sys /sys/devices/soc0/revision 2.0)" > "$tree/socinfo/revision"
+printf '%s\n' "$(read_sys /sys/devices/soc0/family Snapdragon)" > "$tree/socinfo/family"
+printf '%s\n' "$(read_sys /sys/devices/soc0/machine SM8350)" > "$tree/socinfo/machine"
+printf '%s\n' "$plat" > "$tree/socinfo/hw_platform"
+printf '%s\n' "$ver" > "$tree/socinfo/platform_version"
+printf '%s\n' "$sub" > "$tree/socinfo/platform_subtype_id"
+case "$plat" in
+QRD)
+	case "$sub" in 0) name=QRD ;; 1) name=SKUAA ;; 2) name=SKUF ;;
+	3) name=SKUAB ;; 4) name=SKUG ;; *) name=INVALID ;; esac ;;
+ADP) name=ADP ;;
+*)
+	case "$sub" in 0) name=Unknown ;; 1) name=charm ;; 2) name=strange ;;
+	3) name=strange_2a ;; *) name=Invalid ;; esac ;;
+esac
+printf '%s\n' "$name" > "$tree/socinfo/platform_subtype"
+
+# The DSP writes calibration updates back through the registry skel.
+chown -R fastrpc:fastrpc "$tree" 2>/dev/null || true

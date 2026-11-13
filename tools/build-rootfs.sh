@@ -175,10 +175,11 @@ cp -a --no-preserve=ownership "$REPO_ROOT/userspace/rootfs/." "$DEST/"
 if [ -n "$OVERLAY" ]; then
   log "personal configuration from $OVERLAY"
   cp -a --no-preserve=ownership "$OVERLAY/." "$DEST/"
-  # NetworkManager ignores keyfiles anyone but root can read.
-  [ ! -d "$DEST/etc/NetworkManager/system-connections" ] ||
-    find "$DEST/etc/NetworkManager/system-connections" -type f -exec chmod 600 {} +
 fi
+# NetworkManager ignores keyfiles anyone but root can read (git keeps no 600).
+for d in "$DEST/etc/NetworkManager/system-connections" "$DEST/usr/lib/NetworkManager/system-connections"; do
+  [ ! -d "$d" ] || find "$d" -type f -exec chmod 600 {} +
+done
 HOSTNAME_=zflip3
 [ ! -s "$DEST/etc/hostname" ] || HOSTNAME_=$(cat "$DEST/etc/hostname")
 install -d -m700 "$DEST/root/.ssh"

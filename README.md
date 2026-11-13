@@ -151,7 +151,7 @@ everything, cellular included, works:
   `/usr/lib/dri/qcom_drv_video.so` plus the `msm`/`v4l2` aliases. See `VIDEO-DECODE.md`,
 - the audio bits: `tools/extract-amp-firmware.sh` output in `/usr/lib/firmware/cirrus/`,
   the UCM files under `userspace/rootfs/usr/share/alsa/ucm2/`, the WirePlumber drop-in
-  under `userspace/rootfs/etc/wireplumber/`, and the CS35L41 module once the 15 ms
+  under `userspace/rootfs/usr/share/wireplumber/`, and the CS35L41 module once the 15 ms
   mailbox build is final,
 - IMSroha's device settings, `/etc/imsroha/imsroha.conf`, from `--overlay` for now
   (its units create `/var/lib/imsroha/inbox` and `/run/imsroha`; an inbox left in

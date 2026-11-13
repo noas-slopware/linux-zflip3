@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: MIT
+# The USB NCM link to the host. The phone is 172.16.42.1 and hands the host .2,
+# the same addresses the initramfs uses.
+[Match]
+Name=usb0
+
+# Only there when a cable is: it never decides whether the phone is online.
+# Without this, systemd-networkd-wait-online waited its full two minutes for
+# usb0 on every boot, and network-online.target (imsroha-rcs, multi-user and
+# graphical.target) with it.
+[Link]
+RequiredForOnline=no
+
+[Network]
+Address=172.16.42.1/24
+DHCPServer=yes
+ConfigureWithoutCarrier=yes
+
+[DHCPServer]
+PoolOffset=2
+PoolSize=1
+EmitDNS=no

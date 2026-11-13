@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: MIT
+# Mobile data the way the stock Korean firmware (CSC OKR) sets it up for SKT, KT and LG U+: no
+# APN, so the network's default subscription APN is used (NetworkManager sends a blank APN with
+# gsm.auto-config off), IPv4 and IPv6 both asked for (MM ip-type ipv4v6), no data roaming.
+# NetworkManager only reads keyfiles that are mode 600 and owned by root.
+[connection]
+id=Mobile data
+uuid=5e4053c3-563c-59ba-93e9-d81f9612685d
+type=gsm
+autoconnect=true
+
+[gsm]
+apn=
+auto-config=false
+home-only=true
+
+[ipv4]
+method=auto
+may-fail=true
+
+[ipv6]
+addr-gen-mode=stable-privacy
+method=auto
+may-fail=true
