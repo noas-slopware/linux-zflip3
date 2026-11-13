@@ -120,6 +120,24 @@ if [ -e "$MOUNT/usr/lib/systemd/system/plasmalogin.service" ]; then
     > "$MOUNT/etc/plasmalogin.conf.d/autologin.conf"
 fi
 for d in dev/pts dev sys proc; do umount "$MOUNT/$d"; done
+
+# the image's own boot image (zflip3-boot made it for the image's kernel, whose modules are
+# the ones in the image) goes to recovery, read back, as zflip3-bootimg does on every update.
+# This initramfs runs from RAM, so replacing it there is safe; U-Boot's fastboot still boots it.
+BOOTIMG=$MOUNT/boot/linux-zflip3.img
+if [ -s "$BOOTIMG" ]; then
+  RECOVERY=$(find_part recovery) || { echo "error: no partition named recovery" >&2; exit 1; }
+  size=$(wc -c < "$BOOTIMG")
+  [ "$size" -le $(( $(cat "/sys/class/block/$(basename "$RECOVERY")/size") * 512 )) ] ||
+    { echo "error: $BOOTIMG is larger than recovery" >&2; exit 1; }
+  sum=$(sha256sum "$BOOTIMG" | cut -d' ' -f1)
+  dd if="$BOOTIMG" of="$RECOVERY" bs=1M conv=fsync 2>/dev/null
+  [ "$(head -c "$size" "$RECOVERY" | sha256sum | cut -d' ' -f1)" = "$sum" ] ||
+    { echo "error: recovery does not read back as the boot image" >&2; exit 1; }
+  echo "boot image written to recovery ($RECOVERY) and verified"
+else
+  echo "the image has no /boot/linux-zflip3.img: recovery left as it is"
+fi
 sync
 umount "$MOUNT"
-echo "done. Reboot; the initramfs mounts /dev/$VG/$LV and switches to it."
+echo "done. Reboot; the installed kernel boots /dev/$VG/$LV."
