@@ -41,7 +41,12 @@ if [ "$HOSTARCH" = aarch64 ]; then
 else
 	# binfmt_misc has qemu-aarch64 without the F flag here, so the interpreter is looked up inside
 	# the container: the base image carries /usr/bin/qemu-aarch64-static (Containerfile)
-	EMU=(--platform linux/arm64)
+	# QEMU_CPU: qemu-user's default "max" CPU offers SVE, SME and every other extension (configure
+	# scripts and tests probe them) and 32-byte cache lines; cortex-a76 is the ARMv8.2 core with
+	# exactly drzee's -march extensions (fp16, rcpc, dotprod, crypto) and the phone's 64-byte L1D
+	# lines (Cortex-A78 TRM; the X1 is built on the A78), as the x86_64 xtools see too
+	QEMU_CPU=${QEMU_CPU:-cortex-a76}
+	EMU=(--platform linux/arm64 -e "QEMU_CPU=$QEMU_CPU")
 	FETCH_FROM=docker.io/library/archlinux:latest
 fi
 
