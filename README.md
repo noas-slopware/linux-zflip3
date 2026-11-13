@@ -153,6 +153,34 @@ Not packaged yet:
 - mobile-config-firefox 5.5.0 with the four Fenix patches from linux-hiby-rs6,
 - the CS35L41 module with the 15 ms mailbox, once it is final.
 
+### Hardware variants
+
+The port was brought up on one unit (board revision 8, ultrawide IMX258, main panel S6E3HAD
+rev D). What other Korean SM-F711N units can differ in, from Samsung's stock kernel, device
+tree overlays and vendor files:
+
+- **Board revision.** Stock's dtbo has one entry per revision range; the non-US entries for
+  revision 7 and up (7, 8-11, 12 and later) are identical but for the revision fields, so every
+  retail unit gets the device tree this port was written from. Revisions 5 and 6 (pre-production)
+  differ in battery and fuel gauge data and the fingerprint orientation.
+- **Main panel revision** (A to D, from the third ID byte): `0136` reads it and sends that
+  revision's display-on sequence, with VBIAS and VAINT for A to C, and A/B's or C/D's 96 Hz
+  gamma offsets, as stock does. Only D has been tried.
+- **Rear ultrawide sensor**: stock ships a module for a Samsung S5K3L6 next to the IMX258 and
+  identifies the fitted one by chip ID. `0137` adds an S5K3L6 driver from stock's settings; the
+  device tree still describes only the IMX258, because CAMSS waits for every sensor in its graph
+  before it registers any camera, so a node for an absent sensor would take all three cameras
+  away. Picking the node at boot (both nodes `fail-needs-probe`, a probe of the chip IDs with
+  the slot powered as stock powers it, CAMSS skipping the node that lost) is the next step and
+  needs a boot on the phone to confirm the IMX258 path still comes up.
+- **Cover touch firmware**: stock reflashes the ZTW522 when its firmware is older than
+  `/vendor/firmware/ztw522_b2.bin` (minor 0x23, register data 0x14) and never downgrades, so a
+  unit that last ran stock One UI 7 already runs that firmware; the port does not flash it.
+- **Wide camera**: stock has a DV0/DV1 module description without autofocus actuator or OIS
+  next to the retail DV2 one; DV0/DV1 look like development modules.
+- Stock's dtbo also lists other main and cover panels (S6E3HA9, S6E3FAC, S6E36W3 AMB114EU09)
+  that its kernel builds drivers for; whether any retail F711N has one is not known.
+
 ### Far future
 
 - **96 and 48 Hz on the main panel.** Stock's VRR sets switch the S6E3HAD to 96HS, 48HS and
