@@ -34,8 +34,12 @@ if [ -z "${ZFLIP3_IN_CONTAINER:-}" ]; then
 	[ ! -e "$root" ] || { echo "$root exists (a previous run): tools/clean-image-root-zflip3.sh" >&2; exit 1; }
 	mkdir -p "$root"
 	# the arch branch's package names, for the check that they come from [zflip3]
+	# a PKGBUILD makepkg cannot read stops the build (pipefail): its names would otherwise drop out
+	# of the check without a word
 	own=$(cd "$(dirname "$TOOLS")" && for d in */PKGBUILD; do
-		(cd "${d%/PKGBUILD}" && makepkg --printsrcinfo 2>/dev/null | sed -n 's/^pkgname = //p')
+		n=$(cd "${d%/PKGBUILD}" && makepkg --printsrcinfo 2>/dev/null | sed -n 's/^pkgname = //p')
+		[ -n "$n" ] || { echo "makepkg --printsrcinfo gave no pkgname for $d" >&2; exit 1; }
+		echo "$n"
 	done | sort -u | tr '\n' ' ')
 	[ -n "$own" ] || { echo "no package names from the arch branch" >&2; exit 1; }
 	"$ENGINE" run --rm --privileged "${EMU[@]}" -e ZFLIP3_IN_CONTAINER=1 \
