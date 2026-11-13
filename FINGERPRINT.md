@@ -55,7 +55,7 @@ them in the DT is safe on that count.
 
 - **Pieces:**
   - **Kernel:** `/dev/qsee-app` (`patches/linux/0049-*`, `CONFIG_QCOM_QSEE_APP=m`). One TA per fd: LOAD, then SEND with the response read back at `ALIGN(req_len, 64)`.
-  - **libfprint:** driver `samsung_securefp`, `userspace/libfprint/` (0001 adds a misc-device udev subtype, 0002 is the driver). It runs stock's loop: send a command, serve the "op" the TA hands back (4 wait for the IRQ, 3 wait for lift, 7 sleep, 8 reset), repeat. GPIO lines are looked up by DT name, power is the `fingerprint-power` regulator-output, and templates live in fprintd's print files.
+  - **libfprint:** driver `samsung_securefp`, `patches/libfprint/` (0001 adds a misc-device udev subtype, 0002 is the driver). It runs stock's loop: send a command, serve the "op" the TA hands back (4 wait for the IRQ, 3 wait for lift, 7 sleep, 8 reset), repeat. GPIO lines are looked up by DT name, power is the `fingerprint-power` regulator-output, and templates live in fprintd's print files.
   - **fprintd:** 1.94.5 from extra. Its unit needs a drop-in allowing `/dev/qsee-app` and `char-gpiochip`, which the libfprint package ships.
   - **Request layouts:** `scratch/fp-ta/ta-layouts.md` and `hal-flows.md`.
 - **What works:** `fprintd-enroll` finds the device and passes its duplicate check. Every touch fires GPIO 38. Progress rises 5% per good touch (20 touches), and a bad touch gives status 0x27 with quality flags (fprintd shows retry-scan). No HAT or HMAC key was pushed. Prepare, Enroll_Init and Enroll_Do don't need one.

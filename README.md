@@ -132,48 +132,26 @@ Priority order for a daily driver:
 - Idle power, round two: system suspend once the temporary sleep inhibitor goes, modem and
   Wi-Fi power save, RPMh rails nothing votes for.
 
-### For the rootfs rebuild
+### The packaged system
 
-Done by hand on the phone and not yet in `tools/build-rootfs.sh`; it goes in once
-everything, cellular included, works:
+Everything the phone runs is packaged on the `arch` branch, with the build tools: the kernel
+(`linux-zflip3`, Arch's `linux` PKGBUILD on this branch's series and config), the firmware
+(`firmware-zflip3`, extracted at build time from Samsung's stock F711NKSSFKZH5 tars by `tools/`
+here, so none of Samsung's files are in git), the phone's configuration (`zflip3-device`:
+`zflip3-system`, `-boot`, `-audio`, `-cellular`, `-plasma`, from `userspace/rootfs`), our
+daemons, IMSroha with its ModemManager and Spacebar forks, the forks under `patches/` and the
+AUR packages Arch Linux Ports lacks. `tools/mkimage-zflip3.sh` there makes the generic root file
+system (no personal settings; `verify-zflip3-image.sh` refuses one that has any), which
+`userspace/installer/install-rootfs.sh` unpacks. `zflip3-boot` packs the kernel, a mkinitcpio
+initramfs and the device tree into the boot image and writes it to `recovery` itself, read back
+and compared, on every kernel update.
 
-- packages beyond `ROOTFS_PACKAGES`: `mesa mesa-utils plasma-mobile plasma-login-manager
-  plasma-settings qmlkonsole bluedevil kscreen firefox feedbackd evtest i2c-tools plasma-dialer geoclue
-  polkit-kde-agent` (without it nothing can answer fprintd's `auth_self_keep` enroll prompt, and Settings gets "Not Authorized"),
-  (plus the Adreno zap shader),
-- the cellular stack built on the phone: `imsroha` from
-  [IMSroha](https://github.com/noas-slopware/imsroha)'s `packaging/`, ModemManager 1.24.2 from its
-  `modemmanager/` (0001, 0003-0007), Spacebar 6.3.4 from its `spacebar/` (MMS fixes,
-  RCS chat and file transfer), and `opencore-amr` plus `vo-amrwbenc` for the call codecs,
-- hardware video decode (not a pacman package): `qcom-va-driver 1.1.1` from
-  `github.com/nyanmisaka/libva-v4l2-qcom` at `~/src/qcom-va-driver`, built with
-  `tools/build-qcom-va-driver.sh` after the local patch; it installs
-  `/usr/lib/dri/qcom_drv_video.so` plus the `msm`/`v4l2` aliases. See `VIDEO-DECODE.md`,
-- the audio bits: `tools/extract-amp-firmware.sh` output in `/usr/lib/firmware/cirrus/`,
-  the UCM files under `userspace/rootfs/usr/share/alsa/ucm2/`, the WirePlumber drop-in
-  under `userspace/rootfs/usr/share/wireplumber/`, and the CS35L41 module once the 15 ms
-  mailbox build is final,
-- IMSroha's phone settings, `userspace/rootfs/usr/share/imsroha/imsroha.conf.d/50-zflip3.conf`
-  (the carrier that sold the phone and RCS go in `/etc/imsroha/imsroha.conf`)
-  (its units create `/var/lib/imsroha/inbox` and `/run/imsroha`; an inbox left in
-  `/var/lib/b2q-imsd` is moved over once),
-- the sensors: `tools/extract-qcom-firmware.sh ... slpi` and
-  `tools/extract-sensor-files.sh` output (the DSP skels, sensor configs and
-  `sns_reg.conf` under `/usr/share/qcom/sm8350/Samsung/b2q/`), `hexagonrpcd` from
-  `userspace/hexagonrpcd`, the patched `iio-sensor-proxy` from
-  `userspace/iio-sensor-proxy` (`-Dssc-support=enabled` and the claim race patch),
-  and `renge.service` plus the `81-b2q-sensors.rules` udev rule from
-  `userspace/rootfs/`,
-- the NFC userspace stack: `neard` from `userspace/neard` (not in the ports repos),
-  which also provides `nfctool` for `/dev/nfc0`,
-- the cover daemon: the `kita` package from `userspace/kita/`, which leases DSI-2 from
-  KWin, drives the panel with Cairo/Pango and controls its backlight (it brings its
-  autostart file and udev rules),
-- the personal settings, from `tools/build-rootfs.sh --overlay`: hostname, the carrier's
-  data connection and Spacebar MMSC, the user and its autologin (`LockOnStart` is in
-  `userspace/rootfs/etc/xdg/`, so the first screen is Plasma Mobile's lock screen),
-- mobile-config-firefox 5.5.0 with the four Fenix patches from linux-hiby-rs6
-  (`patches/mobile-config-firefox/`), `make install` into `/`.
+Not packaged yet:
+
+- hardware video decode: `qcom-va-driver 1.1.1` from `github.com/nyanmisaka/libva-v4l2-qcom`,
+  built with `tools/build-qcom-va-driver.sh` after the local patch (`VIDEO-DECODE.md`),
+- mobile-config-firefox 5.5.0 with the four Fenix patches from linux-hiby-rs6,
+- the CS35L41 module with the 15 ms mailbox, once it is final.
 
 ### Far future
 
@@ -191,21 +169,22 @@ everything, cellular included, works:
 | branch | contents |
 |---|---|
 | `senpai` | `patches/`, `tools/`, `userspace/`: the port |
+| `arch` | the PKGBUILDs of every package the phone runs, and the tools that build them and the image |
 | `docs` | write-ups: plan, boot chain, panel, storage, cellular, evidence policy |
-| `firmware` | vendor firmware extracted from the stock firmware before the wipe |
+| `firmware` | a README; `firmware-zflip3` (`arch`) extracts the files from the stock firmware instead |
 
 ```
 patches/linux/           numbered series against sources.lock's LINUX_VERSION
 patches/u-boot/          SM8350 and b2q support for U-Boot
-patches/qcom-va-driver/  local patch for the qcom-va-driver V4L2 backend
-patches/plasma-keyboard/ Korean composition, content types
+patches/<package>/       patches for other projects' packages (libcamera, libfprint, fprintd,
+                         gtk4, kscreenlocker, plasma-mobile, wireplumber, ...); PKGBUILDs on arch
 tools/                   host-side: extract firmware, build, pack, flash and install images
-VIDEO-DECODE.md          the hardware decode stack, measurements and caveats
 userspace/installer/     bring-up initramfs and installer
-userspace/rootfs/        files the rootfs carries on top of the distribution
-userspace/hexagonrpcd/   FastRPC filesystem daemon for the sensor hub
-userspace/iio-sensor-proxy/ iio-sensor-proxy with the SSC claim-race fix
-userspace/neard/         Linux NFC daemon and nfctool for the NCI stack
+userspace/rootfs/        the phone's configuration (zflip3-device on arch)
+userspace/claire/        secure-world services the fingerprint TA needs
+userspace/mihari/        stock's skin temperature estimate and SIOP limits
+userspace/kita/          the cover display
+VIDEO-DECODE.md          the hardware decode stack, measurements and caveats
 ```
 
 ## Quickstart
@@ -245,4 +224,4 @@ and the stock firmware is saved.
 ## Licenses
 
 See [LICENSES/README.md](LICENSES/README.md). The kernel patches are GPL-2.0-only, everything in
-`tools/` and `userspace/` is MIT.
+`tools/` and `userspace/` is MIT; `patches/<package>/` follow their project's license.

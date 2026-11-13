@@ -11,7 +11,7 @@ them into pictures.** Every sensor's colour-bar test pattern arrives exact (eigh
 | front | IMX374 | full resolution, 30 fps | CSIPHY3, D-PHY, 4 lanes | GRBG |
 
 CAMSS runs the RDI path only (raw Bayer). Debayering, auto exposure and white balance come
-from libcamera 0.7.2's simple pipeline with its software ISP (`userspace/libcamera`, with
+from libcamera 0.7.2's simple pipeline with its software ISP (`patches/libcamera`, with
 IMX374 and IMX563 sensor helpers). The wide camera has no autofocus or OIS yet, so it is
 fixed-focus and soft up close.
 
