@@ -46,7 +46,7 @@ options=(
 )
 _srcname=linux-$pkgver
 # senpai branch (default) of noas-slopware/linux-zflip3
-_zf3commit=8b65637848e51b8a26ef2865d5c0029b1fb76fc7
+_zf3commit=771c52e05adb7b0d7fabbe41450be0d7b3fce276
 source=(
   "https://cdn.kernel.org/pub/linux/kernel/v${pkgver%%.*}.x/$_srcname.tar."{xz,sign}
   "linux-zflip3-$_zf3commit.tar.gz::https://github.com/noas-slopware/linux-zflip3/archive/$_zf3commit.tar.gz"
@@ -58,7 +58,7 @@ validpgpkeys=(
 # https://www.kernel.org/pub/linux/kernel/v7.x/sha256sums.asc
 sha256sums=('fa595aad93734f829c963c2a90ef7c3673224fd7fdae7b49406e397cde2de231'
             'SKIP'
-            'f95ffc1c2b6f299944e5d64480ff965a98836b14b81aa0eaae1a7c134785c32f')
+            '08ad2bc3cde6e524254b4ea05f38488b800d931b03a321da9c388f49ca7f1291')
 
 export KBUILD_BUILD_HOST=archlinux
 export KBUILD_BUILD_USER=$pkgbase

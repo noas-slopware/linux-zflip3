@@ -29,7 +29,7 @@ license=(LicenseRef-proprietary)
 makedepends=(android-tools dtc e2fsprogs lz4 mtools python)
 options=(!strip !debug)
 # senpai branch (default) of noas-slopware/linux-zflip3
-_zf3commit=6a77c9e8b0961783730085d6e899c747c91c85fa
+_zf3commit=771c52e05adb7b0d7fabbe41450be0d7b3fce276
 _ap=AP_F711NKSSFKZH5_F711NKSSFKZH5_MQB113544073_REV00_user_low_ship_MULTI_CERT_meta_OS15.tar.md5
 _bl=BL_F711NKSSFKZH5_F711NKSSFKZH5_MQB113544073_REV00_user_low_ship_MULTI_CERT.tar.md5
 _cp=CP_F711NKSSFKZH5_CP35951701_MQB113544073_REV00_user_low_ship_MULTI_CERT.tar.md5
@@ -40,7 +40,7 @@ source=(
   "local://$_cp"
 )
 noextract=("$_ap" "$_bl" "$_cp")
-sha256sums=('3078976ffd3e4f1b27a137eceecdbeb93fa3277da52ecf6163a1ac16a644a063'
+sha256sums=('08ad2bc3cde6e524254b4ea05f38488b800d931b03a321da9c388f49ca7f1291'
             'b99284d7e01c52a5a60fded225c9534e8787237fb79ad3d0eed4b89ffe7aae9a'
             'e8d92133d71d26eeb9ed6265a6a0d0427dffa4ea34993a4e4dfe749ab34185c9'
             '0215dd72e0f7f545727ff53525f75422c54c7eb6e9141ee6fe3d9aab8109e00f')

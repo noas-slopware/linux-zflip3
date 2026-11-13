@@ -1,0 +1,44 @@
+# Maintainer: User8395 <therealuser8395@proton.me>
+# b2q: the AUR PKGBUILD (plasma-dialer 6.8.0-1) at 6.8.2, the Plasma release drzee ships, and
+# arch aarch64/x86_64: it is compiled, not arch=any.
+pkgname=plasma-dialer
+pkgver=6.8.2
+pkgrel=1
+pkgdesc="Dialer for Plasma Mobile"
+arch=(aarch64 x86_64)
+url="https://invent.kde.org/plasma-mobile/plasma-dialer"
+license=('GPL3')
+groups=()
+depends=(
+  ki18n
+  kcontacts
+  kpeople
+  knotifications
+  kio
+  kirigami-addons
+  plasma-wayland-protocols
+  modemmanager-qt
+  libphonenumber
+  callaudiod
+)
+makedepends=(cmake extra-cmake-modules)
+source=("https://download.kde.org/stable/plasma/$pkgver/$pkgname-$pkgver.tar.xz")
+sha256sums=('c4bd2b2d65542bbe8f8bc20c21221ad96b748efd018a20166d715583f87e0990')
+
+prepare() {
+  mkdir -p build
+}
+
+build() {
+  cmake -B build -S "${pkgname}-${pkgver}" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX=/usr \
+    -DCMAKE_INSTALL_LIBDIR=/usr/lib \
+    -DCMAKE_INSTALL_LIBEXECDIR=lib \
+    -DBUILD_TESTING=OFF
+  cmake --build build
+}
+
+package() {
+  DESTDIR="$pkgdir" cmake --install build
+}

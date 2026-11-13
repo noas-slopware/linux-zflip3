@@ -34,7 +34,7 @@ url='https://github.com/noas-slopware/linux-zflip3'
 arch=(aarch64)
 license=(MIT)
 # senpai branch (default) of noas-slopware/linux-zflip3
-_zf3commit=6a77c9e8b0961783730085d6e899c747c91c85fa
+_zf3commit=771c52e05adb7b0d7fabbe41450be0d7b3fce276
 source=(
   "linux-zflip3-$_zf3commit.tar.gz::https://github.com/noas-slopware/linux-zflip3/archive/$_zf3commit.tar.gz"
   zflip3-bootimg
@@ -45,7 +45,7 @@ source=(
   90-zflip3-usbnet.rules
   80-zflip3.preset
 )
-sha256sums=('3078976ffd3e4f1b27a137eceecdbeb93fa3277da52ecf6163a1ac16a644a063'
+sha256sums=('08ad2bc3cde6e524254b4ea05f38488b800d931b03a321da9c388f49ca7f1291'
             '5a928b0ae2f8940bd75f12613c7234fd4ae5fecc930fc50b88833b212aa25fd9'
             '57164bb141e910214b0f174df3910f531ae9eaa8062d36be22d31f1488c73c8d'
             '2ad358d16b3c369237d3f4b62d7f92c39570c4acbbfdc04997c492c8e7f3d8e4'
