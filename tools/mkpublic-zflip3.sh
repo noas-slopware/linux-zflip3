@@ -18,8 +18,13 @@
 # Out (release tag arch-ports-YYYY.MM.DD):
 #   archlinux-zflip3-YYYY.MM.DD-rootfs.tar.zst  the root file system userspace/installer/install-rootfs.sh
 #                                               (senpai branch) unpacks onto the F2FS on LVM
-#   archlinux-zflip3-YYYY.MM.DD-boot.img.zst    the boot image for the recovery partition, as zflip3-boot
-#                                               made it (on the phone it rewrites it on every update)
+#   archlinux-zflip3-YYYY.MM.DD-u-boot.img.zst     U-Boot for the boot partition (u-boot-zflip3)
+#   archlinux-zflip3-YYYY.MM.DD-installer.img.zst  the installer for the recovery partition, first install
+#                                                  (zflip3-installer: linux-zflip3 + the bring-up initramfs)
+#   archlinux-zflip3-YYYY.MM.DD-dtbo-empty.img.zst 24 MiB of zeros for dtbo, so ABL applies no overlay
+#   archlinux-zflip3-YYYY.MM.DD-linux.img.zst      the installed system's boot image, as zflip3-boot made
+#                                                  it; the installer writes it to recovery itself, and
+#                                                  U-Boot's fastboot boots it (`fastboot boot`) for rescue
 #   *.sha256, *.sha512, sha256sums
 #
 # What is in it: Plasma Mobile on the phone's packages, the set mkimage-zflip3.sh was run with on
@@ -138,7 +143,18 @@ image() {
 	ZFLIP3_WORK=$WORK ZFLIP3_REPO=$WORK/repo ZFLIP3_IMAGE_PKGS="${PKGS[*]}" \
 		"$TOOLS/mkimage-zflip3.sh" "$WORK/out"
 	mv "$WORK/out/archlinux-zflip3-rootfs.tar.zst" "$OUT/$prefix-rootfs.tar.zst"
-	mv "$WORK/out/linux-zflip3.img" "$OUT/$prefix-boot.img"
+	mv "$WORK/out/linux-zflip3.img" "$OUT/$prefix-linux.img"
+	# U-Boot and the installer, out of the published packages in $WORK/repo (one each)
+	local f
+	for f in u-boot-zflip3:usr/share/u-boot-zflip3/boot.img:u-boot \
+		zflip3-installer:usr/share/zflip3-installer/installer.img:installer; do
+		local pkg=${f%%:*} path rest=${f#*:}; path=${rest%:*}
+		local file=("$WORK"/repo/"$pkg"-[0-9]*.pkg.tar.zst)
+		[ ${#file[@]} = 1 ] && [ -f "${file[0]}" ] || { echo "not one $pkg package in $WORK/repo" >&2; exit 1; }
+		bsdtar -xOf "${file[0]}" "$path" > "$OUT/$prefix-${rest##*:}.img"
+		[ -s "$OUT/$prefix-${rest##*:}.img" ] || { echo "no $path in ${file[0]}" >&2; exit 1; }
+	done
+	truncate -s $((24 * 1024 * 1024)) "$OUT/$prefix-dtbo-empty.img"
 	echo "$prefix" > "$PREFIX_FILE"
 	finish
 }
@@ -152,8 +168,8 @@ finish() {
 		verify
 	fi
 	local prefix; prefix=$(cat "$PREFIX_FILE")
-	(cd "$OUT" && zstd -q -19 -T0 --rm "$prefix-boot.img"
-	for i in "$prefix-rootfs.tar.zst" "$prefix-boot.img.zst"; do
+	(cd "$OUT" && for i in u-boot installer dtbo-empty linux; do zstd -q -19 -T0 --rm "$prefix-$i.img"; done
+	for i in "$prefix-rootfs.tar.zst" "$prefix"-{u-boot,installer,dtbo-empty,linux}.img.zst; do
 		sha256sum "$i" | tee "$i.sha256"
 		sha512sum "$i" > "$i.sha512"
 	done
