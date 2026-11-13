@@ -5,7 +5,7 @@
 # binutils (mkxtools-zflip3.sh calls it at its end). Each one is Arch Linux's x86_64 package of exactly
 # the version drzee ships for AArch64 (same PKGBUILD, same source), taken from the Arch repos or, when they
 # have moved on, the Arch archive (pacman checks the packager signatures either way):
-#   tools     python ninja bison flex m4 zstd libarchive debugedit xz gzip make bash coreutils sed gawk
+#   tools     python ninja cmake bison flex m4 zstd libarchive debugedit xz gzip make bash coreutils sed gawk
 #             grep findutils diffutils tar bc cpio kmod file pahole fakeroot: their ELF programs in /usr/bin
 #             (python: python3.14 and its lib-dynload modules; meson, Mesa's generators, sphinx and every
 #             other python script then run natively; bash is /usr/bin/sh too, so makepkg, configure and
@@ -51,7 +51,7 @@ set -euo pipefail
 xtools_lock
 [ -e "$W/xtools/.stamp" ] || { echo "run mkxtools-zflip3.sh first" >&2; exit 1; }
 
-TOOL_PKGS=(python ninja bison flex m4 zstd libarchive debugedit xz gzip make bash coreutils sed gawk grep
+TOOL_PKGS=(python ninja cmake bison flex m4 zstd libarchive debugedit xz gzip make bash coreutils sed gawk grep
 	findutils diffutils tar bc cpio kmod file pahole fakeroot)
 MODULE_PKGS=(python-markupsafe python-yaml util-linux-libs libxml2 onetbb)
 CTYPES_PKGS=(clang-libs)
