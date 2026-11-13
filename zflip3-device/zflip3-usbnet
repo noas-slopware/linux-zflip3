@@ -1,0 +1,45 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# zflip3-usbnet: the USB gadget the bring-up initramfs makes (tools/build-initramfs.sh on senpai),
+# made from the running system instead: NCM (usb0, 172.16.42.1 by systemd-networkd's
+# 50-usb0.network, DHCP for the host) and an ACM serial console (ttyGS0). Same IDs and fixed MAC
+# addresses, so the host side keeps its interface name.
+#   zflip3-usbnet start|stop
+set -eu
+G=/sys/kernel/config/usb_gadget/g1
+
+start() {
+	[ -d "$G" ] && return 0
+	mountpoint -q /sys/kernel/config || mount -t configfs none /sys/kernel/config
+	udc=$(ls /sys/class/udc 2>/dev/null | head -n1)
+	[ -n "$udc" ] || { echo "no USB device controller" >&2; exit 1; }
+	mkdir "$G"
+	echo 0x1d6b > "$G/idVendor"
+	echo 0x0104 > "$G/idProduct"
+	mkdir -p "$G/strings/0x409"
+	echo Samsung > "$G/strings/0x409/manufacturer"
+	echo "Galaxy Z Flip3 (Linux)" > "$G/strings/0x409/product"
+	mkdir -p "$G/configs/c.1/strings/0x409"
+	echo NCM+ACM > "$G/configs/c.1/strings/0x409/configuration"
+	mkdir "$G/functions/ncm.usb0"
+	echo 02:00:00:b2:00:01 > "$G/functions/ncm.usb0/dev_addr"
+	echo 02:00:00:b2:00:02 > "$G/functions/ncm.usb0/host_addr"
+	ln -s "$G/functions/ncm.usb0" "$G/configs/c.1/"
+	mkdir "$G/functions/acm.gs0"
+	ln -s "$G/functions/acm.gs0" "$G/configs/c.1/"
+	echo "$udc" > "$G/UDC"
+}
+
+stop() {
+	[ -d "$G" ] || return 0
+	echo "" > "$G/UDC" 2>/dev/null || :
+	rm -f "$G/configs/c.1/ncm.usb0" "$G/configs/c.1/acm.gs0"
+	rmdir "$G/configs/c.1/strings/0x409" "$G/configs/c.1" "$G/functions/ncm.usb0" \
+		"$G/functions/acm.gs0" "$G/strings/0x409" "$G"
+}
+
+case ${1:-} in
+start) start ;;
+stop) stop ;;
+*) echo "usage: ${0##*/} start|stop" >&2; exit 2 ;;
+esac

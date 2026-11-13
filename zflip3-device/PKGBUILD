@@ -1,0 +1,226 @@
+# Maintainer: Noa Himesaka <himesaka@noa.codes>
+#
+# Samsung Galaxy Z Flip3 5G (SM-F711N, b2q) device packages for Arch Linux Ports AArch64
+# (arch-linux-repo.drzee.net, ARMv8.2). The device files come from userspace/rootfs on the senpai
+# branch of noas-slopware/linux-zflip3 (what tools/build-rootfs.sh copies over /); the files next to
+# this PKGBUILD are the Arch side: the boot image writer and its pacman hook, the mkinitcpio config,
+# the USB gadget (made by the bring-up initramfs before) and the systemd preset. No user, hostname,
+# carrier connection or other personal settings: the image is generic.
+#
+#   zflip3-device    meta package: everything below but zflip3-plasma (optional), plus kernel,
+#                    DTBs and firmware; needs no particular desktop
+#   zflip3-system    Wi-Fi/Bluetooth addresses from efs (Akari), sensor hub tree (Renge), USB
+#                    network and serial console, NetworkManager and Wi-Fi settings, zram, lid, preset
+#   zflip3-boot      Android boot image for U-Boot (recovery partition), mkinitcpio config
+#   zflip3-audio     UCM for the SM-F711N sound card, PipeWire and WirePlumber drop-ins
+#   zflip3-cellular  USIM provisioning (SIMamura), a generic mobile data profile, CLAT for IPv6-only
+#                    carriers, IMSroha's phone settings, ModemManager/81voltd ordering
+#   zflip3-plasma    Plasma Mobile: lock screen at start with fingerprint, lid and power key in
+#                    PowerDevil, restart the telephony daemons; kita for the cover display
+
+pkgbase=zflip3-device
+pkgname=(
+  zflip3-device
+  zflip3-system
+  zflip3-boot
+  zflip3-audio
+  zflip3-cellular
+  zflip3-plasma
+)
+pkgver=1
+pkgrel=1
+pkgdesc='Samsung Galaxy Z Flip3 5G (SM-F711N)'
+url='https://github.com/noas-slopware/linux-zflip3'
+arch=(aarch64)
+license=(MIT)
+# senpai branch (default) of noas-slopware/linux-zflip3
+_zf3commit=6a77c9e8b0961783730085d6e899c747c91c85fa
+source=(
+  "linux-zflip3-$_zf3commit.tar.gz::https://github.com/noas-slopware/linux-zflip3/archive/$_zf3commit.tar.gz"
+  zflip3-bootimg
+  95-zflip3-bootimg.hook
+  mkinitcpio-zflip3.conf
+  zflip3-usbnet
+  zflip3-usbnet.service
+  90-zflip3-usbnet.rules
+  80-zflip3.preset
+)
+sha256sums=('3078976ffd3e4f1b27a137eceecdbeb93fa3277da52ecf6163a1ac16a644a063'
+            '5a928b0ae2f8940bd75f12613c7234fd4ae5fecc930fc50b88833b212aa25fd9'
+            '57164bb141e910214b0f174df3910f531ae9eaa8062d36be22d31f1488c73c8d'
+            '2ad358d16b3c369237d3f4b62d7f92c39570c4acbbfdc04997c492c8e7f3d8e4'
+            '4ed6ac6759b9c89add216dc2a8a2b97ee249cd4a2891eeb339732242bccdd577'
+            '2b9e814d75ef1d3cf023fc479837eb010c48e30d403d15d28a8a4a6207fd5981'
+            '3523ee5d1a7ce2ac09fe8baef103198ca879f7019b2ad7b5728a127666aca73c'
+            '7f4aa6acf2cfb6c5fcd90459988770d5cfda7d0cad9bfeb4886650fafb505ca6')
+
+_r() { echo "$srcdir/linux-zflip3-$_zf3commit/userspace/rootfs"; }
+
+# install the overlay files given relative to userspace/rootfs, at the same path, keeping the mode
+# git has for them (755 for scripts, 644 for the rest) and symlinks as symlinks
+_ov() {
+  local f
+  for f in "$@"; do
+    if [[ -L "$(_r)/$f" ]]; then
+      install -dm755 "$pkgdir/${f%/*}"
+      cp -P "$(_r)/$f" "$pkgdir/$f"
+    else
+      install -D -m"$(stat -c %a "$(_r)/$f")" "$(_r)/$f" "$pkgdir/$f"
+    fi
+  done
+}
+
+package_zflip3-device() {
+  pkgdesc="$pkgdesc (meta package)"
+  depends=(
+    firmware-zflip3
+    linux-zflip3
+    linux-zflip3-dtbs
+    zflip3-audio
+    zflip3-boot
+    zflip3-cellular
+    zflip3-system
+  )
+  optdepends=('zflip3-plasma: Plasma Mobile settings and the cover display')
+}
+
+package_zflip3-system() {
+  pkgdesc="$pkgdesc (system configuration and helpers)"
+  depends=(
+    bash
+    bluez
+    bluez-utils
+    hexagonrpcd
+    iio-sensor-proxy
+    iproute2
+    iw
+    networkmanager
+    rmtfs
+    systemd
+    tqftpserv
+    util-linux
+    zram-generator
+  )
+
+  # Akari: the factory Wi-Fi and Bluetooth addresses from efs
+  _ov usr/lib/akari/akari \
+    usr/lib/systemd/system/akari-wifi.service \
+    usr/lib/systemd/system/akari-bt.service \
+    usr/lib/udev/rules.d/90-akari-bt.rules
+
+  # Renge: the sensor hub's file tree for hexagonrpcd; sensors for iio-sensor-proxy
+  _ov usr/lib/renge/renge \
+    usr/lib/systemd/system/renge.service \
+    usr/lib/udev/rules.d/81-b2q-sensors.rules \
+    usr/lib/systemd/system/iio-sensor-proxy.service.d/b2q.conf
+
+  # NetworkManager: usb0 is systemd-networkd's, Wi-Fi power save, no IPv6 leak around a VPN,
+  # wake on WLAN
+  _ov usr/lib/NetworkManager/conf.d/10-b2q-usb0.conf \
+    usr/lib/NetworkManager/conf.d/20-b2q-wifi-powersave.conf \
+    usr/lib/NetworkManager/dispatcher.d/50-wifi-no-v6-leak.sh \
+    usr/lib/NetworkManager/dispatcher.d/60-wifi-wowlan.sh
+
+  # USB gadget (network at 172.16.42.1, serial console on ttyGS0)
+  install -Dm755 "$srcdir"/zflip3-usbnet -t "$pkgdir"/usr/lib/zflip3/
+  install -Dm644 "$srcdir"/zflip3-usbnet.service -t "$pkgdir"/usr/lib/systemd/system/
+  install -Dm644 "$srcdir"/90-zflip3-usbnet.rules -t "$pkgdir"/usr/lib/udev/rules.d/
+  _ov usr/lib/systemd/network/50-usb0.network \
+    usr/lib/systemd/networkd.conf.d/50-keep-foreign.conf
+
+  # zram, lid
+  _ov usr/lib/systemd/zram-generator.conf \
+    usr/lib/sysctl.d/99-vm-zram.conf \
+    usr/lib/systemd/logind.conf.d/50-b2q-lid.conf
+
+  install -Dm644 "$srcdir"/80-zflip3.preset -t "$pkgdir"/usr/lib/systemd/system-preset/
+}
+
+package_zflip3-boot() {
+  pkgdesc="$pkgdesc (boot image for U-Boot on the recovery partition, initramfs)"
+  depends=(
+    android-tools
+    bash
+    coreutils
+    f2fs-tools
+    lvm2
+    mkinitcpio
+  )
+  backup=(etc/mkinitcpio.conf.d/zflip3.conf)
+
+  install -Dm755 "$srcdir"/zflip3-bootimg -t "$pkgdir"/usr/bin/
+  install -Dm644 "$srcdir"/95-zflip3-bootimg.hook -t "$pkgdir"/usr/share/libalpm/hooks/
+  install -Dm644 "$srcdir"/linux-zflip3-$_zf3commit/configs/cmdline -t "$pkgdir"/usr/share/zflip3/
+  install -Dm644 "$srcdir"/mkinitcpio-zflip3.conf "$pkgdir"/etc/mkinitcpio.conf.d/zflip3.conf
+}
+
+package_zflip3-audio() {
+  pkgdesc="$pkgdesc (UCM, PipeWire and WirePlumber configuration)"
+  depends=(
+    alsa-ucm-conf
+    pipewire
+    pipewire-pulse
+    wireplumber
+  )
+
+  _ov usr/share/alsa/ucm2/conf.d/sm8250/SM-F711N.conf \
+    usr/share/alsa/ucm2/Qualcomm/sm8250/SM-F711N/SM-F711N.conf \
+    usr/share/alsa/ucm2/Qualcomm/sm8250/SM-F711N/HiFi.conf \
+    usr/share/alsa/ucm2/Qualcomm/sm8250/SM-F711N/VoiceCall.conf \
+    usr/share/pipewire/pipewire-pulse.conf.d/50-switch-on-connect.conf \
+    usr/share/wireplumber/wireplumber.conf.d/50-no-video-capture.conf
+}
+
+package_zflip3-cellular() {
+  pkgdesc="$pkgdesc (USIM provisioning, mobile data, CLAT, IMSroha settings)"
+  depends=(
+    81voltd
+    bash
+    imsroha
+    iproute2
+    libqmi
+    modemmanager
+    networkmanager
+    psmisc
+    tayga
+    zflip3-system
+  )
+
+  # SIMamura: open the USIM's GW provisioning session before ModemManager and IMSroha
+  _ov usr/lib/simamura/simamura \
+    usr/lib/systemd/system/simamura.service \
+    usr/lib/systemd/system/ModemManager.service.d/simamura.conf \
+    usr/lib/systemd/system/imsroha-vss-samsung.service.d/b2q.conf \
+    usr/lib/systemd/system/81voltd.service.d/order.conf
+
+  # mobile data as the stock CSC sets it up (no APN, IPv4 and IPv6, no roaming); NetworkManager
+  # only reads keyfiles that are 600
+  install -Dm600 "$(_r)"/usr/lib/NetworkManager/system-connections/zflip3-mobile.nmconnection \
+    -t "$pkgdir"/usr/lib/NetworkManager/system-connections/
+  _ov usr/lib/sysctl.d/90-cellular-nodad.conf
+
+  # CLAT (tayga) for IPv4 over an IPv6-only bearer
+  _ov usr/lib/NetworkManager/dispatcher.d/99-clat.sh \
+    usr/lib/zflip3/clat-up \
+    usr/lib/zflip3/clat-down
+
+  _ov usr/share/imsroha/imsroha.conf.d/50-zflip3.conf
+}
+
+package_zflip3-plasma() {
+  pkgdesc="$pkgdesc (Plasma Mobile: lock screen, lid and power key, cover display)"
+  depends=(
+    kita
+    kscreenlocker
+    plasma-login-manager
+    plasma-mobile
+    powerdevil
+  )
+  backup=(etc/xdg/kscreenlockerrc etc/xdg/powerdevilrc)
+
+  _ov etc/xdg/kscreenlockerrc \
+    etc/xdg/powerdevilrc \
+    usr/lib/systemd/user/app-org.kde.modem.daemon@autostart.service.d/b2q-restart.conf \
+    usr/lib/systemd/user/app-org.kde.spacebar.daemon@autostart.service.d/restart.conf \
+    usr/lib/systemd/user/app-org.kde.telephony.daemon@autostart.service.d/b2q-restart.conf
+}

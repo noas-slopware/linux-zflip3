@@ -1,0 +1,13 @@
+[Unit]
+Description=USB gadget: network at 172.16.42.1 and a serial console over the cable
+Requires=sys-kernel-config.mount
+After=sys-kernel-config.mount
+Before=systemd-networkd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/zflip3/zflip3-usbnet start
+ExecStop=/usr/lib/zflip3/zflip3-usbnet stop
+
+# Started by 90-zflip3-usbnet.rules when the UDC appears (coldplug replays it at boot).

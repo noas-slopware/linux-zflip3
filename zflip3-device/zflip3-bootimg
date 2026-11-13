@@ -1,0 +1,63 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# zflip3-bootimg: pack linux-zflip3's kernel, initramfs and the b2q device tree into the Android
+# boot image U-Boot boots from the recovery partition (header v2: Image.gz, initramfs, dtb, command
+# line, as tools/mkimages.sh on the senpai branch makes linux.img), keep it as
+# /boot/linux-zflip3.img, and on the phone write it to recovery, read it back and compare.
+# Run by 95-zflip3-bootimg.hook after mkinitcpio, or by hand after changing /etc/kernel/cmdline.
+#   zflip3-bootimg [--no-write]
+# The command line is /etc/kernel/cmdline if it exists, else /usr/share/zflip3/cmdline, plus the
+# root file system (/dev/b2q/root, the F2FS on LVM the installer makes) unless it names root=.
+set -euo pipefail
+write=1
+[ "${1:-}" != --no-write ] || write=0
+
+kdir=
+for d in /usr/lib/modules/*/; do
+	[ "$(cat "$d/pkgbase" 2>/dev/null)" = linux-zflip3 ] && { kdir=${d%/}; break; }
+done
+[ -n "$kdir" ] || { echo "zflip3-bootimg: linux-zflip3 is not installed, nothing to do"; exit 0; }
+kernel=$kdir/vmlinuz
+dtb=$kdir/dtb/qcom/sm8350-samsung-b2q.dtb
+initrd=/boot/initramfs-linux-zflip3.img
+out=/boot/linux-zflip3.img
+for f in "$kernel" "$dtb" "$initrd"; do
+	[ -f "$f" ] || { echo "zflip3-bootimg: $f is missing" >&2; exit 1; }
+done
+
+if [ -f /etc/kernel/cmdline ]; then cmdline=$(tr -s '\n' ' ' < /etc/kernel/cmdline)
+else cmdline=$(tr -s '\n' ' ' < /usr/share/zflip3/cmdline); fi
+case " $cmdline " in *" root="*) ;; *) cmdline="$cmdline root=/dev/b2q/root rootfstype=f2fs rw" ;; esac
+cmdline=$(echo $cmdline)
+
+mkbootimg --header_version 2 --kernel "$kernel" --ramdisk "$initrd" --dtb "$dtb" \
+	--base 0x80000000 --kernel_offset 0x00008000 --ramdisk_offset 0x01000000 \
+	--dtb_offset 0x01f00000 --tags_offset 0x00000100 --pagesize 4096 \
+	--cmdline "$cmdline" -o "$out.new"
+mv "$out.new" "$out"
+size=$(stat -c%s "$out")
+sum=$(sha256sum "$out" | cut -d' ' -f1)
+echo "zflip3-bootimg: $out ($size bytes, $sum)"
+
+[ "$write" = 1 ] || exit 0
+# Only on the phone itself: an image built in a chroot on another machine must never touch that
+# machine's disks.
+if ! { [ -r /proc/device-tree/compatible ] && tr '\0' '\n' < /proc/device-tree/compatible | grep -qx 'samsung,b2q'; }; then
+	echo "zflip3-bootimg: not running on a Galaxy Z Flip3 (b2q), recovery not written"
+	exit 0
+fi
+dev=
+for u in /sys/class/block/*/uevent; do
+	grep -qx PARTNAME=recovery "$u" && { dev=/dev/$(sed -n 's/^DEVNAME=//p' "$u"); break; }
+done
+[ -n "$dev" ] || { echo "zflip3-bootimg: no recovery partition" >&2; exit 1; }
+psize=$(( $(cat "/sys/class/block/${dev#/dev/}/size") * 512 ))
+[ "$size" -le "$psize" ] || { echo "zflip3-bootimg: $out is larger than recovery ($psize bytes)" >&2; exit 1; }
+if [ "$(head -c "$size" "$dev" | sha256sum | cut -d' ' -f1)" = "$sum" ]; then
+	echo "zflip3-bootimg: recovery already holds it"
+	exit 0
+fi
+dd if="$out" of="$dev" bs=1M conv=fsync status=none
+got=$(head -c "$size" "$dev" | sha256sum | cut -d' ' -f1)
+[ "$got" = "$sum" ] || { echo "zflip3-bootimg: recovery reads back as $got, not $sum" >&2; exit 1; }
+echo "zflip3-bootimg: written to recovery ($dev) and verified"

@@ -1,0 +1,2 @@
+# The phone's USB device controller: make the gadget (zflip3-usbnet.service).
+SUBSYSTEM=="udc", ACTION=="add", TAG+="systemd", ENV{SYSTEMD_WANTS}+="zflip3-usbnet.service"
