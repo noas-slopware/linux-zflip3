@@ -89,7 +89,9 @@ build_one() {
 		# after the deps: a dep that pulls in gcc or binutils would put the AArch64 ones back
 		[ "$ACCEL" != xgcc ] || xtools-activate
 		echo "zflip3-timing: makepkg $(date +%s)"
-		su builder -c "CCACHE_DIR=/ccache SRCDEST=/srcdest PKGDEST=/out makepkg -f --noconfirm ${NOCHECK:+--nocheck}"
+		# the PATH a login shell gets from /etc/profile.d/perlbin.sh: the perl tools (pod2man & co.) are
+		# in /usr/bin/core_perl, and su -c is no login shell
+		su builder -c "PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/bin/site_perl:/usr/bin/vendor_perl:/usr/bin/core_perl CCACHE_DIR=/ccache SRCDEST=/srcdest PKGDEST=/out makepkg -f --noconfirm ${NOCHECK:+--nocheck}"
 	' >> "$log" 2>&1 || { exec 8>&-; log "$pkg: FAILED, see $log"; return 1; }
 	exec 8>&-	# xtools_use's lock
 	local t1 td tm; t1=$(date +%s)

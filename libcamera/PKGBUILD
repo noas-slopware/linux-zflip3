@@ -25,7 +25,7 @@ pkgname=(
   python-libcamera
 )
 pkgver=0.7.2
-pkgrel=9
+pkgrel=10
 pkgdesc="A complex camera support library for Linux, Android, and ChromeOS"
 arch=(x86_64 aarch64)
 url="https://libcamera.org/"
@@ -39,6 +39,8 @@ makedepends=(
   libdrm
   libgcc
   libjpeg-turbo
+  # the Raspberry Pi PiSP pipeline meson enables on aarch64 (drzee's [forge] has it)
+  libpisp
   libstdc++
   libtiff
   libyaml
@@ -194,6 +196,7 @@ package_libcamera() {
     libstdc++
     libunwind
     libyaml
+    libpisp
     libyuv
     sh
     systemd-libs libudev.so
