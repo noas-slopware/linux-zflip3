@@ -1,0 +1,41 @@
+# Maintainer: Noa Himesaka <himesaka@noa.codes>
+#
+# Mihari: stock's skin temperature estimate (LRP2) and SIOP CPU/GPU limits on the Galaxy Z Flip3.
+# Source: userspace/mihari on the senpai branch of noas-slopware/linux-zflip3. The model data is
+# Samsung's, from the stock firmware: firmware-zflip3 installs it as /usr/share/mihari/model.conf.
+
+pkgname=mihari
+pkgver=0.1.0
+pkgrel=3
+# renamed from b2q-siop on 2026-11-11
+replaces=('b2q-siop')
+conflicts=('b2q-siop')
+provides=('b2q-siop')
+pkgdesc="Galaxy Z Flip3: stock's skin temperature estimate (LRP2) and SIOP CPU/GPU limits"
+url='https://github.com/noas-slopware/linux-zflip3'
+arch=(aarch64)
+license=(MIT)
+depends=(alsa-lib glibc)
+checkdepends=(python)
+optdepends=('firmware-zflip3: the model data from the stock firmware')
+# senpai branch (default) of noas-slopware/linux-zflip3
+_zf3commit=6a77c9e8b0961783730085d6e899c747c91c85fa
+source=("linux-zflip3-$_zf3commit.tar.gz::https://github.com/noas-slopware/linux-zflip3/archive/$_zf3commit.tar.gz")
+sha256sums=('3078976ffd3e4f1b27a137eceecdbeb93fa3277da52ecf6163a1ac16a644a063')
+
+_s() { echo "$srcdir/linux-zflip3-$_zf3commit/userspace/mihari"; }
+
+build() {
+  cc ${CPPFLAGS} ${CFLAGS} -O2 -Wall -Wextra -o mihari "$(_s)"/mihari.c ${LDFLAGS} -lasound
+}
+
+check() {
+  # against stock's model, when it is installed
+  [ ! -e /usr/share/mihari/model.conf ] || python3 -I "$(_s)"/test/sim.py ./mihari /usr/share/mihari/model.conf
+}
+
+package() {
+  install -Dm755 mihari "$pkgdir"/usr/lib/mihari/mihari
+  install -Dm644 "$(_s)"/mihari.service -t "$pkgdir"/usr/lib/systemd/system/
+  install -Dm644 "$(_s)"/README.md -t "$pkgdir"/usr/share/doc/mihari/
+}

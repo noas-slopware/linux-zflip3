@@ -1,0 +1,29 @@
+# Maintainer: Noa Himesaka <himesaka@noa.codes>
+#
+# Kita, the Galaxy Z Flip3 cover display daemon: leases the cover panel (DSI-2) from the compositor
+# through wp_drm_lease_v1 and draws the clock, notifications and calls on it. Source: userspace/kita
+# on the senpai branch of noas-slopware/linux-zflip3 (meson).
+
+pkgname=kita
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Galaxy Z Flip3 cover display: clock, notifications and calls'
+url='https://github.com/noas-slopware/linux-zflip3'
+arch=(aarch64)
+license=(MIT)
+depends=(cairo glib2 libdrm pango qt6-declarative systemd-libs wayland)
+makedepends=(meson wayland-protocols)
+# senpai branch (default) of noas-slopware/linux-zflip3
+_zf3commit=6a77c9e8b0961783730085d6e899c747c91c85fa
+source=("linux-zflip3-$_zf3commit.tar.gz::https://github.com/noas-slopware/linux-zflip3/archive/$_zf3commit.tar.gz")
+sha256sums=('3078976ffd3e4f1b27a137eceecdbeb93fa3277da52ecf6163a1ac16a644a063')
+
+build() {
+  arch-meson linux-zflip3-$_zf3commit/userspace/kita build
+  meson compile -C build
+}
+
+package() {
+  meson install -C build --destdir "$pkgdir" --no-rebuild
+  install -Dm644 linux-zflip3-$_zf3commit/userspace/kita/README.md -t "$pkgdir"/usr/share/doc/kita/
+}

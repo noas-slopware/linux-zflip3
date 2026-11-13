@@ -1,0 +1,89 @@
+# Maintainer: Noa Himesaka <himesaka@noa.codes>
+#
+# Firmware for the Samsung Galaxy Z Flip3 5G (SM-F711N), taken from Samsung's stock firmware by
+# the extract tools on the senpai branch of noas-slopware/linux-zflip3, at build time: nothing of
+# Samsung's is in this repository. Stock build F711NKSSFKZH5 (One UI 7, Android 15), the Korean
+# multi-CSC (OKR) firmware every SM-F711N runs, whichever carrier sold it.
+#
+# Get the three tars with tools/fetch-firmware.sh on senpai (samloader-rs, Samsung's FUS):
+#   tools/fetch-firmware.sh --version F711NKSSFKZH5/F711NOKRFKZH5/F711NKSSFKZH5/F711NKSSFKZH5
+# and put the AP, BL and CP .tar.md5 next to this PKGBUILD (or in SRCDEST).
+#
+# What it extracts (the DT's firmware-name entries and what the drivers and daemons ask for):
+#   qcom/sm8350/Samsung/b2q/  a660_zap, ipa_fws, slpi, vpu20_4v, adsp (+ its .jsn), modem: the
+#                             Samsung-signed SoC images, which linux-firmware's generic ones
+#                             cannot replace (secure boot checks them)
+#   updates/ath11k, updates/qca  QCA6390 Wi-Fi board data and Bluetooth NVM tuned for this phone
+#   cirrus/                   the CS35L41 speaker and earpiece protection firmware
+#   /usr/share/qcom/sm8350/Samsung/b2q/  the sensor hub's DSP skels and configs (Renge, hexagonrpcd)
+#   /usr/share/mihari/model.conf  stock's skin temperature model and SIOP limits (Mihari)
+# No calibration, address or identity data: efs, persist and the modem's EFS stay on the phone.
+
+pkgname=firmware-zflip3
+pkgver=F711NKSSFKZH5
+pkgrel=1
+pkgdesc='Firmware for the Samsung Galaxy Z Flip3 5G (SM-F711N), from the stock firmware'
+url='https://github.com/noas-slopware/linux-zflip3'
+arch=(any)
+license=(LicenseRef-proprietary)
+makedepends=(android-tools dtc e2fsprogs lz4 mtools python)
+options=(!strip !debug)
+# senpai branch (default) of noas-slopware/linux-zflip3
+_zf3commit=6a77c9e8b0961783730085d6e899c747c91c85fa
+_ap=AP_F711NKSSFKZH5_F711NKSSFKZH5_MQB113544073_REV00_user_low_ship_MULTI_CERT_meta_OS15.tar.md5
+_bl=BL_F711NKSSFKZH5_F711NKSSFKZH5_MQB113544073_REV00_user_low_ship_MULTI_CERT.tar.md5
+_cp=CP_F711NKSSFKZH5_CP35951701_MQB113544073_REV00_user_low_ship_MULTI_CERT.tar.md5
+source=(
+  "linux-zflip3-$_zf3commit.tar.gz::https://github.com/noas-slopware/linux-zflip3/archive/$_zf3commit.tar.gz"
+  "local://$_ap"
+  "local://$_bl"
+  "local://$_cp"
+)
+noextract=("$_ap" "$_bl" "$_cp")
+sha256sums=('3078976ffd3e4f1b27a137eceecdbeb93fa3277da52ecf6163a1ac16a644a063'
+            'b99284d7e01c52a5a60fded225c9534e8787237fb79ad3d0eed4b89ffe7aae9a'
+            'e8d92133d71d26eeb9ed6265a6a0d0427dffa4ea34993a4e4dfe749ab34185c9'
+            '0215dd72e0f7f545727ff53525f75422c54c7eb6e9141ee6fe3d9aab8109e00f')
+
+build() {
+  local t="$srcdir/linux-zflip3-$_zf3commit/tools" fw="$srcdir/fw" w="$srcdir/work"
+  mkdir -p "$srcdir/linux-zflip3-$_zf3commit/.cache" "$fw" "$w"
+
+  # SoC images from the BL tar's NON-HLOS.bin and the CP tar's modem.bin
+  "$t"/extract-qcom-firmware.sh "$srcdir/$_bl" --out "$fw" a660_zap ipa_fws slpi vpu20_4v adsp
+  "$t"/extract-qcom-firmware.sh "$srcdir/$_cp" --fat modem.bin --out "$fw" modem
+  # the ADSP's service registry, next to its image
+  tar -xf "$srcdir/$_bl" -C "$w" NON-HLOS.bin.lz4
+  lz4 -dqf "$w"/NON-HLOS.bin.lz4 "$w"/NON-HLOS.bin
+  mcopy -n -i "$w"/NON-HLOS.bin ::/image/adspr.jsn ::/image/adspua.jsn "$fw"/usr/lib/firmware/qcom/sm8350/Samsung/b2q/
+
+  # Wi-Fi/Bluetooth board files and the sensor hub's files, from vendor in the AP tar's super
+  "$t"/extract-wcn-firmware.sh "$srcdir/$_ap" --out "$fw"
+  "$t"/extract-sensor-files.sh "$srcdir/$_ap" --out "$fw"
+
+  # vendor's firmware/ and etc/, and SDHMS from system, for the amplifiers and Mihari
+  tar -xf "$srcdir/$_ap" -C "$w" super.img.lz4
+  lz4 -dqf "$w"/super.img.lz4 "$w"/super.sparse
+  rm "$w"/super.img.lz4
+  simg2img "$w"/super.sparse "$w"/super.raw
+  rm "$w"/super.sparse
+  lpunpack --partition=vendor --partition=system "$w"/super.raw "$w" >/dev/null
+  rm "$w"/super.raw
+  mkdir -p "$w"/vendor
+  debugfs -R "rdump /firmware /etc $w/vendor" "$w"/vendor.img >/dev/null 2>&1
+  debugfs -R "dump /system/priv-app/SamsungDeviceHealthManagerService/SamsungDeviceHealthManagerService.apk $w/sdhms.apk" \
+    "$w"/system.img >/dev/null 2>&1
+  [ -s "$w"/sdhms.apk ] && [ -d "$w"/vendor/firmware ] && [ -d "$w"/vendor/etc ]
+  "$t"/extract-amp-firmware.sh --vendor "$w"/vendor --out "$fw"
+
+  # stock's thermistor tables are in the dtbo
+  "$t"/extract-firmware.sh "$srcdir/$_ap" --out "$w"/raw
+  python3 -I "$t"/extract-siop-data.py --vendor "$w"/vendor --dtbo "$w"/raw/dtbo/entry.3.dts \
+    --sdhms "$w"/sdhms.apk --out "$fw"/usr/share/mihari/model.conf
+}
+
+package() {
+  cp -r --no-preserve=ownership "$srcdir"/fw/usr "$pkgdir"/
+  find "$pkgdir" -type d -exec chmod 755 {} +
+  find "$pkgdir" -type f -exec chmod 644 {} +
+}

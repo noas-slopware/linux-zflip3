@@ -1,0 +1,38 @@
+# Maintainer: Noa Himesaka <himesaka@noa.codes>
+#
+# Claire: the secure-world services Samsung's fingerprint TA needs on the Galaxy Z Flip3 (sec_nvm,
+# keymaster64 SPU init, hwvault). Source: userspace/claire on the senpai branch of
+# noas-slopware/linux-zflip3.
+
+pkgname=claire
+pkgver=0.1.0
+pkgrel=8
+# renamed from b2q-spud on 2026-11-11
+replaces=('b2q-spud')
+conflicts=('b2q-spud')
+provides=('b2q-spud')
+pkgdesc='Galaxy Z Flip3: secure-world services the fingerprint TA needs (sec_nvm, keymaster64 SPU init, hwvault)'
+url='https://github.com/noas-slopware/linux-zflip3'
+arch=(aarch64)
+license=(MIT)
+depends=(glibc systemd-libs)
+# senpai branch (default) of noas-slopware/linux-zflip3
+_zf3commit=6a77c9e8b0961783730085d6e899c747c91c85fa
+source=("linux-zflip3-$_zf3commit.tar.gz::https://github.com/noas-slopware/linux-zflip3/archive/$_zf3commit.tar.gz")
+sha256sums=('3078976ffd3e4f1b27a137eceecdbeb93fa3277da52ecf6163a1ac16a644a063')
+
+_s() { echo "$srcdir/linux-zflip3-$_zf3commit/userspace/claire"; }
+
+build() {
+  cc ${CPPFLAGS} ${CFLAGS} -O2 -Wall -Wextra -o claire "$(_s)"/src/spud.c "$(_s)"/src/nvm.c ${LDFLAGS} -lsystemd -lpthread
+}
+
+package() {
+  install -Dm755 claire "$pkgdir"/usr/lib/claire/claire
+  install -Dm644 "$(_s)"/claire.service -t "$pkgdir"/usr/lib/systemd/system/
+  install -Dm644 "$(_s)"/70-qsee-app.rules -t "$pkgdir"/usr/lib/udev/rules.d/
+  install -Dm644 "$(_s)"/mnt-vendor-persist.mount -t "$pkgdir"/usr/lib/systemd/system/
+  install -Dm644 "$(_s)"/claire-modules.conf "$pkgdir"/usr/lib/modules-load.d/claire.conf
+  install -Dm644 "$(_s)"/fprintd-claire.conf "$pkgdir"/usr/lib/systemd/system/fprintd.service.d/claire.conf
+  install -Dm644 "$(_s)"/README.md -t "$pkgdir"/usr/share/doc/claire/
+}
