@@ -19,7 +19,7 @@ depends=(glibc systemd-libs)
 # senpai branch (default) of noas-slopware/linux-zflip3
 _zf3commit=a160d0fa7207ec7348d1ef4c5b1ac756d28f5f59
 source=("linux-zflip3-$_zf3commit.tar.gz::https://github.com/noas-slopware/linux-zflip3/archive/$_zf3commit.tar.gz")
-sha256sums=('e113823cae45ee94212e9d1d06966cb086c570a3d95b09363dcaec63d7d70b92')
+sha256sums=('1c5a8c4711833692c78bfea170bf5c6e9e99b777de00601706c41ebe970859ff')
 
 _s() { echo "$srcdir/linux-zflip3-$_zf3commit/userspace/claire"; }
 
