@@ -14,6 +14,7 @@ enable systemd-networkd.service
 disable systemd-networkd-wait-online.service
 enable akari-wifi.service
 enable renge.service
+enable zflip3-pacman-keyring.service
 enable rmtfs.service
 enable tqftpserv.service
 enable hexagonrpcd-sdsp.service

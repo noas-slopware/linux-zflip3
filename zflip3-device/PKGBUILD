@@ -28,13 +28,13 @@ pkgname=(
   zflip3-plasma
 )
 pkgver=1
-pkgrel=2
+pkgrel=3
 pkgdesc='Samsung Galaxy Z Flip3 5G (SM-F711N)'
 url='https://github.com/noas-slopware/linux-zflip3'
 arch=(aarch64)
 license=(MIT)
 # senpai branch (default) of noas-slopware/linux-zflip3
-_zf3commit=771c52e05adb7b0d7fabbe41450be0d7b3fce276
+_zf3commit=c5e10d087857b3054b6e16849fe800a5d8f0498c
 source=(
   "linux-zflip3-$_zf3commit.tar.gz::https://github.com/noas-slopware/linux-zflip3/archive/$_zf3commit.tar.gz"
   zflip3-bootimg
@@ -44,15 +44,17 @@ source=(
   zflip3-usbnet.service
   90-zflip3-usbnet.rules
   80-zflip3.preset
+  zflip3-pacman-keyring.service
 )
-sha256sums=('08ad2bc3cde6e524254b4ea05f38488b800d931b03a321da9c388f49ca7f1291'
+sha256sums=('127e29f7fe99fa1e99f18b65f2d8e963d03da6ef5213e2fc1c639a9af3b39295'
             '5a928b0ae2f8940bd75f12613c7234fd4ae5fecc930fc50b88833b212aa25fd9'
             '57164bb141e910214b0f174df3910f531ae9eaa8062d36be22d31f1488c73c8d'
             '2ad358d16b3c369237d3f4b62d7f92c39570c4acbbfdc04997c492c8e7f3d8e4'
             '4ed6ac6759b9c89add216dc2a8a2b97ee249cd4a2891eeb339732242bccdd577'
             '2b9e814d75ef1d3cf023fc479837eb010c48e30d403d15d28a8a4a6207fd5981'
             '3523ee5d1a7ce2ac09fe8baef103198ca879f7019b2ad7b5728a127666aca73c'
-            '74a5026551de171800103d4ae201304cba11b6cd40d417fdc47c005c06f9eabd')
+            '7aba8568e4abdc25dc59e166bb7056203e3f9cce97528eb86ffaa4e2b26483fe'
+            '32721834bcfa95a4861775f23c04eeb7df77d6afa381fbcc90134505b8f86c16')
 
 _r() { echo "$srcdir/linux-zflip3-$_zf3commit/userspace/rootfs"; }
 
@@ -87,6 +89,7 @@ package_zflip3-device() {
 package_zflip3-system() {
   pkgdesc="$pkgdesc (system configuration and helpers)"
   depends=(
+    archports-keyring
     bash
     bluez
     bluez-utils
@@ -132,6 +135,9 @@ package_zflip3-system() {
   _ov usr/lib/systemd/zram-generator.conf \
     usr/lib/sysctl.d/99-vm-zram.conf \
     usr/lib/systemd/logind.conf.d/50-b2q-lid.conf
+
+  # images ship without a pacman keyring (one made at build time would be every phone's)
+  install -Dm644 "$srcdir"/zflip3-pacman-keyring.service -t "$pkgdir"/usr/lib/systemd/system/
 
   install -Dm644 "$srcdir"/80-zflip3.preset -t "$pkgdir"/usr/lib/systemd/system-preset/
 }

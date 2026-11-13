@@ -1,0 +1,17 @@
+[Unit]
+Description=Make pacman's keyring on first boot
+Documentation=man:pacman-key(8)
+# Images ship without one: a keyring made when the image is built would share its master key
+# with every phone installed from it. archports-keyring trusts drzee's signing key.
+ConditionPathExists=!/etc/pacman.d/gnupg
+Wants=time-sync.target
+After=time-sync.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/pacman-key --init
+ExecStart=/usr/bin/pacman-key --populate archlinux archports
+
+[Install]
+WantedBy=multi-user.target

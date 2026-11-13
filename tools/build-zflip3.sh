@@ -10,6 +10,7 @@
 #                  made from it with git archive when SRCDEST lacks it (before the commit is on
 #                  GitHub, or to build offline)
 #   NOCHECK=1      skip check() (makepkg --nocheck)
+#   VERIFYSOURCE=1 only download and verify the sources (checksums, PGP signatures), build nothing
 # On an x86_64 host everything runs under qemu-user: fine for small packages, hours for the kernel,
 # which is better built natively (makepkg on the phone or another aarch64 machine).
 set -euo pipefail
@@ -42,7 +43,7 @@ build_one() {
 	"$ENGINE" run --rm "${EMU[@]}" \
 		-v "$src/$pkg:/pkgsrc:ro" -v "$REPO:/repo" -v "$W/pkgcache:/var/cache/pacman/pkg" \
 		-v "$W/srcdest:/srcdest" -v "$W/ccache:/ccache" -v "$W/out/$pkg:/out" \
-		-e NOCHECK="${NOCHECK:-}" localhost/zflip3-builder bash -euc '
+		-e NOCHECK="${NOCHECK:-}" -e VERIFYSOURCE="${VERIFYSOURCE:-}" localhost/zflip3-builder bash -euc '
 		pacman -Syu --noconfirm >/dev/null
 		cp -r /pkgsrc /build && chown -R builder: /build /out /srcdest /ccache
 		cd /build
@@ -55,6 +56,13 @@ build_one() {
 		# runtime ones, which makepkg does not install
 		deps=$(sed -n "/^pkgname = /q;p" .SRCINFO | sed -nE "s/^\t($keys) = //p" |
 			sed -E "s/[<>=].*//" | sort -u | grep -vxF "$mine" || :)
+		# the keys a signed source is checked against (kernel.org tarballs: Linus, Greg)
+		pgpkeys=$(sed -n "s/^\tvalidpgpkeys = //p" .SRCINFO | sort -u | tr "\n" " ")
+		[ -z "$pgpkeys" ] || su builder -c "gpg --batch --keyserver hkps://keyserver.ubuntu.com --recv-keys $pgpkeys"
+		if [ -n "$VERIFYSOURCE" ]; then
+			su builder -c "SRCDEST=/srcdest makepkg --verifysource -f"
+			exit 0
+		fi
 		[ -z "$deps" ] || pacman -S --noconfirm --needed --asdeps $deps
 		su builder -c "CCACHE_DIR=/ccache SRCDEST=/srcdest PKGDEST=/out makepkg -f --noconfirm ${NOCHECK:+--nocheck}"
 	' > "$log" 2>&1 || { log "$pkg: FAILED, see $log"; return 1; }

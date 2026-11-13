@@ -11,6 +11,9 @@
 #      made for the recovery partition (on the phone it writes it there itself on every update).
 # ZFLIP3_IMAGE_PKGS="pkg ..." replaces the package list below; ZFLIP3_REPO_URL is where the image's
 # pacman finds [zflip3] (default: the GitHub Pages URL it will be published at).
+# Every package the arch branch has must come from [zflip3]: a name pacman would take from
+# drzee's repos instead (a fork not built yet) stops the build, unless ZFLIP3_ALLOW_FOREIGN=1
+# (pipeline tests only: such an image lacks the phone's forks).
 # ZFLIP3_VERIFY_DENY=<file>: extra patterns the image must not contain, one per line, handed to
 # verify-zflip3-image.sh (keep a list of your own hostname, addresses and names there, outside git).
 set -euo pipefail
@@ -30,7 +33,13 @@ if [ -z "${ZFLIP3_IN_CONTAINER:-}" ]; then
 	# root-owned after a run: tools/clean-image-root-zflip3.sh removes it
 	[ ! -e "$root" ] || { echo "$root exists (a previous run): tools/clean-image-root-zflip3.sh" >&2; exit 1; }
 	mkdir -p "$root"
+	# the arch branch's package names, for the check that they come from [zflip3]
+	own=$(cd "$(dirname "$TOOLS")" && for d in */PKGBUILD; do
+		(cd "${d%/PKGBUILD}" && makepkg --printsrcinfo 2>/dev/null | sed -n 's/^pkgname = //p')
+	done | sort -u | tr '\n' ' ')
+	[ -n "$own" ] || { echo "no package names from the arch branch" >&2; exit 1; }
 	"$ENGINE" run --rm --privileged "${EMU[@]}" -e ZFLIP3_IN_CONTAINER=1 \
+		-e ZFLIP3_OWN="$own" -e ZFLIP3_ALLOW_FOREIGN \
 		-e USERNAME -e PASSWORD -e ROOT_PASSWORD -e ZFLIP3_IMAGE_PKGS -e REPO_URL="$REPO_URL" \
 		-v "$REPO:/repo:ro" -v "$W/pkgcache:/var/cache/pacman/pkg" -v "$TOOLS:/tools:ro" \
 		-v "$root:/target" localhost/zflip3-builder /tools/mkimage-zflip3.sh /target
@@ -62,15 +71,21 @@ pacman -Sy --noconfirm >/dev/null
 chown 0:0 /target
 chmod 755 /target
 mountpoint -q "$t" || mount --bind "$t" "$t"
+
+# what pacman would install from where: the arch branch's packages only from [zflip3]
+foreign=$(pacman -Sp --print-format '%r %n' "${PKGS[@]}" |
+	awk -v own=" $ZFLIP3_OWN " '$1 != "zflip3" && index(own, " " $2 " ") { print $2 " (" $1 ")" }')
+if [ -n "$foreign" ]; then
+	echo "packages the arch branch has, but not built into [zflip3]:" $foreign >&2
+	[ "${ZFLIP3_ALLOW_FOREIGN:-}" = 1 ] || exit 1
+	echo "ZFLIP3_ALLOW_FOREIGN=1: going on with those (a pipeline test, not a phone image)" >&2
+fi
+
 pacstrap -C /etc/pacman.conf -K "$t" "${PKGS[@]}"
 
-# the image's pacman: drzee and the published [zflip3], drzee's key trusted as in the builder
+# the image's pacman: drzee and the published [zflip3]
 sed "s|^Server = file:///repo$|Server = $REPO_URL|; /^DisableSandbox$/d; /^# qemu-user implements/d" \
 	/etc/pacman.conf > "$t/etc/pacman.conf"
-arch-chroot "$t" pacman-key --populate archports >/dev/null 2>&1 || :
-pacman-key --export 9B2C213B21883BB65CE2FB900CF25682E6BA0751 > "$t/root/drzee.key"
-arch-chroot "$t" sh -c 'pacman-key --add /root/drzee.key && pacman-key --lsign-key 9B2C213B21883BB65CE2FB900CF25682E6BA0751' >/dev/null
-rm -f /target/root/drzee.key
 
 # / is F2FS on LVM (userspace/installer/install-rootfs.sh); swap is zram (zflip3-system)
 printf '%s\n' '# <device>     <dir> <type> <options>   <dump> <fsck>' \
@@ -95,3 +110,7 @@ systemctl --root="$t" preset-all
 # nothing the build left behind
 rm -rf /target/var/cache/pacman/pkg/* /target/var/log/pacman.log /target/root/.bash_history
 rm -f /target/etc/ssh/ssh_host_*
+# no keyring: one made here would share its master key with every phone installed from the image;
+# zflip3-pacman-keyring.service makes the phone's own at first boot
+gpgconf --homedir /target/etc/pacman.d/gnupg --kill all 2>/dev/null || :
+rm -rf /target/etc/pacman.d/gnupg
