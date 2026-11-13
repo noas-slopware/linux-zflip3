@@ -55,7 +55,7 @@ if [ -z "${ZFLIP3_IN_CONTAINER:-}" ]; then
 	log "packing $out/archlinux-zflip3-rootfs.tar.zst"
 	"$ENGINE" run --rm -v "$root:/target:ro" -v "$out:/out" docker.io/library/archlinux:latest \
 		sh -euc 'tar --numeric-owner --xattrs --xattrs-include="*" --acls -C /target -cf - . |
-			zstd -T0 -19 -q -o /out/archlinux-zflip3-rootfs.tar.zst; cp /target/boot/linux-zflip3.img /out/'
+			zstd -T0 -19 -q -f -o /out/archlinux-zflip3-rootfs.tar.zst; cp -f /target/boot/linux-zflip3.img /out/'
 	( cd "$out" && sha256sum archlinux-zflip3-rootfs.tar.zst linux-zflip3.img > sha256sums )
 	cat "$out/sha256sums"
 	exit 0
