@@ -33,11 +33,17 @@ if [ -z "${ZFLIP3_IN_CONTAINER:-}" ]; then
 		-e USERNAME -e PASSWORD -e ROOT_PASSWORD -e ZFLIP3_IMAGE_PKGS -e REPO_URL="$REPO_URL" \
 		-v "$REPO:/repo:ro" -v "$W/pkgcache:/var/cache/pacman/pkg" -v "$TOOLS:/tools:ro" \
 		-v "$root:/target" localhost/zflip3-builder /tools/mkimage-zflip3.sh /target
-	deny=()
-	[ -z "${ZFLIP3_VERIFY_DENY:-}" ] || deny=(--deny "$ZFLIP3_VERIFY_DENY")
-	"$TOOLS"/verify-zflip3-image.sh "${deny[@]}" "$root"
+	# as root in the container: the image's files are root's, and a check that cannot read
+	# /root or /etc/shadow proves nothing about them
+	deny=() mnt=()
+	if [ -n "${ZFLIP3_VERIFY_DENY:-}" ]; then
+		deny=(--deny /deny.txt) mnt=(-v "$(realpath "$ZFLIP3_VERIFY_DENY"):/deny.txt:ro")
+	fi
+	# natively (no qemu needed to read files): the Arch Linux image the base image is extracted with
+	"$ENGINE" run --rm -v "$root:/target:ro" -v "$TOOLS:/tools:ro" "${mnt[@]}" \
+		docker.io/library/archlinux:latest /tools/verify-zflip3-image.sh "${deny[@]}" /target
 	log "packing $out/archlinux-zflip3-rootfs.tar.zst"
-	"$ENGINE" run --rm "${EMU[@]}" -v "$root:/target:ro" -v "$out:/out" localhost/zflip3-builder \
+	"$ENGINE" run --rm -v "$root:/target:ro" -v "$out:/out" docker.io/library/archlinux:latest \
 		sh -euc 'tar --numeric-owner --xattrs --xattrs-include="*" --acls -C /target -cf - . |
 			zstd -T0 -19 -q -o /out/archlinux-zflip3-rootfs.tar.zst; cp /target/boot/linux-zflip3.img /out/'
 	( cd "$out" && sha256sum archlinux-zflip3-rootfs.tar.zst linux-zflip3.img > sha256sums )

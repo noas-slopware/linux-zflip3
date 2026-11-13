@@ -1,0 +1,76 @@
+# Maintainer: Noa Himesaka <himesaka@noa.codes>
+# b2q: spacebar/PKGBUILD and its patches from IMSroha (noas-slopware/imsroha) at _imsrohacommit, built from its GitHub
+# tarball; nothing of it is copied here.
+# Contributor: Marcos_Chay <maktio@hotmail.com> (AUR spacebar, 252bc14)
+#
+# Spacebar with IMSroha's patches (README.md here): MMS and SMS fixes
+# (0001-0003), RCS chat (0004-0006), RCS file transfer (0007), sharp
+# attachment images on scaled screens (0008), read reports (0009) and RCS
+# chatbots: rich cards, carousels, open rich cards and suggestions
+# (0010-0011), with exact resends and picture retries (0012); RCS goes
+# through codes.noa.IMSroha.Rcs when imsroha-rcs runs; without it, SMS and
+# MMS as upstream.
+
+pkgname=spacebar
+pkgver=6.3.4
+pkgrel=11
+pkgdesc="SMS and messaging application for Mobile Devices running Plasma"
+arch=('x86_64' 'armv7h' 'aarch64')
+url="https://community.kde.org/Plasma/Mobile"
+license=('GPL-2.0-only OR GPL-3.0-only')
+depends=(
+  'c-ares'
+  'futuresql-qt6'
+  'kconfig'
+  'kcoreaddons'
+  'kcontacts'
+  'kdbusaddons'
+  'ki18n'
+  'kio'
+  'kirigami'
+  'kirigami-addons'
+  'knotifications'
+  'kpeople'
+  'kwindowsystem'
+  'libphonenumber'
+  'modemmanager-qt'
+  'qcoro-qt6'
+  'qt6-declarative'
+)
+makedepends=(
+  'cmake'
+  'extra-cmake-modules'
+)
+_imsrohacommit=6b0bf8d620faba77e83dd7ca5423f47a0e01c6c0
+source=("https://download.kde.org/stable/plasma/$pkgver/$pkgname-$pkgver.tar.xz"
+        "imsroha-$_imsrohacommit.tar.gz::https://github.com/noas-slopware/imsroha/archive/$_imsrohacommit.tar.gz")
+sha256sums=('fe1b7c5651baabcf580041cf1616ede4ad434ae84f0838464e9082d1e4f1e633'
+            'd82aa4e5056224fe800ef4a1ddffd5cd3fc820cc309cd879873f46b413818942')
+
+prepare() {
+  for p in 0001-daemon-close-the-connection-after-every-MMSC-request.patch \
+           0002-Parse-national-own-numbers-and-late-modem-country-co.patch \
+           0003-daemon-store-a-received-message-only-once.patch \
+           0004-database-remember-the-transport-of-a-message-SMS-MMS.patch \
+           0005-daemon-RCS-chat-through-IMSroha-when-it-is-there.patch \
+           0006-app-mark-RCS-messages-show-when-the-other-side-is-ty.patch \
+           0007-daemon-app-send-and-receive-files-over-RCS-through-I.patch \
+           0008-app-decode-attachment-images-for-the-screen-s-pixels.patch \
+           0009-daemon-send-RCS-read-reports-for-messages-that-arriv.patch \
+           0010-daemon-RCS-chatbot-messages-through-IMSroha.patch \
+           0011-app-show-RCS-chatbot-messages-their-suggestions-and-.patch \
+           0012-daemon-app-resend-chatbot-responses-as-they-went-fet.patch; do
+    patch -d $pkgname-$pkgver -p1 < imsroha-$_imsrohacommit/spacebar/$p
+  done
+}
+
+build() {
+  cmake -B build -S $pkgname-$pkgver \
+    -DCMAKE_INSTALL_LIBEXECDIR=lib \
+    -DBUILD_TESTING=OFF
+  cmake --build build
+}
+
+package() {
+  DESTDIR="$pkgdir" cmake --install build
+}

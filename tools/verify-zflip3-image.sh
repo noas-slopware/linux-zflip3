@@ -9,6 +9,7 @@
 # in any file: keep your own hostname, addresses and names in such a file outside git, so the
 # check itself never publishes them.
 set -euo pipefail
+[ "$(id -u)" = 0 ] || { echo "verify: run as root, or files only root can read go unchecked" >&2; exit 2; }
 deny=
 if [ "${1:-}" = --deny ]; then deny=${2:?}; shift 2; fi
 r=${1:?usage: $0 [--deny FILE] <root dir>}

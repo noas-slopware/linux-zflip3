@@ -1,0 +1,28 @@
+# Maintainer: Noa Himesaka <himesaka@noa.codes>
+# b2q: from scratch (neither Arch nor the AUR has it; Debian packages it as 81voltd). The server
+# side of the QMI IMS Data service: the modem asks the AP for the IMS connection through it, and it
+# hands the request to ModemManager. zflip3-cellular orders it before ModemManager.
+
+pkgname=81voltd
+pkgver=1.2.0
+pkgrel=1
+pkgdesc='Server-side implementation of the QMI IMS Data service, through ModemManager'
+url='https://gitlab.postmarketos.org/modem/81voltd'
+arch=(aarch64 x86_64)
+license=(GPL-2.0-only)
+depends=(glib2 glibc libmm-glib libqmi qrtr)
+makedepends=(meson)
+source=("$pkgname-$pkgver.tar.gz::https://gitlab.postmarketos.org/modem/81voltd/-/archive/v$pkgver/81voltd-v$pkgver.tar.gz")
+sha256sums=('bb0e9774463fb4964067bf70f10cc316afc1c8ed163ff7969b3fd3ae3dc2e937')
+
+build() {
+  arch-meson 81voltd-v$pkgver build
+  meson compile -C build
+}
+
+package() {
+  meson install -C build --destdir "$pkgdir"
+  # OpenRC's script; Arch runs the systemd unit
+  rm -r "$pkgdir"/etc/init.d
+  rmdir --ignore-fail-on-non-empty "$pkgdir"/etc
+}

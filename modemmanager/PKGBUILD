@@ -1,0 +1,89 @@
+# Maintainer: Noa Himesaka <himesaka@noa.codes>
+# b2q: modemmanager/PKGBUILD and its patches from IMSroha (noas-slopware/imsroha) at _imsrohacommit, built from its GitHub
+# tarball; nothing of it is copied here.
+# SPDX-License-Identifier: GPL-3.0-only
+# (this recipe; ModemManager and the patches to it are GPL-2.0-or-later)
+#
+# ModemManager 1.24.2 with the IMSroha backend (voice and messaging handed to
+# imsroha over D-Bus), the bearer-count crash fix, IMS DTMF, the kept IPA QMAP
+# path, per-carrier SMS (SKT keeps SMS on the modem) and port-addressed SMS
+# from the modem handed to imsroha (imsroha's modemmanager/README.md; 0002 is
+# kept for reference and not applied). pkgrel is above the Arch package's, so
+# this build wins. The udev rule that enables the backend ships with imsroha.
+
+pkgname=modemmanager
+pkgver=1.24.2
+pkgrel=16
+pkgdesc="Mobile broadband modem management service with IMSroha (userspace IMS) support"
+url="https://www.freedesktop.org/wiki/Software/ModemManager/"
+arch=(aarch64 x86_64)
+license=(GPL-2.0-or-later)
+depends=(
+  bash
+  glib2
+  glibc
+  hicolor-icon-theme
+  libgcc
+  libgudev
+  libmbim
+  libqmi
+  libqrtr-glib
+  mobile-broadband-provider-info
+  polkit
+  ppp
+  systemd-libs
+  libmm-glib
+)
+makedepends=(
+  bash-completion
+  git
+  glib2-devel
+  gobject-introspection
+  meson
+  systemd
+)
+_imsrohacommit=6b0bf8d620faba77e83dd7ca5423f47a0e01c6c0
+source=(
+  "git+https://gitlab.freedesktop.org/mobile-broadband/ModemManager.git#tag=${pkgver}"
+  "imsroha-$_imsrohacommit.tar.gz::https://github.com/noas-slopware/imsroha/archive/$_imsrohacommit.tar.gz"
+)
+sha256sums=('SKIP'
+            'd82aa4e5056224fe800ef4a1ddffd5cd3fc820cc309cd879873f46b413818942')
+
+prepare() {
+  cd ModemManager
+  git apply "$srcdir/imsroha-$_imsrohacommit/modemmanager/0001-broadband-modem-qmi-add-imsroha-backend-for-voice-and-messaging.patch"
+  git apply "$srcdir/imsroha-$_imsrohacommit/modemmanager/0003-iface-modem-do-not-abort-when-the-bearer-count-exceeds.patch"
+  git apply "$srcdir/imsroha-$_imsrohacommit/modemmanager/0004-call-ims-send-DTMF-through-imsroha.patch"
+  git apply "$srcdir/imsroha-$_imsrohacommit/modemmanager/0005-port-qmi-keep-the-IPA-QMAP-data-path-when-another-PDN.patch"
+  git apply "$srcdir/imsroha-$_imsrohacommit/modemmanager/0006-broadband-modem-qmi-leave-SMS-with-the-modem-where-the-carrier-has-no-SMS-over-IP.patch"
+  # upstream 9317cbc4 (after 1.24.2): ModemManager crashed on reconnect (2026-11-11)
+  git apply "$srcdir/imsroha-$_imsrohacommit/modemmanager/0007-netlink-fix-use-after-free-calling-completion_fn-on-transaction-completion.patch"
+  # RCS OTP where SMS stays with the modem (SKT): port SMS go to imsroha
+  git apply "$srcdir/imsroha-$_imsrohacommit/modemmanager/0008-broadband-modem-qmi-hand-port-addressed-SMS-to-imsroha.patch"
+}
+
+build() {
+  local meson_options=(
+    -D dbus_policy_dir=/usr/share/dbus-1/system.d
+    -D dist_version="\"$pkgver-$pkgrel\""
+    -D gtk_doc=false
+    -D vapi=false
+    -D polkit=permissive
+  )
+
+  arch-meson ModemManager build "${meson_options[@]}"
+  meson compile -C build
+}
+
+package() {
+  meson install -C build --destdir "$pkgdir"
+
+  # Keep libmm-glib files out so there are no conflicts with libmm-glib package
+  rm -rf "$pkgdir"/usr/include
+  rm -rf "$pkgdir"/usr/lib/pkgconfig
+  rm -rf "$pkgdir"/usr/lib/libmm-glib.so*
+  rm -rf "$pkgdir"/usr/lib/girepository-1.0
+  rm -rf "$pkgdir"/usr/share/gir-1.0
+
+}
