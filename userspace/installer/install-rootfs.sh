@@ -8,8 +8,12 @@
 # table, `persist`, `efs`, `param` and the modem partitions are never touched.
 #
 # The rootfs arrives as a tar over the USB network:
-#   phone:  install-rootfs --yes-wipe
-#   host:   nc 172.16.42.1 5555 < out/rootfs.tar
+#   phone:  install-rootfs --yes-wipe --user NAME      (in the telnet shell: passwd needs its pty)
+#   host:   zstdcat archlinux-zflip3-rootfs.tar.zst | nc 172.16.42.1 5555
+#
+# The image has no accounts, like Arch Linux Ports' own root file system: root is locked and there
+# is no user. --user makes the one user (in wheel, so sudo works) with the password typed here,
+# and, when the image has Plasma Mobile, its autologin (the lock screen asks for that password).
 #
 # DESTRUCTIVE. Dry run unless --yes-wipe is given.
 
@@ -20,12 +24,14 @@ LV=root
 PORT=5555
 MOUNT=/newroot
 DRY=1
+USER_NAME=
 
 usage() {
   cat <<'EOF'
-usage: install-rootfs [--yes-wipe] [--port PORT]
+usage: install-rootfs [--yes-wipe] --user NAME [--port PORT]
 
   --yes-wipe   actually wipe super and userdata
+  --user NAME  the user to create (wheel); asks for its password after unpacking
   --port PORT  TCP port to read the rootfs tar from (default 5555)
 
 Nothing from Android survives. The stock firmware on your PC is the only way back.
@@ -37,6 +43,7 @@ while [ $# -gt 0 ]; do
     -h|--help) usage; exit 0 ;;
     --yes-wipe) DRY=0; shift ;;
     --port) PORT=${2:?}; shift 2 ;;
+    --user) USER_NAME=${2:?}; shift 2 ;;
     *) echo "error: unknown option: $1" >&2; exit 1 ;;
   esac
 done
@@ -51,6 +58,13 @@ find_part() {
   done
   return 1
 }
+
+[ -n "$USER_NAME" ] || { echo "error: --user NAME is needed: the image has no account to log in with" >&2; exit 1; }
+# useradd's own rule for names (NAME_REGEX's default)
+echo "$USER_NAME" | grep -qE '^[a-z_][a-z0-9_-]*[$]?$' && [ ${#USER_NAME} -le 32 ] ||
+  { echo "error: '$USER_NAME' is not a valid user name" >&2; exit 1; }
+[ "$USER_NAME" != root ] || { echo "error: root stays locked; name a user" >&2; exit 1; }
+[ -t 0 ] || { echo "error: run this in the telnet shell: the password is asked on its terminal" >&2; exit 1; }
 
 SUPER=$(find_part super) || { echo "error: no partition named super" >&2; exit 1; }
 USERDATA=$(find_part userdata) || { echo "error: no partition named userdata" >&2; exit 1; }
@@ -93,5 +107,18 @@ exec 3>&-
 rm -f /tmp/nc-hold
 sync
 echo "installed: $(du -sm "$MOUNT" | cut -f1) MiB"
+
+# the account, with the image's own useradd and passwd (PAM, yescrypt as Arch sets it)
+for d in proc sys dev; do mount --bind "/$d" "$MOUNT/$d"; done
+chroot "$MOUNT" useradd -m -G wheel,video,audio,input,render -s /bin/bash "$USER_NAME"
+echo "password for $USER_NAME:"
+until chroot "$MOUNT" passwd "$USER_NAME"; do echo "again:"; done
+if [ -e "$MOUNT/usr/lib/systemd/system/plasmalogin.service" ]; then
+  mkdir -p "$MOUNT/etc/plasmalogin.conf.d"
+  printf '[Autologin]\nUser=%s\nSession=plasma-mobile.desktop\n' "$USER_NAME" \
+    > "$MOUNT/etc/plasmalogin.conf.d/autologin.conf"
+fi
+for d in dev sys proc; do umount "$MOUNT/$d"; done
+sync
 umount "$MOUNT"
 echo "done. Reboot; the initramfs mounts /dev/$VG/$LV and switches to it."
