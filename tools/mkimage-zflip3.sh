@@ -11,8 +11,8 @@
 # Out: <outdir>/archlinux-zflip3-rootfs.tar.zst, the tar userspace/installer/install-rootfs.sh
 #      (senpai branch) unpacks onto the F2FS on LVM, and linux-zflip3.img, the boot image zflip3-boot
 #      made for the recovery partition (on the phone it writes it there itself on every update).
-# ZFLIP3_IMAGE_PKGS="pkg ..." replaces the package list below; ZFLIP3_REPO_URL is where the image's
-# pacman finds [zflip3] (default: the GitHub Pages URL it will be published at).
+# ZFLIP3_IMAGE_PKGS="pkg ..." replaces the package list below. The image's pacman finds [zflip3]
+# through zflip3-mirrorlist (GitHub Pages and YuruMirror), as RS6's does with rs6-mirrorlist.
 # Every package the arch branch has must come from [zflip3]: a name pacman would take from
 # drzee's repos instead (a fork not built yet) stops the build, unless ZFLIP3_ALLOW_FOREIGN=1
 # (pipeline tests only: such an image lacks the phone's forks).
@@ -21,8 +21,7 @@
 set -euo pipefail
 
 out=${1:?usage: $0 <outdir>}
-REPO_URL=${ZFLIP3_REPO_URL:-https://noas-slopware.github.io/linux-zflip3/arch/\$arch}
-PKGS=(base linux-zflip3 linux-zflip3-dtbs mkinitcpio firmware-zflip3 zflip3-device
+PKGS=(base linux-zflip3 linux-zflip3-dtbs mkinitcpio firmware-zflip3 zflip3-device zflip3-mirrorlist
 	networkmanager sudo vim nano)
 [ -z "${ZFLIP3_IMAGE_PKGS:-}" ] || read -ra PKGS <<< "$ZFLIP3_IMAGE_PKGS"
 
@@ -44,7 +43,7 @@ if [ -z "${ZFLIP3_IN_CONTAINER:-}" ]; then
 	[ -n "$own" ] || { echo "no package names from the arch branch" >&2; exit 1; }
 	"$ENGINE" run --rm --privileged "${EMU[@]}" -e ZFLIP3_IN_CONTAINER=1 \
 		-e ZFLIP3_OWN="$own" -e ZFLIP3_ALLOW_FOREIGN \
-		-e ZFLIP3_IMAGE_PKGS -e REPO_URL="$REPO_URL" \
+		-e ZFLIP3_IMAGE_PKGS \
 		-v "$REPO:/repo:ro" -v "$W/pkgcache:/var/cache/pacman/pkg" -v "$TOOLS:/tools:ro" \
 		-v "$root:/target" localhost/zflip3-builder /tools/mkimage-zflip3.sh /target
 	# as root in the container: the image's files are root's, and a check that cannot read
@@ -88,7 +87,7 @@ fi
 pacstrap -C /etc/pacman.conf -K "$t" "${PKGS[@]}"
 
 # the image's pacman: drzee and the published [zflip3]
-sed "s|^Server = file:///repo$|Server = $REPO_URL|; /^DisableSandbox$/d; /^# qemu-user implements/d" \
+sed "s|^Server = file:///repo$|Include = /etc/pacman.d/zflip3-mirrorlist|; /^DisableSandbox$/d; /^# qemu-user implements/d" \
 	/etc/pacman.conf > "$t/etc/pacman.conf"
 
 # / is F2FS on LVM (userspace/installer/install-rootfs.sh); swap is zram (zflip3-system)

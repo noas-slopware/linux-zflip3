@@ -48,6 +48,8 @@ done
 compgen -G "$r/boot/initramfs-linux-zflip3.img" >/dev/null || bad "no initramfs"
 grep -q '^\[zflip3\]' "$r/etc/pacman.conf" || bad "pacman.conf has no [zflip3]"
 ! grep -q '^Server = file://' "$r/etc/pacman.conf" || bad "pacman.conf points at a local repo"
+! grep -q '^Include = /etc/pacman.d/zflip3-mirrorlist' "$r/etc/pacman.conf" ||
+	[ -s "$r/etc/pacman.d/zflip3-mirrorlist" ] || bad "pacman.conf includes a zflip3-mirrorlist that is not there"
 
 if [ -n "$deny" ]; then
 	pats=$(grep -v '^\s*#' "$deny" | grep -v '^\s*$' || :)
