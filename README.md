@@ -218,51 +218,92 @@ userspace/kita/          the cover display
 VIDEO-DECODE.md          the hardware decode stack, measurements and caveats
 ```
 
-## Quickstart
+## Quickstart: installing Arch Linux Ports
+
+This wipes Android and everything in `userdata`. Only a Korean `SM-F711N` still on One UI 7 can
+do it (One UI 8 removed the OEM unlocking toggle). The host needs `heimdall`, `zstd`, `telnet`
+and `nc`.
+
+1. **Keep a way back.** Download the stock firmware for your CSC and keep it: flashing its AP,
+   BL and CP tars with Odin or heimdall is the only way back to Android.
+
+   ```sh
+   tools/fetch-firmware.sh --list        # F711NKSSFKZH5 for LUC right now
+   tools/fetch-firmware.sh               # about 8 GB into .cache/fw
+   ```
+
+2. **Unlock the bootloader.** In Android, turn on Developer options and OEM unlocking. Then
+   from download mode (power off, hold Volume Up and Volume Down, plug in USB), a long press on
+   Volume Up opens the device unlock mode, which unlocks and erases the phone.
+
+3. **Wait for the second gate.** An unlocked phone still refuses images Samsung did not sign
+   until Knox Guard (VaultKeeper) releases it: `knox.kg.state` must read `Completed`, not
+   `Checking`. Set Android up again, online, open Developer options once (the OEM unlocking row
+   is on and greyed out), and check daily with `tools/gate.sh` (adb). Flashing before then
+   locks the phone out for a week or more
+   ([`docs/gate.md`](https://github.com/noas-slopware/linux-zflip3/blob/docs/docs/gate.md)).
+
+4. **Flash U-Boot and the installer.** From the
+   [latest `arch-ports-*` release](https://github.com/noas-slopware/linux-zflip3/releases),
+   unpack the images, then `adb reboot download` and flash all three in one session:
+
+   ```sh
+   I=archlinux-zflip3-YYYY.MM.DD
+   sha256sum -c sha256sums
+   unzstd $I-u-boot.img.zst $I-installer.img.zst $I-dtbo-empty.img.zst
+   sudo heimdall flash --DTBO $I-dtbo-empty.img --BOOT $I-u-boot.img --RECOVERY $I-installer.img
+   ```
+
+   `boot` now holds U-Boot (`u-boot-zflip3`), `recovery` the installer (`zflip3-installer`), and
+   `dtbo` zeros, so ABL applies no Samsung overlay.
+
+5. **Install.** The phone boots U-Boot, then the installer, which finds no root file system and
+   offers a shell. The USB cable is a network: the phone is `172.16.42.1` and hands the host an
+   address. In `telnet 172.16.42.1` (the installer asks for the password on its terminal):
+
+   ```sh
+   install-rootfs --yes-wipe --user NAME                       # on the phone
+   zstdcat $I-rootfs.tar.zst | nc 172.16.42.1 5555             # on the host
+   ```
+
+   It makes `super` and `userdata` one LVM volume group with an F2FS root, unpacks the image,
+   creates `NAME` (in `wheel`, for `sudo`) with the password you type and its Plasma Mobile
+   autologin, and writes the image's own boot image (`/boot/linux-zflip3.img`) to `recovery`,
+   read back. `reboot`.
+
+6. **First boot.** Plasma Mobile starts on its own; the lock screen asks for the password. The
+   image has no accounts of its own, as Arch Linux Ports' root file system: root is locked, and
+   there is no sshd (`sudo pacman -S openssh` if you want one). Wi-Fi is in Settings; mobile
+   data (LTE, IPv6 with CLAT) and VoLTE through IMSroha come up by themselves on LG U+, the only
+   carrier tried so far (SKT and KT are untested). `sudo pacman -Syu` keeps it current: kernel
+   updates write `recovery` themselves.
+
+If Linux ever does not come up, hold Volume Down while U-Boot starts, pick fastboot, and boot
+the installer or the system from the host: `fastboot boot $I-installer.img` (its shell, Volume
+Up during the first three seconds) or `fastboot boot $I-linux.img`.
+
+## Building it yourself
+
+The packages and images build from the `arch` branch (`tools/build-zflip3.sh`,
+`tools/mkimage-zflip3.sh`, `tools/mkpublic-zflip3.sh`). For kernel work, `senpai` has the
+bring-up tools:
 
 ```sh
-# 1. M0: get the stock firmware, then pull it apart
-tools/fetch-firmware.sh --list                  # F711NKSSFKZH5 for LUC right now
-tools/fetch-firmware.sh                         # about 8 GB into .cache/fw
-tools/extract-firmware.sh .cache/fw/AP_*.tar.md5
-
-# 2. M0: record the device state before touching anything (needs adb)
-tools/evidence.sh
-
-# 3. build a kernel from the pinned base plus patches/linux
-tools/fetch-kernel.sh          # download + verify the pinned base
-tools/build-kernel.sh --apply  # configs/nura-sm8350.config + configs/b2q.fragment + patches
-
-# 4. U-Boot, the bring-up initramfs, and the images
+tools/extract-firmware.sh .cache/fw/AP_*.tar.md5   # pull the stock firmware apart
+tools/evidence.sh                                  # record the device state (adb)
+tools/fetch-kernel.sh && tools/build-kernel.sh --apply
 tools/build-u-boot.sh
 tools/build-busybox.sh
 tools/build-initramfs.sh --busybox out/busybox --rootfs out/rootfs --out out/initramfs.cpio.gz
 tools/mkimages.sh
-
-# 5. first install, from download mode (heimdall, on the machine the phone is plugged into)
 B2Q_UNLOCKED=1 tools/flash.sh --partition dtbo --image out/dtbo-empty.img \
                               --partition boot --image out/boot.img \
                               --partition recovery --image out/linux.img
-
-# afterwards, from the running phone
-tools/install-images.sh --reboot recovery=out/linux.img
+tools/install-images.sh --reboot recovery=out/linux.img   # later, from the running phone
 ```
 
-The bring-up initramfs offers a shell on the USB serial gadget (`ttyACM0` on the host) and
-over telnet at `172.16.42.1`. To install the generic Arch Linux Ports image (`tools/mkimage-zflip3.sh`
-on `arch`), run the installer in the telnet shell, since it asks for the new user's password:
-
-```sh
-install-rootfs --yes-wipe --user NAME                                  # on the phone
-zstdcat archlinux-zflip3-rootfs.tar.zst | nc 172.16.42.1 5555          # on the host
-```
-
-The image has no accounts, as Arch Linux Ports' own root file system: root is locked, there is
-no user and no sshd. `--user` makes the one user (in `wheel`, for `sudo`) and its Plasma Mobile
-autologin; the lock screen asks for that password. The installer then writes the image's boot image
-(`/boot/linux-zflip3.img`, its own kernel) to `recovery` and reads it back, so the next boot is
-the installed system. `tools/flash.sh` refuses to run until `B2Q_UNLOCKED=1` says the device is unlocked
-and the stock firmware is saved.
+`tools/flash.sh` refuses to run until `B2Q_UNLOCKED=1` says the device is unlocked and the
+stock firmware is saved.
 
 ## Licenses
 
