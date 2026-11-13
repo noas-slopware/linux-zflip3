@@ -1,0 +1,81 @@
+# Maintainer: Noa Himesaka <himesaka@noa.codes>
+#
+# U-Boot for the Samsung Galaxy Z Flip3 5G (SM-F711N), ready for its boot partition. Samsung's ABL
+# loads it like a kernel: a boot image header v0 holding the gzip'd u-boot-nodtb.bin with the b2q
+# device tree appended, which U-Boot then runs on. U-Boot boots Linux from recovery, or sits in
+# fastboot when that fails (Volume Down while it starts opens its menu).
+#
+# Upstream release as Arch's uboot-tools takes it (tarball and Tom Rini's signature), with
+# patches/u-boot from the senpai branch of noas-slopware/linux-zflip3 (SM8350 clocks, pinctrl,
+# RPMh regulators, UFS PHY, the b2q board and its MAX77705 USB-C data switch), configured and
+# packed as tools/build-u-boot.sh and tools/mkimages.sh on senpai do it. The device tree is the
+# one linux-zflip3-dtbs ships.
+#
+# The package only installs the image: a new U-Boot is written to boot by hand (from the running
+# phone, or with heimdall from download mode), never on an update, because a U-Boot that does
+# not start leaves only download mode.
+#   /usr/share/u-boot-zflip3/boot.img       for the boot partition
+#   /usr/share/u-boot-zflip3/u-boot-nodtb.bin
+
+pkgname=u-boot-zflip3
+pkgver=2026.10
+pkgrel=1
+pkgdesc='U-Boot for the Samsung Galaxy Z Flip3 5G (SM-F711N), packed for its boot partition'
+url='https://github.com/noas-slopware/linux-zflip3'
+arch=(aarch64)
+license=(GPL-2.0-or-later)
+makedepends=(android-tools bc dtc linux-zflip3-dtbs openssl python python-pyelftools
+             python-setuptools swig tinyxxd)
+options=(!strip !debug !lto)
+# senpai branch (default) of noas-slopware/linux-zflip3
+_zf3commit=a160d0fa7207ec7348d1ef4c5b1ac756d28f5f59
+source=("https://git.u-boot-project.org/u-boot/u-boot/-/releases/v$pkgver/downloads/u-boot-$pkgver.tar.bz2"{,.sig}
+        "linux-zflip3-$_zf3commit.tar.gz::https://github.com/noas-slopware/linux-zflip3/archive/$_zf3commit.tar.gz"
+        0002-openssl-4.patch)
+validpgpkeys=('F3CEA8743D60E0192F9B4C7A2BE2A0F50ABFE40A') # Tom Rini
+sha256sums=('3f856da3cbbc93af51ff95fde18588a348b4a26723b01d9841e999d988481015'
+            'SKIP'
+            '1c5a8c4711833692c78bfea170bf5c6e9e99b777de00601706c41ebe970859ff'
+            '32515605485039e1b5f7dbfbf7d6cec2cca5bad3a7360d74b366d60683141108')
+
+prepare() {
+  cd u-boot-v$pkgver
+  # Arch's uboot-tools: guard ENGINE calls removed in OpenSSL 4 (host tools, mkimage's signing)
+  patch -Np1 -i ../0002-openssl-4.patch
+  local p
+  for p in "$srcdir"/linux-zflip3-$_zf3commit/patches/u-boot/*.patch; do
+    patch -Np1 -i "$p"
+  done
+}
+
+build() {
+  cd u-boot-v$pkgver
+  # U-Boot's own flags: the package's CFLAGS are for userspace
+  unset CFLAGS CXXFLAGS CPPFLAGS LDFLAGS
+  make O=build qcom_defconfig qcom-phone.config b2q.config
+  local sym
+  for sym in CLK_QCOM_SM8350 PINCTRL_QCOM_SM8350 USB_FUNCTION_FASTBOOT UFS_QCOM; do
+    grep -q "^CONFIG_$sym=y" build/.config || { echo "U-Boot CONFIG_$sym did not end up =y" >&2; return 1; }
+  done
+  make O=build
+
+  # the device tree linux-zflip3-dtbs installed (exactly one)
+  local dtb=(/usr/lib/modules/*/dtb/qcom/sm8350-samsung-b2q.dtb)
+  [ ${#dtb[@]} = 1 ] && [ -f "${dtb[0]}" ] || { echo "not one b2q dtb: ${dtb[*]}" >&2; return 1; }
+  gzip -9 -n -c build/u-boot-nodtb.bin > u-boot.gz
+  cat u-boot.gz "${dtb[0]}" > u-boot.gz-dtb
+  # ABL hands the boot image's OS version and patch level to keymaster64 and the secure
+  # processor; stock's boot.img carries 11.0.0 / 2026-08, so these are stock's, exactly: never
+  # newer ones, since rollback state in the secure processor may not come back down
+  mkbootimg --header_version 0 --kernel u-boot.gz-dtb \
+    --base 0x00000000 --kernel_offset 0x00008000 --ramdisk_offset 0x01000000 \
+    --os_version 11.0.0 --os_patch_level 2026-08 \
+    --tags_offset 0x00000100 --pagesize 4096 -o boot.img
+  # boot is 96 MiB
+  [ "$(stat -c%s boot.img)" -le $((96 * 1024 * 1024)) ] || { echo "boot.img is larger than boot" >&2; return 1; }
+}
+
+package() {
+  cd u-boot-v$pkgver
+  install -Dm644 boot.img build/u-boot-nodtb.bin -t "$pkgdir"/usr/share/u-boot-zflip3/
+}

@@ -1,0 +1,110 @@
+# Maintainer: Noa Himesaka <himesaka@noa.codes>
+#
+# The installer for the Samsung Galaxy Z Flip3 5G (SM-F711N): a boot image for the recovery
+# partition with linux-zflip3's kernel and device tree and the bring-up initramfs of the senpai
+# branch (userspace/installer): a static busybox, init and install-rootfs, and lvm and mkfs.f2fs
+# with their libraries. It needs no modules: what it uses (UFS, F2FS, device-mapper, the configfs
+# USB gadget, the panel's console) is built into linux-zflip3.
+#
+# U-Boot (u-boot-zflip3) boots it from recovery on a phone that has no root file system yet, and
+# from U-Boot's fastboot (`fastboot boot installer.img`) at any time. It offers a shell on the USB
+# serial gadget (ttyACM0 on the host) and over telnet at 172.16.42.1, where
+# `install-rootfs --yes-wipe --user NAME` makes the LVM root and unpacks the image into it. Once a
+# root file system is there it boots that instead (Volume Up during the first three seconds keeps
+# it in the shell).
+#   /usr/share/zflip3-installer/installer.img
+#
+# busybox is built from busybox.net's release as tools/build-busybox.sh does: defconfig, static,
+# without TC (does not build against current kernel headers) and the SHA hardware acceleration
+# (x86 only); telnetd and udhcpd, which the USB network shell needs, are in defconfig.
+
+pkgname=zflip3-installer
+pkgver=1
+pkgrel=1
+_bbver=1.37.0
+pkgdesc='Installer boot image for the Samsung Galaxy Z Flip3 5G (SM-F711N) recovery partition'
+url='https://github.com/noas-slopware/linux-zflip3'
+arch=(aarch64)
+license=(MIT GPL-2.0-only)
+makedepends=(android-tools cpio f2fs-tools linux-zflip3 linux-zflip3-dtbs lvm2)
+options=(!strip !debug !lto)
+# senpai branch (default) of noas-slopware/linux-zflip3
+_zf3commit=a160d0fa7207ec7348d1ef4c5b1ac756d28f5f59
+source=("https://busybox.net/downloads/busybox-$_bbver.tar.bz2"{,.sig}
+        "linux-zflip3-$_zf3commit.tar.gz::https://github.com/noas-slopware/linux-zflip3/archive/$_zf3commit.tar.gz")
+validpgpkeys=('C9E9416F76E610DBD09D040F47B70C55ACC9965B') # Denys Vlasenko
+sha256sums=('3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4'
+            'SKIP'
+            '1c5a8c4711833692c78bfea170bf5c6e9e99b777de00601706c41ebe970859ff')
+
+build() {
+  cd busybox-$_bbver
+  unset CFLAGS CXXFLAGS CPPFLAGS LDFLAGS
+  export KCONFIG_NOTIMESTAMP=1
+  make defconfig
+  sed -i -e 's/^# CONFIG_STATIC is not set$/CONFIG_STATIC=y/' \
+    -e 's/^CONFIG_TC=y$/# CONFIG_TC is not set/' \
+    -e 's/^CONFIG_SHA1_HWACCEL=y$/# CONFIG_SHA1_HWACCEL is not set/' \
+    -e 's/^CONFIG_SHA256_HWACCEL=y$/# CONFIG_SHA256_HWACCEL is not set/' .config
+  make oldconfig < /dev/null
+  local sym
+  for sym in STATIC TELNETD UDHCPD SWITCH_ROOT; do
+    grep -q "^CONFIG_$sym=y" .config || { echo "busybox CONFIG_$sym is not set" >&2; return 1; }
+  done
+  make
+  cd "$srcdir"
+
+  # the initramfs, as tools/build-initramfs.sh --rootfs / makes it
+  local src=$srcdir/linux-zflip3-$_zf3commit stage=$srcdir/stage
+  mkdir -p "$stage"/{bin,sbin,proc,sys,dev,tmp,newroot,usr/lib,etc/lvm,run/lock/lvm}
+  ln -s usr/lib "$stage/lib"
+  install -m755 busybox-$_bbver/busybox "$stage/bin/busybox"
+  local applet
+  for applet in sh ls cat mount umount mkdir mknod echo sleep dmesg poweroff reboot \
+                ifconfig ip modprobe vi dd blkid; do
+    ln -s busybox "$stage/bin/$applet"
+  done
+  install -m755 "$src/userspace/installer/init" "$stage/init"
+  install -m755 "$src/userspace/installer/install-rootfs.sh" "$stage/bin/install-rootfs"
+  # a binary and, recursively, every DT_NEEDED library it has
+  copy_with_libs() {
+    local lib
+    for lib in $(readelf -d "$1" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'); do
+      [ -e "$stage/usr/lib/$lib" ] && continue
+      cp -L "/usr/lib/$lib" "$stage/usr/lib/$lib"
+      copy_with_libs "/usr/lib/$lib"
+    done
+  }
+  cp -L /usr/lib/ld-linux-aarch64.so.1 "$stage/usr/lib/"
+  local bin
+  for bin in lvm mkfs.f2fs; do
+    install -m755 "/usr/bin/$bin" "$stage/bin/$bin"
+    copy_with_libs "/usr/bin/$bin"
+  done
+  # no udev in the initramfs: lvm makes the /dev nodes itself
+  printf '%s\n' 'devices {' '	obtain_device_list_from_udev = 0' '}' \
+    'activation {' '	udev_sync = 0' '	udev_rules = 0' '}' > "$stage/etc/lvm/lvm.conf"
+  (cd "$stage" && find . -print0 | LC_ALL=C sort -z |
+    cpio --null -o -H newc --owner=0:0 --reproducible --quiet | gzip -9 -n) > initramfs.cpio.gz
+
+  # linux-zflip3's kernel and device tree (the installed one: exactly one)
+  local kdir= d
+  for d in /usr/lib/modules/*/; do
+    [ "$(cat "$d/pkgbase" 2>/dev/null)" = linux-zflip3 ] && { kdir=${d%/}; break; }
+  done
+  [ -n "$kdir" ] && [ -f "$kdir/vmlinuz" ] || { echo "no linux-zflip3 kernel" >&2; return 1; }
+  [ -f "$kdir/dtb/qcom/sm8350-samsung-b2q.dtb" ] || { echo "no b2q dtb in $kdir" >&2; return 1; }
+  # the same header as zflip3-bootimg's, and the bring-up command line (no root=: init finds
+  # the root itself)
+  mkbootimg --header_version 2 --kernel "$kdir/vmlinuz" --ramdisk initramfs.cpio.gz \
+    --dtb "$kdir/dtb/qcom/sm8350-samsung-b2q.dtb" \
+    --base 0x80000000 --kernel_offset 0x00008000 --ramdisk_offset 0x01000000 \
+    --dtb_offset 0x01f00000 --tags_offset 0x00000100 --pagesize 4096 \
+    --cmdline "$(tr -d '\n' < "$src/configs/cmdline")" -o installer.img
+  [ "$(stat -c%s installer.img)" -le $((96 * 1024 * 1024)) ] || { echo "installer.img is larger than recovery" >&2; return 1; }
+  echo "${kdir##*/}" > kernel-version
+}
+
+package() {
+  install -Dm644 installer.img kernel-version -t "$pkgdir"/usr/share/zflip3-installer/
+}
