@@ -120,8 +120,9 @@ CONFIG_RPMSG_CTRL=m
 CONFIG_RPMSG_CHAR=m
 # Cameras: the SM8350 camera clock controller (patches/linux/0056-*).
 CONFIG_SM_CAMCC_8350=m
-# Cameras: the rear ultrawide (IMX258, patches/linux/0059-0061).
+# Cameras: the rear ultrawide (IMX258, patches/linux/0059-0061; or an S5K3L6, 0137).
 CONFIG_VIDEO_IMX258=m
+CONFIG_VIDEO_S5K3L6=m
 # Cameras: the front IMX374 (patches/linux/0062-0063).
 CONFIG_VIDEO_IMX374=m
 # Cameras: the rear wide IMX563 (patches/linux/0076-0077).
