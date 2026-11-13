@@ -511,7 +511,8 @@ After a phone reboot (allowed: after a crash) with the active SIM (the iPhone
   (ETHERNET=y, NET_VENDOR_QUALCOMM=y, RMNET=m; same as the working OnePlus 9
   config), module-only install over ssh, no reboot.
 - Connected: bearer 1 multiplexed on qmapmux0.0@rmnet_ipa0, IPv6
-  2001:4430:40b8:c118::/64, gateway 2001:4430:40b8:c118:f090:1a65:b24c:cab3,
+  2001:db8:1:1::/64 (the addresses here are documentation ones in place of the line's),
+  gateway 2001:db8:1:1::2,
   DNS 2001:4430:4:617::1, MTU 1400. ping -6 -I qmapmux0.0
   2001:4860:4860::8888: 3/3, 80-221 ms. Cellular data works.
 - The LTE attach gave IPv6 only; IPv4 data untested.
@@ -578,7 +579,7 @@ After a phone reboot (allowed: after a crash) with the active SIM (the iPhone
 
 - IPv4 on this SIM is refused by the network: during the ipv4v6 connect MM logs
   "couldn't start IPv4 network: QMI protocol error (14): 'CallFailed'" at bearer
-  start; the session is IPv6-only (2001:4430:40b8:c118::/64). An explicit
+  start; the session is IPv6-only (2001:db8:1:1::/64). An explicit
   `--simple-connect ip-type=ipv4` then crashed ModemManager itself: SIGABRT,
   coredump present (coredumpctl, /usr/bin/ModemManager at 15:15:51). systemd
   restarted MM, the modem re-probed cleanly, NRestarts=1. Workaround until the
@@ -713,8 +714,8 @@ After a phone reboot (allowed: after a crash) with the active SIM (the iPhone
   WDS clients, Bind Mux + Start Network + Get Current Settings, MTU 1400.
 - Fresh-client WDS GetCurrentSettings fails OutOfCall (15): settings only come
   from the client that started the network. Reused the holder's logged values
-  (same boot, holder PID alive): addr 2001:4430:1055:864b:ecee:e210:6fc9:6cff/64,
-  gw 2001:4430:1055:864b:edb1:6ec5:aca3:bea9, dns 2001:4430:5:601:2::1 +
+  (same boot, holder PID alive): addr 2001:db8:2:2::1/64,
+  gw 2001:db8:2:2::2, dns 2001:4430:5:601:2::1 +
   2001:4430:4:601::1, MTU 1400.
 - Created qmapmux0.3 (mux 3, EMBEDDED/1 bound by holder, MTU 1400, kernel flags
   identical to MM's link), assigned addr, default route via gw. L3 test:
