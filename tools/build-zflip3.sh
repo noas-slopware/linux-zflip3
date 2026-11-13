@@ -11,13 +11,26 @@
 #                  GitHub, or to build offline)
 #   NOCHECK=1      skip check() (makepkg --nocheck)
 #   VERIFYSOURCE=1 only download and verify the sources (checksums, PGP signatures), build nothing
-# On an x86_64 host everything runs under qemu-user: fine for small packages, hours for the kernel,
-# which is better built natively (makepkg on the phone or another aarch64 machine).
+#   ZFLIP3_ACCEL   how C/C++ gets compiled in the builder:
+#                    xgcc  (default on x86_64) drzee's exact gcc + binutils (+ ccache) rebuilt as
+#                          x86_64 cross tools (mkxtools-zflip3.sh) and run natively inside the AArch64
+#                          container; when drzee's versions in the sync db moved past them, they are
+#                          rebuilt first (lib-zflip3.sh xtools_use). Needs the zflip3-fetch image
+#                    none  everything under qemu-user (the only mode on an aarch64 host)
+# On an x86_64 host everything else runs under qemu-user: fine for small packages, hours for the
+# kernel, which is better built natively (makepkg on the phone or another aarch64 machine).
 set -euo pipefail
 . "$(dirname "$(realpath "$0")")/lib-zflip3.sh"
 
 src=$(realpath "${1:?usage: $0 <arch checkout> <package dir>...}"); shift
 [ $# -gt 0 ] || { echo "no package given" >&2; exit 1; }
+if [ "$HOSTARCH" = aarch64 ]; then ACCEL=${ZFLIP3_ACCEL:-none}; else ACCEL=${ZFLIP3_ACCEL:-xgcc}; fi
+case $ACCEL in
+	none) ;;
+	xgcc) [ "$HOSTARCH" = x86_64 ] || { echo "ZFLIP3_ACCEL=xgcc is for x86_64 hosts" >&2; exit 1; } ;;
+	*) echo "ZFLIP3_ACCEL=$ACCEL?" >&2; exit 1 ;;
+esac
+[ -n "${VERIFYSOURCE:-}" ] && ACCEL=none	# nothing is compiled
 [ -s "$REPO/zflip3.db.tar.gz" ] || { tar -czf "$REPO/zflip3.db.tar.gz" -T /dev/null; ln -sf zflip3.db.tar.gz "$REPO/zflip3.db"; }
 
 senpai_tarball() {
@@ -32,17 +45,25 @@ senpai_tarball() {
 }
 
 build_one() {
-	local pkg=$1 log t0 c
+	local pkg=$1 log t0 c xt=()
 	log=$W/logs/$pkg-$(date +%Y%m%d-%H%M%S).log
 	[ -e "$src/$pkg/PKGBUILD" ] || { echo "$src/$pkg/PKGBUILD missing" >&2; return 1; }
 	senpai_tarball "$src/$pkg/PKGBUILD"
 	t0=$(date +%s)
-	log "$pkg: building ($log)"
+	if [ "$ACCEL" = xgcc ]; then
+		# x86_64 tools of drzee's versions as of this sync (rebuilt here when drzee moved), held
+		# until the build ends. The container's own pacman -Syu may still see a newer db: then
+		# xtools-activate refuses and the build fails rather than mixing versions
+		fetch_sync > "$log" 2>&1
+		xtools_use || { log "$pkg: no xtools for drzee's current versions"; return 1; }
+		xt=(-v "$W/xtools:/opt/zflip3-xtools:ro" -v "$TOOLS/xtools-activate.sh:/usr/local/bin/xtools-activate:ro")
+	fi
+	log "$pkg: building, accel $ACCEL ($log)"
 	mkdir -p "$W/out/$pkg"
 	# shellcheck disable=SC2016
-	"$ENGINE" run --rm "${EMU[@]}" \
+	"$ENGINE" run --rm "${EMU[@]}" "${xt[@]}" \
 		-v "$src/$pkg:/pkgsrc:ro" -v "$REPO:/repo" -v "$W/pkgcache:/var/cache/pacman/pkg" \
-		-v "$W/srcdest:/srcdest" -v "$W/ccache:/ccache" -v "$W/out/$pkg:/out" \
+		-v "$W/srcdest:/srcdest" -v "$W/ccache:/ccache" -v "$W/out/$pkg:/out" -e ACCEL="$ACCEL" \
 		-e NOCHECK="${NOCHECK:-}" -e VERIFYSOURCE="${VERIFYSOURCE:-}" localhost/zflip3-builder bash -euc '
 		pacman -Syu --noconfirm >/dev/null
 		cp -r /pkgsrc /build && chown -R builder: /build /out /srcdest /ccache
@@ -63,9 +84,17 @@ build_one() {
 			su builder -c "SRCDEST=/srcdest makepkg --verifysource -f"
 			exit 0
 		fi
+		echo "zflip3-timing: deps $(date +%s)"
 		[ -z "$deps" ] || pacman -S --noconfirm --needed --asdeps $deps
+		# after the deps: a dep that pulls in gcc or binutils would put the AArch64 ones back
+		[ "$ACCEL" != xgcc ] || xtools-activate
+		echo "zflip3-timing: makepkg $(date +%s)"
 		su builder -c "CCACHE_DIR=/ccache SRCDEST=/srcdest PKGDEST=/out makepkg -f --noconfirm ${NOCHECK:+--nocheck}"
-	' > "$log" 2>&1 || { log "$pkg: FAILED, see $log"; return 1; }
+	' >> "$log" 2>&1 || { exec 8>&-; log "$pkg: FAILED, see $log"; return 1; }
+	exec 8>&-	# xtools_use's lock
+	local t1 td tm; t1=$(date +%s)
+	td=$(sed -n 's/^zflip3-timing: deps //p' "$log" | tail -1); tm=$(sed -n 's/^zflip3-timing: makepkg //p' "$log" | tail -1)
+	[ -z "$tm" ] || log "$pkg: prep (sync, upgrade, .SRCINFO) $((td - t0))s, deps $((tm - td))s, makepkg $((t1 - tm))s"
 	shopt -s nullglob
 	local f n=0
 	for f in "$W/out/$pkg"/*.pkg.tar.zst; do
