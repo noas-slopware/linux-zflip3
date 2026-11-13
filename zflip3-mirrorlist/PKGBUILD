@@ -1,0 +1,20 @@
+# Maintainer: Noa Himesaka <himesaka@noa.codes>
+#
+# Mirrorlist for the [zflip3] repository (Galaxy Z Flip3 packages for Arch Linux Ports AArch64), in
+# the rs6-mirrorlist (linux-hiby-rs6) mould: unsigned repo, published by
+# noas-slopware/linux-zflip3's CI to GitHub Pages (primary) and YuruMirror (mirror.funami.tech).
+
+pkgname=zflip3-mirrorlist
+pkgver=1
+pkgrel=1
+pkgdesc='Galaxy Z Flip3 Arch Linux Ports repository mirrorlist'
+arch=(any)
+url='https://github.com/noas-slopware/linux-zflip3'
+license=(MIT)
+backup=("etc/pacman.d/$pkgname")  # keeps a reordered mirrorlist
+source=($pkgname)
+sha512sums=('f415415b429a1d6f1026786e78cba5b9adda92078d1806f3eb7985358b0fa4f77bcf4ac04efc9b1c9193297a2e7162b6651bce44e57a4badfeeb53bcf3b5badc')
+
+package() {
+  install -Dm644 "$srcdir/$pkgname" "$pkgdir/etc/pacman.d/$pkgname"
+}

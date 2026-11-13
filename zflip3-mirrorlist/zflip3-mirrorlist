@@ -1,0 +1,17 @@
+######################################################
+####                                              ####
+###          zflip3 Repository Mirrorlist          ###
+####                                              ####
+######################################################
+#### Entry in file /etc/pacman.conf, after [core] and before [extra]
+#### (the Galaxy Z Flip3 forks of extra packages keep their names and must win):
+###     [zflip3]
+###     SigLevel = Never
+###     Include = /etc/pacman.d/zflip3-mirrorlist
+######################################################
+
+# Worldwide (GitHub Pages)
+Server = https://noas-slopware.github.io/linux-zflip3/arch/$arch
+
+# South Korea
+Server = https://mirror.funami.tech/linux-zflip3/arch/$arch
