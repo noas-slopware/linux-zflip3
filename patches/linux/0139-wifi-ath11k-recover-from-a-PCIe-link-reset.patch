@@ -1,0 +1,138 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] wifi: ath11k: recover from a PCIe link reset
+
+When the link to the chip goes down, the host controller driver resets
+the Root Port (pci_host_handle_link_down()), and pcie_do_recovery()
+asks the drivers below it to recover. ath11k has no error handlers, so
+the chip was left after the reset with an empty config space and no
+running firmware, and nothing told the driver: every WMI command timed
+out until reboot.
+
+On a Galaxy Z Flip3 (QCA6390) the link went down in s2idle after a few
+hundred suspend cycles; the resume found the chip inaccessible in
+D3hot and MHI in SYS ERROR, the Root Port was reset, and Wi-Fi stayed
+dead for a day.
+
+Save the config space at probe, and on a link reset ask for the reset,
+restore that config space, and restart the firmware through reset_work,
+as a firmware crash does. The downstream cnss2 driver also schedules a
+full recovery on a link down.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+
+diff --git a/drivers/net/wireless/ath/ath11k/pci.h b/drivers/net/wireless/ath/ath11k/pci.h
+--- a/drivers/net/wireless/ath/ath11k/pci.h
++++ b/drivers/net/wireless/ath/ath11k/pci.h
+@@ -74,6 +74,8 @@
+ 	unsigned long flags;
+ 	u16 link_ctl;
+ 	u64 dma_mask;
++	/* config space as probe left it, put back after a link reset */
++	struct pci_saved_state *saved_state;
+ };
+ 
+ static inline struct ath11k_pci *ath11k_pci_priv(struct ath11k_base *ab)
+diff --git a/drivers/net/wireless/ath/ath11k/pci.c b/drivers/net/wireless/ath/ath11k/pci.c
+--- a/drivers/net/wireless/ath/ath11k/pci.c
++++ b/drivers/net/wireless/ath/ath11k/pci.c
+@@ -1137,14 +1137,21 @@
+ 		goto err_free_irq;
+ 	}
+ 
++	/* for the slot reset after a link down (ath11k_pci_slot_reset()) */
++	pci_save_state(pdev);
++	ab_pci->saved_state = pci_store_saved_state(pdev);
++
+ 	ret = ath11k_core_init(ab);
+ 	if (ret) {
+ 		ath11k_err(ab, "failed to init core: %d\n", ret);
+-		goto err_free_irq;
++		goto err_free_state;
+ 	}
+ 	ath11k_qmi_fwreset_from_cold_boot(ab);
+ 	return 0;
+ 
++err_free_state:
++	pci_load_and_free_saved_state(pdev, &ab_pci->saved_state);
++
+ err_free_irq:
+ 	/* __free_irq() expects the caller to have cleared the affinity hint */
+ 	ath11k_pci_set_irq_affinity_hint(ab_pci, NULL);
+@@ -1205,6 +1212,7 @@
+ 
+ 	ath11k_hal_srng_deinit(ab);
+ 	ath11k_ce_free_pipes(ab);
++	pci_load_and_free_saved_state(pdev, &ab_pci->saved_state);
+ 	ath11k_core_free(ab);
+ }
+ 
+@@ -1293,12 +1301,68 @@
+ 				     ath11k_pci_pm_resume_early)
+ };
+ 
++/*
++ * The link to the chip can go down, in s2idle for one, and the host
++ * controller then resets the Root Port (pci_host_handle_link_down()). That
++ * leaves the chip without its config space and its firmware gone, and without
++ * these callbacks nothing told the driver: every WMI command timed out until
++ * reboot. Ask for the reset, put back the config space probe saved, and then
++ * restart the firmware the way a firmware crash does (reset_work), which is
++ * what the downstream cnss2 driver does on a link down.
++ */
++static pci_ers_result_t ath11k_pci_error_detected(struct pci_dev *pdev,
++						  pci_channel_state_t state)
++{
++	struct ath11k_base *ab = pci_get_drvdata(pdev);
++
++	ath11k_warn(ab, "pci error detected, channel state %d\n", state);
++
++	if (state == pci_channel_io_perm_failure)
++		return PCI_ERS_RESULT_DISCONNECT;
++
++	return PCI_ERS_RESULT_NEED_RESET;
++}
++
++static pci_ers_result_t ath11k_pci_slot_reset(struct pci_dev *pdev)
++{
++	struct ath11k_base *ab = pci_get_drvdata(pdev);
++	struct ath11k_pci *ab_pci = ath11k_pci_priv(ab);
++
++	if (!ab_pci->saved_state)
++		return PCI_ERS_RESULT_DISCONNECT;
++
++	pci_load_saved_state(pdev, ab_pci->saved_state);
++	pci_restore_state(pdev);
++	pci_set_master(pdev);
++
++	return PCI_ERS_RESULT_RECOVERED;
++}
++
++static void ath11k_pci_error_resume(struct pci_dev *pdev)
++{
++	struct ath11k_base *ab = pci_get_drvdata(pdev);
++
++	ath11k_warn(ab, "pci link recovered, restarting the firmware\n");
++
++	spin_lock_bh(&ab->base_lock);
++	if (!test_bit(ATH11K_FLAG_UNREGISTERING, &ab->dev_flags))
++		queue_work(ab->workqueue_aux, &ab->reset_work);
++	spin_unlock_bh(&ab->base_lock);
++}
++
++static const struct pci_error_handlers ath11k_pci_err_handler = {
++	.error_detected = ath11k_pci_error_detected,
++	.slot_reset = ath11k_pci_slot_reset,
++	.resume = ath11k_pci_error_resume,
++};
++
+ static struct pci_driver ath11k_pci_driver = {
+ 	.name = "ath11k_pci",
+ 	.id_table = ath11k_pci_id_table,
+ 	.probe = ath11k_pci_probe,
+ 	.remove = ath11k_pci_remove,
+ 	.shutdown = ath11k_pci_shutdown,
++	.err_handler = &ath11k_pci_err_handler,
+ #ifdef CONFIG_PM
+ 	.driver.pm = &ath11k_pci_pm_ops,
+ #endif

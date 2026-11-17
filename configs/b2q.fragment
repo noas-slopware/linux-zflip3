@@ -151,3 +151,7 @@ CONFIG_QCOM_QMI_TS=m
 CONFIG_NETFILTER_XT_CONNMARK=m
 CONFIG_NETFILTER_XT_TARGET_CONNMARK=m
 CONFIG_NETFILTER_XT_MATCH_CONNMARK=m
+
+# PCIe link-down recovery reaches the endpoint drivers (pcie_do_recovery()), so ath11k can
+# restore the Wi-Fi chip after pcie-qcom resets the Root Port
+CONFIG_PCIEAER=y
