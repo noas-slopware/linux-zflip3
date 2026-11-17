@@ -4,9 +4,9 @@
 # page size; with Qt 6.12 the action drawer showed 840 empty toggles and lagged).
 
 pkgname=plasma-mobile
-pkgver=6.8.2
+pkgver=6.8.3
 _dirver=$(echo $pkgver | cut -d. -f1-3)
-pkgrel=3
+pkgrel=2
 pkgdesc='Plasma shell for mobile devices'
 arch=(x86_64 aarch64)
 url='https://plasma-mobile.org/'
@@ -74,13 +74,13 @@ optdepends=(
 source=("https://download.kde.org/stable/plasma/$_dirver/$pkgname-$pkgver.tar.xz"{,.sig}
         0001-quicksettings-Never-use-a-negative-page-size.patch
         0002-volumeosd-do-not-break-while-there-is-no-default-sink.patch)
-sha256sums=('3b7abedd90131d3a79917c494a7443432b2619f495a8b1ae2acfac14a9f0121a'
+sha256sums=('d66ef609aaefef6bbe8d6b4b58a98d7322fd2d29b0eabd3539e3066ab770b60c'
             'SKIP'
             '99f3e44cf2a681229eff10960432add22a3cf154390bfd8588ad01ea3d482e7f'
             'd3b5e09ba1cb9ca9ef1afee99364e01678b7e25db0edbd08861e68a31e2ccc61')
 validpgpkeys=(
   E0A3EB202F8E57528E13E72FD7574483BB57B18D # Jonathan Esk-Riddell <jr@jriddell.org>
-  0AAC775BB6437A8D9AF7A3ACFE0784117FBCE11D # Bhushan Shah <bshah@kde.org>
+  58743C0A93487794BC44ECE873C3D7758E7A544A # Bhushan Shah <bshah@kde.org>
   D07BD8662C56CB291B316EB2F5675605C74E02CF # David Edmundson <davidedmundson@kde.org>
   1FA881591C26B276D7A5518EEAAF29B42A678C20 # Marco Martin <notmart@gmail.com>
 )

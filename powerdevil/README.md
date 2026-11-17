@@ -2,7 +2,7 @@
 
 Upstream project: PowerDevil, https://invent.kde.org/plasma/powerdevil
 
-Apply to: **6.8.2** (the version `plasma/powerdevil` has on the ports repo and the one
+Apply to: **6.8.3** (the version `plasma/powerdevil` has on the ports repo and the one
 installed on the phone). Upstream license: LGPL-2.0-or-later.
 
 Why this exists: PowerDevil handles the lid switch itself and marks the resulting action
@@ -64,7 +64,7 @@ that can suspend.
 
 ## Build
 
-`PKGBUILD` is Arch's `extra/powerdevil` 6.8.2-1 recipe with `arch=(aarch64)` and the
+`PKGBUILD` is Arch's `extra/powerdevil` 6.8.3-1 recipe with `arch=(aarch64)` and the
 patches applied in `prepare()`. Build on the phone as the `build` user:
 
 ```sh

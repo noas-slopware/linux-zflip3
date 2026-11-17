@@ -1,7 +1,7 @@
 # Maintainer: Noa Himesaka <himesaka@noa.codes>
 # SPDX-License-Identifier: MIT
 #
-# Arch's extra/plasma-keyboard 6.8.2-1, rebuilt for the b2q aarch64 rootfs with
+# Arch's extra/plasma-keyboard 6.8.3-1, rebuilt for the b2q aarch64 rootfs with
 # the Korean input patches in this directory (see README.md).
 #
 # Build on the phone as the unprivileged `build` user, from this directory:
@@ -12,7 +12,7 @@
 # the ports repo's, so the patched build wins.
 
 pkgname=plasma-keyboard
-pkgver=6.8.2
+pkgver=6.8.3
 _dirver=$(echo $pkgver | cut -d. -f1-3)
 pkgrel=2
 arch=(aarch64)
@@ -44,7 +44,7 @@ groups=(plasma)
 source=("https://download.kde.org/stable/plasma/$_dirver/$pkgname-$pkgver.tar.xz"
         0001-Compose-Korean-syllables-in-the-preedit.patch
         0002-Pass-content-type-changes-on-to-Qt-Virtual-Keyboard.patch)
-sha256sums=('4a48f97a1aa1c58fa9f1ae3160f770f5a223f73d66b3e7306c01318a2a562479'
+sha256sums=('ec54e6b2d163daf5288cab20ccc7043823dc0e2a3fa431eb2499d7945fa820bb'
             '67a5eda72405b94fc73c48095eeb61b530f88feb14a7d52415e6666835d38cbe'
             '7584df2e72bfb76920a1e4f22d650262c2233962d055a19d76886c1939b6968d')
 

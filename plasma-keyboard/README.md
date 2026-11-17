@@ -2,7 +2,7 @@
 
 Upstream project: Plasma Keyboard, https://invent.kde.org/plasma/plasma-keyboard
 
-Apply to: **6.8.2** (the version `extra/plasma-keyboard` has on the ports repo, and the
+Apply to: **6.8.3** (the version `extra/plasma-keyboard` has on the ports repo, and the
 one installed on the phone). Upstream license: (GPL-2.0-only OR GPL-3.0-only) AND (LGPL-2.1-only OR LGPL-3.0-only).
 
 Korean syllable composition in the preedit (via libhangul) and content-type changes passed on to the Qt Virtual Keyboard.
@@ -21,7 +21,7 @@ Patches (in order):
 
 Authors: Noa Himesaka <himesaka@noa.codes>.
 
-`PKGBUILD` is Arch's `extra/plasma-keyboard` 6.8.2-1 recipe with `arch=(aarch64)`, a
+`PKGBUILD` is Arch's `extra/plasma-keyboard` 6.8.3-1 recipe with `arch=(aarch64)`, a
 `libhangul` dependency and the two patches applied in `prepare()`. It builds on the
 phone as the `build` user (see the top of the PKGBUILD) and installs over the ports
 package with `pacman -U`. The same patches and recipe are in `linux-hiby-rs6`
