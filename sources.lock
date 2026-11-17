@@ -5,7 +5,7 @@
 # sha256sums.asc, so the checksum does not need to be pinned here by hand.
 
 # Mainline base for patches/linux/.
-LINUX_VERSION=7.3.1
+LINUX_VERSION=7.3.5
 LINUX_SERIES=v7.x
 
 # Arch Linux Ports aarch64 bootstrap (drzee.net, ARMv8.2+).

@@ -14,12 +14,6 @@ q6afe: the DT properties qcom,tdm-data-out, qcom,tdm-invert-sync and
 qcom,tdm-data-delay were parsed but never reached afe_param_id_tdm_cfg,
 so the DSP always framed TDM with no data delay. Pass them through.
 
-q6afe: the response to an LPASS core HW vote carries only the client
-handle, which was never stored (and its status was read past the end of
-the payload), so every devote sent a stale handle and the DSP failed it
-("cmd = 0x100f6 returned error = 0x1"). Keep the handle for the devote,
-as downstream does.
-
 cs35l41: implement set_tdm_slot so ASP_WIDTH follows the 32-bit slot
 while the word length stays 16 (downstream's cirrus,fixed-width = 32),
 and power the amp up after DAPM enables it (POST_PMU), the order
@@ -147,14 +141,6 @@ Assisted-by: Claude:claude-opus-5-5
  };
 --- a/sound/soc/qcom/qdsp6/q6afe.c
 +++ b/sound/soc/qcom/qdsp6/q6afe.c
-@@ -393,6 +393,7 @@
- 	struct q6core_svc_api_info ainfo;
- 	struct mutex lock;
- 	struct aprv2_ibasic_rsp_result_t result;
-+	u32 vote_handle;
- 	wait_queue_head_t wait;
- 	struct list_head port_list;
- 	spinlock_t port_list_lock;
 @@ -1036,6 +1037,8 @@
  				wake_up(&afe->wait);
  			}
@@ -164,18 +150,6 @@ Assisted-by: Claude:claude-opus-5-5
  		default:
  			dev_err(afe->dev, "Unknown cmd 0x%x\n",	res->opcode);
  			break;
-@@ -1043,8 +1046,10 @@
- 	}
- 		break;
- 	case AFE_CMD_RSP_REMOTE_LPASS_CORE_HW_VOTE_REQUEST:
-+		/* The payload is only the client handle, not a basic result */
-+		afe->vote_handle = *(const u32 *)data->payload;
-+		afe->result.status = 0;
- 		afe->result.opcode = hdr->opcode;
--		afe->result.status = res->status;
- 		wake_up(&afe->wait);
- 		break;
- 	default:
 @@ -1404,6 +1409,9 @@
  	pcfg->tdm_cfg.sync_mode = cfg->sync_mode;
  	pcfg->tdm_cfg.sync_src = cfg->sync_src;
@@ -186,24 +160,6 @@ Assisted-by: Claude:claude-opus-5-5
  
  	pcfg->tdm_cfg.slot_width = cfg->slot_width;
  	pcfg->tdm_cfg.slot_mask = cfg->slot_mask;
-@@ -1953,10 +1961,15 @@
- 
- 	ret = afe_apr_send_pkt(afe, pkt, NULL,
- 			       AFE_CMD_RSP_REMOTE_LPASS_CORE_HW_VOTE_REQUEST);
--	if (ret)
-+	if (ret) {
- 		dev_err(afe->dev, "AFE failed to vote (%d)\n", hw_block_id);
-+		return ret;
-+	}
- 
--	return ret;
-+	/* Votes come from clk prepare, which the clk core serialises */
-+	*client_handle = afe->vote_handle;
-+
-+	return 0;
- }
- EXPORT_SYMBOL(q6afe_vote_lpass_core_hw);
- 
 --- a/sound/soc/qcom/qdsp6/q6afe-dai.c
 +++ b/sound/soc/qcom/qdsp6/q6afe-dai.c
 @@ -278,6 +278,9 @@
