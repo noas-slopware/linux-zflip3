@@ -1,0 +1,140 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] misc: fastrpc: restart an interrupted invocation on its context
+
+When a signal interrupts the wait for the DSP's answer, the invocation
+returns -ERESTARTSYS and its context stays allocated: the message is
+already with the DSP, which still owns a reference. The call is then
+restarted with the same arguments and sends a second message on a new
+context. If the DSP never answers the first one, its slot in the
+channel's IDR is never freed.
+
+The freezer interrupts every such wait at system suspend. A DSP
+listener (hexagonrpcd serving the sensors PD on the SLPI) is always
+blocked in its next-message invocation, so every suspend leaks one
+context. On a Galaxy Z Flip3 that woke 350 times in two hours, the
+listener first got an error back for the duplicate request at a
+resume, and once FASTRPC_CTX_MAX contexts had leaked, every invocation
+on the channel, INIT_ATTACH_SNS included, failed with -ENOSPC until
+reboot: the sensors were gone.
+
+Do what the downstream adsprpc driver does (context_save_interrupted()
+and context_restore_interrupted()): keep an interrupted user
+invocation's context on a list of its own, and when the same thread
+makes the call again with the same scalars, wait on that context
+instead of sending a new message. The restarted call's arguments
+replace the first call's, which were freed when it returned. Contexts
+still on the list when the file is released are put like pending ones.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+
+
+diff --git a/drivers/misc/fastrpc.c b/drivers/misc/fastrpc.c
+--- a/drivers/misc/fastrpc.c
++++ b/drivers/misc/fastrpc.c
+@@ -338,6 +338,8 @@
+ 	struct list_head user;
+ 	struct list_head maps;
+ 	struct list_head pending;
++	/* invocations interrupted by a signal, waiting for the caller to restart them */
++	struct list_head interrupted;
+ 	struct list_head mmaps;
+ 
+ 	struct fastrpc_channel_ctx *cctx;
+@@ -568,6 +570,11 @@
+ 		fastrpc_context_put(ctx);
+ 	}
+ 
++	list_for_each_entry_safe(ctx, n, &fl->interrupted, node) {
++		list_del(&ctx->node);
++		fastrpc_context_put(ctx);
++	}
++
+ 	list_for_each_entry_safe(map, m, &fl->maps, node)
+ 		fastrpc_map_put(map);
+ 
+@@ -1348,6 +1355,44 @@
+ 	return fastrpc_wait_for_response(ctx, kernel);
+ }
+ 
++/*
++ * A signal (the freezer's at suspend, among others) interrupts the wait for
++ * the DSP's answer with -ERESTARTSYS, and the call is restarted with the same
++ * arguments. The message has already gone to the DSP, so its context is kept
++ * and the restarted call waits on it again instead of sending a second one:
++ * otherwise every interruption leaves a context the DSP never answers in the
++ * channel's IDR, and after FASTRPC_CTX_MAX of them every invocation fails with
++ * -ENOSPC. A listener blocked in its next-message call is interrupted at every
++ * system suspend, so a phone that sleeps often runs out within hours.
++ */
++static struct fastrpc_invoke_ctx *fastrpc_context_restore_interrupted(struct fastrpc_user *fl,
++								       u32 sc,
++								       struct fastrpc_invoke_args *args)
++{
++	struct fastrpc_invoke_ctx *ctx = NULL, *ictx, *n;
++
++	spin_lock(&fl->lock);
++	list_for_each_entry_safe(ictx, n, &fl->interrupted, node) {
++		if (ictx->pid != current->pid)
++			continue;
++		if (ictx->sc != sc) {
++			ctx = ERR_PTR(-EINVAL);
++			break;
++		}
++		/* the restarted call's copy of the arguments; the first one is freed */
++		ictx->args = args;
++		list_move_tail(&ictx->node, &fl->pending);
++		ctx = ictx;
++		break;
++	}
++	spin_unlock(&fl->lock);
++
++	if (IS_ERR(ctx))
++		dev_err(fl->sctx->dev, "interrupted invocation restarted with sc 0x%x, was 0x%x\n",
++			sc, ictx->sc);
++	return ctx;
++}
++
+ static int fastrpc_internal_invoke(struct fastrpc_user *fl,  u32 kernel,
+ 				   u32 handle, u32 sc,
+ 				   struct fastrpc_invoke_args *args)
+@@ -1368,6 +1413,14 @@
+ 		return -EPERM;
+ 	}
+ 
++	if (!kernel) {
++		ctx = fastrpc_context_restore_interrupted(fl, sc, args);
++		if (IS_ERR(ctx))
++			return PTR_ERR(ctx);
++		if (ctx)
++			goto wait;
++	}
++
+ 	ctx = fastrpc_context_alloc(fl, kernel, sc, args);
+ 	if (IS_ERR(ctx))
+ 		return PTR_ERR(ctx);
+@@ -1390,6 +1443,7 @@
+ 	if (handle > FASTRPC_MAX_STATIC_HANDLE && fl->pd == USER_PD && fl->poll_mode)
+ 		ctx->is_polled = true;
+ 
++wait:
+ 	err = fastrpc_wait_for_completion(ctx, kernel);
+ 	if (err)
+ 		goto bail;
+@@ -1417,6 +1471,8 @@
+ 
+ 	if (err == -ERESTARTSYS) {
+ 		spin_lock(&fl->lock);
++		/* the DSP still has the message: keep the context for the restart */
++		list_move_tail(&ctx->node, &fl->interrupted);
+ 		list_for_each_entry_safe(buf, b, &fl->mmaps, node) {
+ 			list_del(&buf->node);
+ 			list_add_tail(&buf->node, &fl->cctx->invoke_interrupted_mmaps);
+@@ -1775,6 +1831,7 @@
+ 	spin_lock_init(&fl->lock);
+ 	mutex_init(&fl->mutex);
+ 	INIT_LIST_HEAD(&fl->pending);
++	INIT_LIST_HEAD(&fl->interrupted);
+ 	INIT_LIST_HEAD(&fl->maps);
+ 	INIT_LIST_HEAD(&fl->mmaps);
+ 	INIT_LIST_HEAD(&fl->user);
