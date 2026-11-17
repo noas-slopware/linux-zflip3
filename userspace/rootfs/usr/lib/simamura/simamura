@@ -32,7 +32,9 @@ while [ "$i" -lt 90 ]; do
 	*"Card state: 'present'"*)
 		aid=$(usim_aid "$status") && break
 		;;
-	*"Card state: 'absent'"*)
+	# An empty tray reads 'absent' on some modems; this one reports that no
+	# card answered with an ATR instead
+	*"Card state: 'absent'"*|*"Card state: 'error: no-atr-received"*)
 		[ "$i" -gt 10 ] && { echo "no SIM"; exit 0; }
 		;;
 	esac
