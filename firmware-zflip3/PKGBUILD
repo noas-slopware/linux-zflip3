@@ -43,7 +43,7 @@ source=(
   "local://$_cp"
 )
 noextract=("$_ap" "$_bl" "$_cp")
-sha256sums=('1c2248e15c83588857d8e8f2d25121876701f0b06f84e300f26390fa16346049'
+sha256sums=('b3ed6415fecccaefd38ac970309ff080dc046a99721b717d155b581e1cba829e'
             'b99284d7e01c52a5a60fded225c9534e8787237fb79ad3d0eed4b89ffe7aae9a'
             'e8d92133d71d26eeb9ed6265a6a0d0427dffa4ea34993a4e4dfe749ab34185c9'
             '0215dd72e0f7f545727ff53525f75422c54c7eb6e9141ee6fe3d9aab8109e00f')

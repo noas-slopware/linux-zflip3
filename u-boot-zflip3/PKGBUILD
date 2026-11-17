@@ -35,7 +35,7 @@ source=("https://git.u-boot-project.org/u-boot/u-boot/-/releases/v$pkgver/downlo
 validpgpkeys=('F3CEA8743D60E0192F9B4C7A2BE2A0F50ABFE40A') # Tom Rini
 sha256sums=('3f856da3cbbc93af51ff95fde18588a348b4a26723b01d9841e999d988481015'
             'SKIP'
-            '1c2248e15c83588857d8e8f2d25121876701f0b06f84e300f26390fa16346049'
+            'b3ed6415fecccaefd38ac970309ff080dc046a99721b717d155b581e1cba829e'
             '32515605485039e1b5f7dbfbf7d6cec2cca5bad3a7360d74b366d60683141108')
 
 prepare() {
