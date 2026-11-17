@@ -33,6 +33,9 @@ CONFIG_F2FS_FS=y
 CONFIG_F2FS_FS_COMPRESSION=y
 CONFIG_F2FS_FS_LZ4=y
 CONFIG_F2FS_FS_ZSTD=y
+# security.* xattrs on /: file capabilities (setcap in package installs: kwin_wayland's
+# cap_sys_nice, gst-ptp-helper, the ksystemstats helpers)
+CONFIG_F2FS_FS_SECURITY=y
 CONFIG_INPUT_EVDEV=y
 
 # Bluetooth profiles the Nura config leaves out: LE (most peripherals), RFCOMM
