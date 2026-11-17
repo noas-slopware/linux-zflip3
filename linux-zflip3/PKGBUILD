@@ -3,7 +3,7 @@
 # Steffens (heftig)), which Arch Linux Ports' aarch64 linux (arch-linux-repo.drzee.net) rebuilds,
 # and on linux-hiby-rs6 for the aarch64 parts.
 #
-# Kernel for the Samsung Galaxy Z Flip3 5G (SM-F711N, b2q): kernel.org 7.3.1 plus the patch series
+# Kernel for the Samsung Galaxy Z Flip3 5G (SM-F711N, b2q): kernel.org 7.3.5 plus the patch series
 # from patches/linux on the senpai branch of noas-slopware/linux-zflip3 (patches/linux/held/ is not
 # applied). Config: configs/nura-sm8350.config (the Nura sm8350 config the port started from)
 # merged with configs/b2q.fragment, both from the same tarball, exactly what tools/build-kernel.sh
@@ -16,8 +16,8 @@
 # rust makedepends and no bpftool vmlinux.h.
 
 pkgbase=linux-zflip3
-pkgver=7.3.1
-pkgrel=3
+pkgver=7.3.5
+pkgrel=2
 pkgdesc='Linux for the Samsung Galaxy Z Flip3 5G (SM-F711N)'
 url='https://github.com/noas-slopware/linux-zflip3'
 arch=(aarch64)
@@ -46,7 +46,7 @@ options=(
 )
 _srcname=linux-$pkgver
 # senpai branch (default) of noas-slopware/linux-zflip3
-_zf3commit=d663c08287b37f6ce57ec5f6dd2f9ad90957ce31
+_zf3commit=ada918b3e1788ac4400ec65944ec76c3e32ed62d
 source=(
   "https://cdn.kernel.org/pub/linux/kernel/v${pkgver%%.*}.x/$_srcname.tar."{xz,sign}
   "linux-zflip3-$_zf3commit.tar.gz::https://github.com/noas-slopware/linux-zflip3/archive/$_zf3commit.tar.gz"
@@ -56,9 +56,9 @@ validpgpkeys=(
   647F28654894E3BD457199BE38DBBDC86092693E  # Greg Kroah-Hartman
 )
 # https://www.kernel.org/pub/linux/kernel/v7.x/sha256sums.asc
-sha256sums=('fa595aad93734f829c963c2a90ef7c3673224fd7fdae7b49406e397cde2de231'
+sha256sums=('8f293f83d54f0b7b9be56863ebc5e4ea79d73e530b4ae55c572be97ef39f0990'
             'SKIP'
-            'f5ba58bc20786441c65d88ef9f9e2bb7cef7c04d03613fabee876219f87c8be4')
+            '1c2248e15c83588857d8e8f2d25121876701f0b06f84e300f26390fa16346049')
 
 export KBUILD_BUILD_HOST=archlinux
 export KBUILD_BUILD_USER=$pkgbase
