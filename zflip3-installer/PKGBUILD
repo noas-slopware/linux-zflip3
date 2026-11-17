@@ -29,13 +29,13 @@ license=(MIT GPL-2.0-only)
 makedepends=(android-tools cpio f2fs-tools linux-zflip3 linux-zflip3-dtbs lvm2)
 options=(!strip !debug !lto)
 # senpai branch (default) of noas-slopware/linux-zflip3
-_zf3commit=3ba103e923e9f9a2310b7ec6e1492e9fd9305a67
+_zf3commit=d663c08287b37f6ce57ec5f6dd2f9ad90957ce31
 source=("https://busybox.net/downloads/busybox-$_bbver.tar.bz2"{,.sig}
         "linux-zflip3-$_zf3commit.tar.gz::https://github.com/noas-slopware/linux-zflip3/archive/$_zf3commit.tar.gz")
 validpgpkeys=('C9E9416F76E610DBD09D040F47B70C55ACC9965B') # Denys Vlasenko
 sha256sums=('3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4'
             'SKIP'
-            '6c6d0a6ae12b8f765159df146dd651375afadb556d54c5a11ba8a36c6118e340')
+            'f5ba58bc20786441c65d88ef9f9e2bb7cef7c04d03613fabee876219f87c8be4')
 
 build() {
   cd busybox-$_bbver

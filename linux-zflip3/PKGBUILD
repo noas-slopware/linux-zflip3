@@ -17,7 +17,7 @@
 
 pkgbase=linux-zflip3
 pkgver=7.3.1
-pkgrel=2
+pkgrel=3
 pkgdesc='Linux for the Samsung Galaxy Z Flip3 5G (SM-F711N)'
 url='https://github.com/noas-slopware/linux-zflip3'
 arch=(aarch64)
@@ -46,7 +46,7 @@ options=(
 )
 _srcname=linux-$pkgver
 # senpai branch (default) of noas-slopware/linux-zflip3
-_zf3commit=3ba103e923e9f9a2310b7ec6e1492e9fd9305a67
+_zf3commit=d663c08287b37f6ce57ec5f6dd2f9ad90957ce31
 source=(
   "https://cdn.kernel.org/pub/linux/kernel/v${pkgver%%.*}.x/$_srcname.tar."{xz,sign}
   "linux-zflip3-$_zf3commit.tar.gz::https://github.com/noas-slopware/linux-zflip3/archive/$_zf3commit.tar.gz"
@@ -58,7 +58,7 @@ validpgpkeys=(
 # https://www.kernel.org/pub/linux/kernel/v7.x/sha256sums.asc
 sha256sums=('fa595aad93734f829c963c2a90ef7c3673224fd7fdae7b49406e397cde2de231'
             'SKIP'
-            '6c6d0a6ae12b8f765159df146dd651375afadb556d54c5a11ba8a36c6118e340')
+            'f5ba58bc20786441c65d88ef9f9e2bb7cef7c04d03613fabee876219f87c8be4')
 
 export KBUILD_BUILD_HOST=archlinux
 export KBUILD_BUILD_USER=$pkgbase
@@ -90,7 +90,7 @@ prepare() {
   # hide the last console lines before a reset
   local sym
   for sym in FB_SIMPLE FRAMEBUFFER_CONSOLE PINCTRL_SM8350 SCSI_UFS_QCOM USB_DWC3_QCOM \
-             PHY_QCOM_QMP_COMBO PHY_QCOM_USB_SNPS_FEMTO_V2 USB_CONFIGFS BLK_DEV_DM F2FS_FS \
+             PHY_QCOM_QMP_COMBO PHY_QCOM_USB_SNPS_FEMTO_V2 USB_CONFIGFS BLK_DEV_DM F2FS_FS F2FS_FS_SECURITY \
              USB_CONFIGFS_ACM MFD_MAX77705; do
     grep -q "^CONFIG_$sym=y" .config || { echo "CONFIG_$sym did not end up =y" >&2; return 1; }
   done
