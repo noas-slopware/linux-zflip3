@@ -1,0 +1,41 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Guido=20G=C3=BCnther?= <agx@sigxcpu.org>
+Date: Fri, 23 May 2025 09:29:57 +0200
+Subject: [PATCH] polkit,conf: Add missing Cell Broadcast methods
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Fixes 62f7b76e8 ("cbm: Add CellBroadcast interface")
+
+Signed-off-by: Guido Günther <agx@sigxcpu.org>
+(cherry picked from commit 5a3b810bc90ebe47b9e6bbbc62f220649483785d)
+---
+ data/org.freedesktop.ModemManager1.conf.polkit | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/data/org.freedesktop.ModemManager1.conf.polkit b/data/org.freedesktop.ModemManager1.conf.polkit
+index 5d66fb9f..5ee3d7d2 100644
+--- a/data/org.freedesktop.ModemManager1.conf.polkit
++++ b/data/org.freedesktop.ModemManager1.conf.polkit
+@@ -358,6 +358,17 @@
+            send_interface="org.freedesktop.ModemManager1.Modem.Time"
+            send_member="GetNetworkTime"/>
+ 
++    <!-- org.freedesktop.ModemManager1.Modem.CellBroadcast.xml -->
++
++    <!-- Allowed for everyone -->
++    <allow send_destination="org.freedesktop.ModemManager1"
++           send_interface="org.freedesktop.ModemManager1.Modem.CellBroadcast"
++           send_member="List"/>
++
++    <!-- Protected by the CellBroadcast policy rule -->
++    <allow send_destination="org.freedesktop.ModemManager1"
++           send_interface="org.freedesktop.ModemManager1.Modem.CellBroadcast"
++           send_member="Delete"/>
+   </policy>
+ 
+   <policy user="root">
+-- 
+2.56.0
+

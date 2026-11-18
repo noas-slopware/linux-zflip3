@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Guido=20G=C3=BCnther?= <agx@sigxcpu.org>
+Date: Fri, 23 May 2025 09:29:57 +0200
+Subject: [PATCH] polkit,conf: Add missing Cell Broadcast SetChannel method
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Signed-off-by: Guido Günther <agx@sigxcpu.org>
+(cherry picked from commit 857efa1fba69cedaff48c1dff094c1b05afe66e8)
+---
+ data/org.freedesktop.ModemManager1.conf.polkit | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/data/org.freedesktop.ModemManager1.conf.polkit b/data/org.freedesktop.ModemManager1.conf.polkit
+index 5ee3d7d2..df182d79 100644
+--- a/data/org.freedesktop.ModemManager1.conf.polkit
++++ b/data/org.freedesktop.ModemManager1.conf.polkit
+@@ -369,6 +369,11 @@
+     <allow send_destination="org.freedesktop.ModemManager1"
+            send_interface="org.freedesktop.ModemManager1.Modem.CellBroadcast"
+            send_member="Delete"/>
++
++    <!-- Protected by the Device.Control policy rule -->
++    <allow send_destination="org.freedesktop.ModemManager1"
++           send_interface="org.freedesktop.ModemManager1.Modem.CellBroadcast"
++           send_member="SetChannels"/>
+   </policy>
+ 
+   <policy user="root">
+-- 
+2.56.0
+

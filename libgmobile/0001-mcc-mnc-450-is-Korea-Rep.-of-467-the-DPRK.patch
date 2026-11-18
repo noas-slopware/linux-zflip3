@@ -1,0 +1,63 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Thu, 19 Nov 2026 08:44:10 +0900
+Subject: [PATCH] mcc-mnc: 450 is Korea (Rep. of), 467 the DPRK
+
+The table had them the other way round: a SIM or network with MCC 450
+(every South Korean operator) came out as "KP", so cellbroadcastd looked
+for North Korea in the service provider database, found no channels and
+fell back to its defaults. ITU-T E.212 assigns 450 to Korea (Rep. of)
+and 467 to the Democratic People's Republic of Korea.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ src/gm-mcc-mnc.c     | 4 ++--
+ tests/test-mcc-mnc.c | 9 +++++++++
+ 2 files changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/src/gm-mcc-mnc.c b/src/gm-mcc-mnc.c
+index 0c33128..f592755 100644
+--- a/src/gm-mcc-mnc.c
++++ b/src/gm-mcc-mnc.c
+@@ -146,7 +146,7 @@ struct mcc_list mcc_list[] = {
+   {438, "TM"},
+   {440, "JP"},
+   {441, "JP"},
+-  {450, "KP"},
++  {450, "KR"},
+   {452, "VN"},
+   {454, "HK"},
+   {455, "MO"},
+@@ -155,7 +155,7 @@ struct mcc_list mcc_list[] = {
+   {460, "CN"},
+   {461, "CN"},
+   {466, "TW"},
+-  {467, "KR"},
++  {467, "KP"},
+   {470, "BD"},
+   {472, "MV"},
+   {502, "MY"},
+diff --git a/tests/test-mcc-mnc.c b/tests/test-mcc-mnc.c
+index 78456a3..4927113 100644
+--- a/tests/test-mcc-mnc.c
++++ b/tests/test-mcc-mnc.c
+@@ -21,6 +21,15 @@ test_country_code (void)
+   g_assert_no_error (err);
+   g_assert_cmpstr (country_code, ==, "CH");
+ 
++  /* ITU-T E.212: 450 is Korea (Rep. of), 467 is the Democratic People's Rep. of Korea */
++  country_code = gm_mcc_to_iso ("45006", &err);
++  g_assert_no_error (err);
++  g_assert_cmpstr (country_code, ==, "KR");
++
++  country_code = gm_mcc_to_iso ("467", &err);
++  g_assert_no_error (err);
++  g_assert_cmpstr (country_code, ==, "KP");
++
+   country_code = gm_mcc_to_iso ("", &err);
+   g_assert_null (country_code);
+   g_assert_error (err, GM_ERROR, G_IO_ERROR_NOT_FOUND);
+-- 
+2.56.0
+

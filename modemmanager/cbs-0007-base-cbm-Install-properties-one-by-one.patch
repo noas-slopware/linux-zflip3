@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Guido=20G=C3=BCnther?= <agx@sigxcpu.org>
 Date: Tue, 20 May 2025 17:43:59 +0200
-Subject: [PATCH 07/14] base-cbm: Install properties one by one
+Subject: [PATCH] base-cbm: Install properties one by one
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
@@ -13,12 +13,17 @@ Fixes: ec5104c9a ("Move log parent and connection property binding to helper")
 
 Signed-off-by: Guido Günther <agx@sigxcpu.org>
 (cherry picked from commit 382c3e114c1f53c07aa7756eb06ee6a24f53c918)
+[Noa Himesaka: on 1.24.2, which still has the modem property (main dropped
+ it in 1fa21fcc), install PROP_MODEM too. Without it no CBM got the modem,
+ so none had a D-Bus connection or was exported: the list named
+ /org/freedesktop/ModemManager1/CBM/0 and nothing was there, and the 2027
+ CSAT test alert on 4370 (2026-11-19 08:30) never reached cellbroadcastd.]
 ---
- src/mm-base-cbm.c | 6 ++++--
- 1 file changed, 4 insertions(+), 2 deletions(-)
+ src/mm-base-cbm.c | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
 
 diff --git a/src/mm-base-cbm.c b/src/mm-base-cbm.c
-index 212d2ce8..89571a48 100644
+index 212d2ce8..545b0956 100644
 --- a/src/mm-base-cbm.c
 +++ b/src/mm-base-cbm.c
 @@ -526,6 +526,7 @@ mm_base_cbm_class_init (MMBaseCbmClass *klass)
@@ -37,7 +42,15 @@ index 212d2ce8..89571a48 100644
  
      properties[PROP_MODEM] =
          g_param_spec_object (MM_BASE_CBM_MODEM,
-@@ -547,6 +549,7 @@ mm_base_cbm_class_init (MMBaseCbmClass *klass)
+@@ -540,6 +542,7 @@ mm_base_cbm_class_init (MMBaseCbmClass *klass)
+                              "The Modem which owns this CBM",
+                              MM_TYPE_BASE_MODEM,
+                              G_PARAM_READWRITE);
++    g_object_class_install_property (object_class, PROP_MODEM, properties[PROP_MODEM]);
+ 
+     properties[PROP_MAX_PARTS] =
+         g_param_spec_uint (MM_BASE_CBM_MAX_PARTS,
+@@ -547,6 +550,7 @@ mm_base_cbm_class_init (MMBaseCbmClass *klass)
                             "Maximum number of parts composing this CBM",
                             1, 255, 1,
                             G_PARAM_READWRITE);
@@ -45,7 +58,7 @@ index 212d2ce8..89571a48 100644
  
      properties[PROP_SERIAL] =
          g_param_spec_uint (MM_BASE_CBM_SERIAL,
-@@ -554,8 +557,7 @@ mm_base_cbm_class_init (MMBaseCbmClass *klass)
+@@ -554,8 +558,7 @@ mm_base_cbm_class_init (MMBaseCbmClass *klass)
                             "The serial of this CBM",
                             0, G_MAXUINT16, 0,
                             G_PARAM_READWRITE);
@@ -55,3 +68,6 @@ index 212d2ce8..89571a48 100644
  }
  
  guint16
+-- 
+2.56.0
+

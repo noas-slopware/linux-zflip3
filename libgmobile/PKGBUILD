@@ -1,0 +1,51 @@
+# Arch's libgmobile (packaging/packages/libgmobile), with MCC 450 mapped to KR: gmobile had
+# 450 and 467 the wrong way round, so cellbroadcastd took a Korean SIM for North Korea and found
+# no cell broadcast channels for it.
+# Maintainer: Dan Johansen <strit@archlinux.org>
+# Contributor: Jelle van der Waa <jelle@archlinux.org>
+
+pkgname=libgmobile
+pkgver=0.7.5
+pkgrel=2
+pkgdesc='Functions useful in mobile related, glib based projects'
+arch=(aarch64)
+url='https://gitlab.gnome.org/World/Phosh/gmobile'
+license=('LGPL-2.1-or-later AND GPL-3.0-or-later')
+depends=(
+  libgcc
+  glib2
+  glibc
+  json-glib
+)
+makedepends=(
+  gi-docgen
+  git
+  gobject-introspection
+  meson
+  python-docutils
+  vala
+)
+source=("git+https://gitlab.gnome.org/World/Phosh/gmobile.git?signed#tag=v$pkgver"
+        0001-mcc-mnc-450-is-Korea-Rep.-of-467-the-DPRK.patch)
+b2sums=('dc4426d36f9f4e98add6b0d7982c4984185d7ae3bac6531bdeb96d14eebd29745f77b904e0e8418517b3c2511ac658c76ceb1cc9487cc65e3dca33ff9194b589'
+        '49be2b09cc0acc933a71022a3cdf1f8540d8224442f7d61651214d314f5c9802f76eeed9338502552818b934f16a2d5430b7058cb9a401aee997ced2376904eb')
+validpgpkeys=(0DB3932762F78E592F6522AFBB5A2C77584122D3) # Guido Günther <guido@xcpu.ch>
+
+prepare() {
+  git -C gmobile apply "$srcdir/0001-mcc-mnc-450-is-Korea-Rep.-of-467-the-DPRK.patch"
+}
+
+build() {
+  arch-meson gmobile build \
+    -D gtk_doc=true \
+    -D man=true
+  meson compile -C build
+}
+
+check() {
+  meson test -C build --print-errorlogs
+}
+
+package() {
+  meson install -C build --destdir "$pkgdir"
+}

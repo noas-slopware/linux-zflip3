@@ -13,7 +13,7 @@
 
 pkgname=modemmanager
 pkgver=1.24.2
-pkgrel=18
+pkgrel=19
 pkgdesc="Mobile broadband modem management service with IMSroha (userspace IMS) support"
 url="https://www.freedesktop.org/wiki/Software/ModemManager/"
 arch=(aarch64 x86_64)
@@ -66,6 +66,9 @@ source=(
   cbs-0013-mm-cbm-part-Try-harder-to-convert-message-text.patch
   cbs-0014-CVE-2026-95622-cbm-don-t-assert-handling-unsupported.patch
   cbs-0015-tests-a-Korean-presidential-alert-UCS-2-channel-4370.patch
+  # upstream 5a3b810b, 857efa1f: the bus let no user call the CellBroadcast interface
+  cbs-0016-polkit-conf-Add-missing-Cell-Broadcast-methods.patch
+  cbs-0017-polkit-conf-Add-missing-Cell-Broadcast-SetChannel-method.patch
 )
 sha256sums=('SKIP'
             '65846cde8a785b2edd6d9178cfb9dd4337df837585e7de455daf10168e2818fa'
@@ -75,7 +78,7 @@ sha256sums=('SKIP'
             '0739e7d86add29c62d6ee2fc58000a78c0cba898b4a14a44212d9acb06e58deb'
             'b22ddc3d355b53594feac8facd2a598d82774a05a948487c7a1aeceffd7d4d6f'
             '5f5bf4067fbc0a5aa271a8f44b667c76ff179567943994b1103c0096da423795'
-            '94c3393476a57bfe5a4c88602bf6e9b230cbda3209ddfd12d1c6a4f36672c957'
+            'ba4e97ffb6e03485030273249e3953ab0b4e7a57edfc2cd1607d97c357f1f5c3'
             '0cff64bf9011c69456e52ab7af4913fcadfbefc3403570b38c2abb7a6f558c9c'
             'f0c03d8c98a071b9c60d17a9610d57e4f6f53c3afa47ae37d8321a93966a2ac3'
             'fb68bb5a7c9f677de41e4680a21d7caaff88f3f82ef12193b90abe5d563d0713'
@@ -83,7 +86,9 @@ sha256sums=('SKIP'
             'a4870b5bf664cebcc4f5174c2f6770331d7fc93f5e6e792580b5e57b8e86cf7d'
             'cb3b22ee01129c569170460b4f4e83a911a033360c66caf6e830097b62d7c90c'
             '447376c11423444004b454bb417564eb6c97acafc7bdf9bf05da4fc6476b7ff5'
-            '6bd922d81e21d2042aa898c514656f59c5064e70c70b58db615860184cf0d52b')
+            '6bd922d81e21d2042aa898c514656f59c5064e70c70b58db615860184cf0d52b'
+            '22c085860812fe871af6a47baf18baaae56caef84a24c62bb32586edd544bfed'
+            '6d07d4bcfafd7f0aaa86c1a3c6cf3d54847087177638a213f4024ac5504e2a5b')
 
 prepare() {
   cd ModemManager
