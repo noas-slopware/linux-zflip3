@@ -29,13 +29,13 @@ pkgname=(
   zflip3-plasma
 )
 pkgver=1
-pkgrel=6
+pkgrel=7
 pkgdesc='Samsung Galaxy Z Flip3 5G (SM-F711N)'
 url='https://github.com/noas-slopware/linux-zflip3'
 arch=(aarch64)
 license=(MIT)
 # senpai branch (default) of noas-slopware/linux-zflip3
-_zf3commit=ada918b3e1788ac4400ec65944ec76c3e32ed62d
+_zf3commit=b7de5bec8f99dfca5bb8990349baf2e876167ee9
 source=(
   "linux-zflip3-$_zf3commit.tar.gz::https://github.com/noas-slopware/linux-zflip3/archive/$_zf3commit.tar.gz"
   zflip3-bootimg
@@ -47,7 +47,7 @@ source=(
   80-zflip3.preset
   zflip3-pacman-keyring.service
 )
-sha256sums=('b3ed6415fecccaefd38ac970309ff080dc046a99721b717d155b581e1cba829e'
+sha256sums=('9c43c4e65715766fa86661c292bf027596bb82087ca3d04c3835710bf061aabc'
             '5a928b0ae2f8940bd75f12613c7234fd4ae5fecc930fc50b88833b212aa25fd9'
             '57164bb141e910214b0f174df3910f531ae9eaa8062d36be22d31f1488c73c8d'
             '2ad358d16b3c369237d3f4b62d7f92c39570c4acbbfdc04997c492c8e7f3d8e4'
@@ -188,6 +188,7 @@ package_zflip3-cellular() {
   depends=(
     81voltd
     bash
+    cellbroadcastd
     imsroha
     iproute2
     libqmi
@@ -217,6 +218,12 @@ package_zflip3-cellular() {
     usr/lib/zflip3/clat-down
 
   _ov usr/share/imsroha/imsroha.conf.d/50-zflip3.conf
+
+  # cell broadcast alerts (재난문자): cellbroadcastd turns on the country's channels in
+  # ModemManager and shows what arrives as notifications; it runs in every user session
+  _ov usr/share/glib-2.0/schemas/90-zflip3-cellbroadcast.gschema.override
+  install -d "$pkgdir"/usr/lib/systemd/user/default.target.wants
+  ln -s ../cellbroadcastd.service "$pkgdir"/usr/lib/systemd/user/default.target.wants/cellbroadcastd.service
 }
 
 package_zflip3-plasma() {

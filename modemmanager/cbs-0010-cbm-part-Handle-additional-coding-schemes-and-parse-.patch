@@ -1,0 +1,245 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Guido=20G=C3=BCnther?= <agx@sigxcpu.org>
+Date: Mon, 19 May 2025 21:40:10 +0200
+Subject: [PATCH 10/14] cbm-part: Handle additional coding schemes and parse
+ languages
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+We store the language as iso639 as this is what the what TS 23.038
+references.
+
+Signed-off-by: Guido Günther <agx@sigxcpu.org>
+(cherry picked from commit 0bd0cad7051ac56aa1fd4768ca6d79c923e85588)
+---
+ src/mm-cbm-part.c         | 101 +++++++++++++++++++++++++++++++++++++-
+ src/mm-cbm-part.h         |   1 +
+ src/tests/test-cbm-part.c |   9 ++++
+ 3 files changed, 109 insertions(+), 2 deletions(-)
+
+diff --git a/src/mm-cbm-part.c b/src/mm-cbm-part.c
+index 192bab72..18df7c17 100644
+--- a/src/mm-cbm-part.c
++++ b/src/mm-cbm-part.c
+@@ -27,9 +27,17 @@
+ #include "mm-sms-part-3gpp.h"
+ 
+ #define CBS_DATA_CODING_GROUP_MASK           0b11110000
++#define CBS_DATA_CODING_LANG_MASK            0b00001111
+ #define CBS_DATA_CODING_LANG_GSM7            0b00000000
+ #define CBS_DATA_CODING_GSM7                 0b00010000
+ #define CBS_DATA_CODING_UCS2                 0b00010001
++#define CBS_DATA_CODING_OTHER                0b00100000
++#define CBS_DATA_CODING_OTHER_CZECH          0b00100000
++#define CBS_DATA_CODING_OTHER_HEBREW         0b00100001
++#define CBS_DATA_CODING_OTHER_ARABIC         0b00100010
++#define CBS_DATA_CODING_OTHER_RUSSIAN        0b00100011
++#define CBS_DATA_CODING_OTHER_ICELANDIC      0b00100100
++#define CBS_DATA_CODING_UNSPECIFIED          0b00110000
+ #define CBS_DATA_CODING_GENERAL_NO_CLASS     0b01000000
+ #define CBS_DATA_CODING_GENERAL_CLASS        0b01010000
+ #define CBS_DATA_CODING_GENERAL_CHARSET_MASK 0b00001100
+@@ -46,10 +54,48 @@ struct _MMCbmPart {
+     guint8 part_num;
+ 
+     gchar *text;
++    gchar *language;
+     MMSmsEncoding encoding;
+ };
+ 
+ 
++static gchar *
++mm_cbm_part_coding_group_to_language (guint8 group)
++{
++    switch (group & CBS_DATA_CODING_LANG_MASK) {
++    case 0b0000:
++        return g_strdup ("de");
++    case 0b0001:
++        return g_strdup ("en");
++    case 0b0010:
++        return g_strdup ("it");
++    case 0b0011:
++        return g_strdup ("fr");
++    case 0b0100:
++        return g_strdup ("es");
++    case 0b0101:
++        return g_strdup ("nl");
++    case 0b0110:
++        return g_strdup ("sv");
++    case 0b0111:
++        return g_strdup ("dk");
++    case 0b1000:
++        return g_strdup ("pt");
++    case 0b1001:
++        return g_strdup ("fi");
++    case 0b1010:
++        return g_strdup ("no");
++    case 0b1011:
++        return g_strdup ("el");
++    case 0b1110:
++        return g_strdup ("pl");
++    case 0b1111:
++    default:
++        return NULL;
++    };
++}
++
++
+ MMCbmPart *
+ mm_cbm_part_new_from_pdu (const gchar  *hexpdu,
+                           gpointer      log_object,
+@@ -136,12 +182,40 @@ mm_cbm_part_new_from_binary_pdu (const guint8  *pdu,
+     /* Order matches 3GPP TS 23.038 Chapter 5 */
+     if (group == CBS_DATA_CODING_LANG_GSM7) {
+         cbm_part->encoding = MM_SMS_ENCODING_GSM7;
++        cbm_part->language = mm_cbm_part_coding_group_to_language (pdu[offset]);
+     } else if (pdu[offset] == CBS_DATA_CODING_GSM7) {
+         has_lang = TRUE;
+         cbm_part->encoding = MM_SMS_ENCODING_GSM7;
+     } else if (pdu[offset] == CBS_DATA_CODING_UCS2) {
+         has_7bit_lang = TRUE;
+         cbm_part->encoding = MM_SMS_ENCODING_UCS2;
++    } else if (group == CBS_DATA_CODING_OTHER) {
++        switch (group) {
++        case CBS_DATA_CODING_OTHER_CZECH:
++            cbm_part->encoding = MM_SMS_ENCODING_GSM7;
++            cbm_part->language = g_strdup ("cz");
++            break;
++        case CBS_DATA_CODING_OTHER_HEBREW:
++            cbm_part->encoding = MM_SMS_ENCODING_UCS2;
++            cbm_part->language = g_strdup ("he");
++            break;
++        case CBS_DATA_CODING_OTHER_ARABIC:
++            cbm_part->encoding = MM_SMS_ENCODING_UCS2;
++            cbm_part->language = g_strdup ("ar");
++            break;
++        case CBS_DATA_CODING_OTHER_RUSSIAN:
++            cbm_part->encoding = MM_SMS_ENCODING_UCS2;
++            cbm_part->language = g_strdup ("ru");
++            break;
++        case CBS_DATA_CODING_OTHER_ICELANDIC:
++            cbm_part->encoding = MM_SMS_ENCODING_GSM7;
++            cbm_part->language = g_strdup ("is");
++            break;
++        default:
++            cbm_part->encoding = MM_SMS_ENCODING_GSM7;
++        }
++    } else if (group == CBS_DATA_CODING_UNSPECIFIED) {
++        cbm_part->encoding = MM_SMS_ENCODING_GSM7;
+     } else if ((group == CBS_DATA_CODING_GENERAL_CLASS) ||
+                (group == CBS_DATA_CODING_GENERAL_NO_CLASS) ||
+                (group == CBS_DATA_CODING_UDH)) {
+@@ -167,10 +241,31 @@ mm_cbm_part_new_from_binary_pdu (const guint8  *pdu,
+     offset++;
+ 
+     if (has_lang) {
+-        PDU_SIZE_CHECK (offset + 4, "cannot skip lang");
++        PDU_SIZE_CHECK (offset + 4, "cannot read lang");
++        if (pdu[offset+2] != '\r') {
++            g_set_error_literal (error,
++                                 MM_CORE_ERROR,
++                                 MM_CORE_ERROR_FAILED,
++                                 "Failed to parse lang");
++            return NULL;
++        }
++        cbm_part->language = g_strdup_printf ("%c%c", pdu[offset], pdu[offset+1]);
+         offset += 3;
+     } else if (has_7bit_lang) {
+-        PDU_SIZE_CHECK (offset + 3, "cannot skip 7bit lang");
++        PDU_SIZE_CHECK (offset + 3, "cannot read 7bit lang");
++        cbm_part->language = mm_sms_decode_text (&pdu[offset],
++                                                 2,
++                                                 MM_SMS_ENCODING_GSM7,
++                                                 0,
++                                                 log_object,
++                                                 NULL);
++        if (!cbm_part->language) {
++            g_set_error_literal (error,
++                                 MM_CORE_ERROR,
++                                 MM_CORE_ERROR_FAILED,
++                                 "Failed to parse lang");
++            return NULL;
++        }
+         offset += 2;
+     }
+ 
+@@ -210,6 +305,7 @@ mm_cbm_part_new (void)
+ void
+ mm_cbm_part_free (MMCbmPart *part)
+ {
++  g_clear_pointer (&part->language, g_free);
+   g_clear_pointer (&part->text, g_free);
+   g_slice_free (MMCbmPart, part);
+ }
+@@ -226,3 +322,4 @@ PART_GET_FUNC (guint, num_parts)
+ PART_GET_FUNC (const char *, text)
+ PART_GET_FUNC (guint16, channel)
+ PART_GET_FUNC (guint16, serial)
++PART_GET_FUNC (const char *, language)
+diff --git a/src/mm-cbm-part.h b/src/mm-cbm-part.h
+index 0cb9d108..3e0dabf9 100644
+--- a/src/mm-cbm-part.h
++++ b/src/mm-cbm-part.h
+@@ -67,5 +67,6 @@ const char *mm_cbm_part_get_text (MMCbmPart *part);
+ 
+ guint16     mm_cbm_part_get_serial (MMCbmPart *part);
+ guint16     mm_cbm_part_get_channel (MMCbmPart *part);
++const char *mm_cbm_part_get_language (MMCbmPart *part);
+ 
+ #endif
+diff --git a/src/tests/test-cbm-part.c b/src/tests/test-cbm-part.c
+index 6bdcebb8..89fb4768 100644
+--- a/src/tests/test-cbm-part.c
++++ b/src/tests/test-cbm-part.c
+@@ -68,6 +68,8 @@ test_cbm_ca (void)
+ 
+     g_assert_cmpstr (mm_cbm_part_get_text (part), ==,
+                      "This is a test of the Ontario Alert Ready System. There is no danger to your health or safety" );
++
++    g_assert_null (mm_cbm_part_get_language (part));
+ }
+ 
+ static void
+@@ -109,6 +111,8 @@ test_cbm_ucs2 (void)
+ 
+     g_assert_cmpstr (mm_cbm_part_get_text (part), ==,
+                      " Протягом дня є висока імовірність ракетнᘁ");
++
++    g_assert_null (mm_cbm_part_get_language (part));
+ }
+ 
+ 
+@@ -153,6 +157,8 @@ test_cbm_eu (void)
+ 
+     g_assert_cmpstr (mm_cbm_part_get_text (part), ==,
+                      "TEST ALERT, NATIONWIDE ALERT DAY 2022 Thu 2022/12/08 - 10:59 am - Test alert - for Deutschlan");
++
++    g_assert_cmpstr (mm_cbm_part_get_language (part), ==, "en");
+ }
+ 
+ static void
+@@ -194,6 +200,7 @@ test_cbm_nl_2023 (void)
+     g_assert_cmpstr (mm_cbm_part_get_text (part), ==,
+                      "NL-Alert 04-12-2023 12:00: TESTBERICHT. De overheid waarschuwt je tijdens noodsituaties via N");
+     mm_cbm_part_free (part);
++    g_assert_null (mm_cbm_part_get_language (part));
+ 
+     parse_cbm ("\r\n+CBM: 88\r\n46A011130523CC56905D96D35D206519C42E97E7741039EC06DDC37490BA0C6ABFCB7410F95D7683CA6ED03D1C9683D46550BB5C9683D26EF35BDE0ED3D365D03AEC06D9D36E72D9ED02A9542A10B538A5829AC5E9347804\r\n", &part);
+     serial = mm_cbm_part_get_serial (part);
+@@ -208,6 +215,7 @@ test_cbm_nl_2023 (void)
+     g_assert_cmpstr (mm_cbm_part_get_text (part), ==,
+                      "L-Alert. Je leest dan wat je moet doen en waar je meer informatie kan vinden. *** TEST MESSAG");
+     mm_cbm_part_free (part);
++    g_assert_null (mm_cbm_part_get_language (part));
+ 
+     parse_cbm ("\r\n+CBM: 65\r\n46A0111305334590B34C4797E5ECB09B3C071DDFF6B2DCDD2EBBE920685DCC4E8F41D7B0DC9D769F41D3FC9C5E6EBB40CE37283CA6A7DF6E90BC1CAFA7E565B2AB\r\n", &part);
+     serial = mm_cbm_part_get_serial (part);
+@@ -222,6 +230,7 @@ test_cbm_nl_2023 (void)
+     g_assert_cmpstr (mm_cbm_part_get_text (part), ==,
+                      "E Netherlands Government Public Warning System. No action required." );
+     mm_cbm_part_free (part);
++    g_assert_null (mm_cbm_part_get_language (part));
+ }
+ 
+ 

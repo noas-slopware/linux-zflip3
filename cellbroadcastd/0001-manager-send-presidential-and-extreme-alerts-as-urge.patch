@@ -1,0 +1,46 @@
+From 6f454652a55d7a544e0256780f3d29c41c6f2b44 Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Wed, 18 Nov 2026 13:45:32 +0900
+Subject: [PATCH] manager: send presidential and extreme alerts as urgent
+ notifications
+
+Every cell broadcast notification went out with the default priority, so a
+notification server in do-not-disturb mode kept a presidential or extreme
+alert to itself. Send those as urgent, which Plasma and GNOME show anyway,
+and severe, public safety and AMBER alerts as high.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01L5scTQJJDo2PTt6GBeDFah
+---
+ src/cbd-manager.c | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/src/cbd-manager.c b/src/cbd-manager.c
+index 779f757..c6381ed 100644
+--- a/src/cbd-manager.c
++++ b/src/cbd-manager.c
+@@ -451,6 +451,21 @@ send_notification (CbdManager *self, CbdMessage *msg)
+ 
+   noti = g_notification_new (title);
+   g_notification_set_category (noti, category);
++  /* Life-threatening alerts must reach the user even in do-not-disturb mode:
++   * notification servers show urgent notifications regardless (Plasma, GNOME). */
++  switch (severity) {
++  case LCB_SEVERITY_LEVEL_PRESIDENTIAL:
++  case LCB_SEVERITY_LEVEL_EXTREME:
++    g_notification_set_priority (noti, G_NOTIFICATION_PRIORITY_URGENT);
++    break;
++  case LCB_SEVERITY_LEVEL_SEVERE:
++  case LCB_SEVERITY_LEVEL_PUBLIC_SAFETY:
++  case LCB_SEVERITY_LEVEL_AMBER:
++    g_notification_set_priority (noti, G_NOTIFICATION_PRIORITY_HIGH);
++    break;
++  default:
++    break;
++  }
+ 
+   icon = g_themed_icon_new (severity_to_icon_name (severity));
+   g_notification_set_icon (noti, icon);
+-- 
+2.56.0
+

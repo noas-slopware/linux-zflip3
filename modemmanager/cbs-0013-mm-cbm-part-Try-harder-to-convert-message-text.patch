@@ -1,0 +1,85 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Guido=20G=C3=BCnther?= <agx@sigxcpu.org>
+Date: Wed, 4 Mar 2026 10:29:38 +0100
+Subject: [PATCH 13/14] mm-cbm-part: Try harder to convert message text
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Current cell broadcast messages from missile warnings in Israel
+have an addition `00` at the end to pad for an even byte number.
+
+This breaks conversion making the whole message fail conversion. As this
+is a 15 part message in 3 languages the whole notification is lost in
+this case.
+
+Try harder to convert the message and recover even partial bits.
+
+Closes: https://gitlab.freedesktop.org/mobile-broadband/ModemManager/-/issues/1042
+Signed-off-by: Guido Günther <agx@sigxcpu.org>
+(cherry picked from commit b59e0acb08d62d0efe33e2b41457ebcfd297ebb4)
+---
+ src/mm-cbm-part.c         |  4 ++++
+ src/tests/test-cbm-part.c | 27 +++++++++++++++++++++++++++
+ 2 files changed, 31 insertions(+)
+
+diff --git a/src/mm-cbm-part.c b/src/mm-cbm-part.c
+index 06abf851..4b8a779d 100644
+--- a/src/mm-cbm-part.c
++++ b/src/mm-cbm-part.c
+@@ -275,6 +275,10 @@ mm_cbm_part_new_from_binary_pdu (const guint8  *pdu,
+         break;
+     case MM_SMS_ENCODING_UCS2:
+         len = pdu_len - offset;
++        /* UCS2 must be even number of bytes but some messages
++         * eg from 'il' have trailing 00 */
++        if (len % 2)
++            len--;
+         break;
+     case MM_SMS_ENCODING_8BIT:
+     case MM_SMS_ENCODING_UNKNOWN:
+diff --git a/src/tests/test-cbm-part.c b/src/tests/test-cbm-part.c
+index 89fb4768..7bd74cc4 100644
+--- a/src/tests/test-cbm-part.c
++++ b/src/tests/test-cbm-part.c
+@@ -279,6 +279,31 @@ test_cbm_ucs2_with_7bit_lang (void)
+ }
+ 
+ 
++static void
++test_cbm_ucs2_pad (void)
++{
++    MMCbmPart *part;
++    guint16 serial;
++
++    /* The `00` at the end is additional padding tripping up the parser */
++    parse_cbm ("\r\n+CBM: 87\r\n5540111259FF0430043B044C043D0435043904480438044500200443043A043004370430043D04380439002E000D000D000D000D000D000D000D000D000D000D000D000D000D000D000D000D000D000D000D000D000D00\r\n", &part);
++
++    serial = mm_cbm_part_get_serial (part);
++    g_assert_cmpuint (CBM_SERIAL_GEO_SCOPE (serial), ==, MM_CBM_GEO_SCOPE_PLMN);
++    g_assert_false (CBM_SERIAL_MESSAGE_CODE_ALERT (serial));
++    g_assert_true (CBM_SERIAL_MESSAGE_CODE_POPUP (serial));
++    g_assert_cmpuint (CBM_SERIAL_MESSAGE_CODE (serial), ==, 84);
++    g_assert_cmpuint (CBM_SERIAL_MESSAGE_CODE_UPDATE (serial), ==, 0);
++    g_assert_cmpuint (mm_cbm_part_get_channel (part), ==, 4370);
++    g_assert_cmpuint (mm_cbm_part_get_num_parts (part), ==, 15);
++    g_assert_cmpuint (mm_cbm_part_get_part_num (part), ==, 15);
++
++    //g_warning ("'%s'", mm_cbm_part_get_text (part));
++    g_assert_cmpstr (mm_cbm_part_get_text (part), ==, "альнейших указаний.\r\r\r\r\r\r\r\r\r\r\r\r\r\r\r\r\r\r\r\r\r");
++    mm_cbm_part_free (part);
++}
++
++
+ int main (int argc, char **argv)
+ {
+     setlocale (LC_ALL, "");
+@@ -301,6 +326,8 @@ int main (int argc, char **argv)
+     g_test_add_func ("/MM/CBM/PDU-Parser/has-lang", test_cbm_gsm7bit_with_lang);
+     /* UCS2 encoding with 7bit language in first 2 bytes of the message */
+     g_test_add_func ("/MM/CBM/PDU-Parser/has-7bit-lang", test_cbm_ucs2_with_7bit_lang);
++    /* UCS2 message with additional padding: https://gitlab.freedesktop.org/mobile-broadband/ModemManager/-/issues/253#note_3355339 */
++    g_test_add_func ("/MM/CBM/PDU-Parser/UCS2/pad", test_cbm_ucs2_pad);
+ 
+     return g_test_run ();
+ }

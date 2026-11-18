@@ -1,0 +1,45 @@
+# Maintainer: Noa Himesaka <himesaka@noa.codes>
+# Arch's extra/mobile-broadband-provider-info 20261111-1 (Jan Alexander Steffens (heftig)) with
+# Korea's cell broadcast channels (0001, sent upstream): cellbroadcastd takes a country's channels
+# from here, and Korea had none, so no Korean emergency alert was ever turned on.
+# Contributor: Jan de Groot <jgc@archlinux.org>
+
+pkgname=mobile-broadband-provider-info
+pkgver=20261111
+pkgrel=2
+pkgdesc="APN configuration presets for mobile broadband connections"
+url="https://gitlab.gnome.org/GNOME/mobile-broadband-provider-info"
+arch=(any)
+license=(CC-PDDC)
+makedepends=(
+  git
+  libxslt
+  meson
+)
+source=("git+$url.git?signed#tag=$pkgver"
+        0001-Korea-cell-broadcast-channels.patch)
+b2sums=('5c856b17d814eae78136288878b1500b4a57937ba907adbfa503f251bb4636a3860356d55936f01ae65cdfd2a9c7f1ed8ebbd3b143700df361fa2d881f57fdb0'
+        '0d833b18d3ca44d08eb7b6b4b58903c046a08ba4045d6d9a05905837afc4d596f2acff70818b24a5015926fef058b26f18f3feea5bbf789dee64f622125737b3')
+validpgpkeys=(
+  0DB3932762F78E592F6522AFBB5A2C77584122D3 # Guido Günther <agx@sigxcpu.org>
+)
+
+prepare() {
+  cd $pkgname
+  git apply ../0001-Korea-cell-broadcast-channels.patch
+}
+
+build() {
+  arch-meson $pkgname build
+  meson compile -C build
+}
+
+check() {
+  meson test -C build --print-errorlogs
+}
+
+package() {
+  meson install -C build --destdir "$pkgdir"
+}
+
+# vim:set sw=2 sts=-1 et:

@@ -1,0 +1,44 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] tests: a Korean presidential alert (UCS-2, channel 4370)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01L5scTQJJDo2PTt6GBeDFah
+---
+
+diff --git a/src/tests/test-cbm-part.c b/src/tests/test-cbm-part.c
+--- a/src/tests/test-cbm-part.c
++++ b/src/tests/test-cbm-part.c
+@@ -352,6 +352,25 @@
+ }
+ 
+ 
++static void
++test_cbm_korean_presidential (void)
++{
++    g_autoptr(GError) err = NULL;
++    MMCbmPart *part;
++
++    /* A Korean Public Alert System presidential alert (위급재난문자): channel 4370,
++     * UCS-2 (DCS 0x48), one page */
++    static const guint8 pdu [] = { 0x40, 0x01, 0x11, 0x12, 0x48, 0x11, 0x00, 0x5b, 0xc7, 0x04, 0xae, 0x09, 0xc7, 0xac, 0xb0, 0x9c, 0xbb, 0x38, 0xc7, 0x90, 0x00, 0x5d, 0x00, 0x20, 0xc2, 0x18, 0xb2, 0xa5, 0x00, 0x20, 0xc2, 0xdc, 0xd5, 0xd8, 0x00, 0x20, 0xc5, 0x48, 0xb0, 0xb4, 0x00, 0x20, 0xc2, 0xdc, 0xd5, 0xd8, 0x00, 0x20, 0xbc, 0x1c, 0xc1, 0xa1, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
++
++    part = mm_cbm_part_new_from_binary_pdu (pdu, G_N_ELEMENTS (pdu), NULL, &err);
++    g_assert_no_error (err);
++    g_assert_nonnull (part);
++    g_assert_cmpuint (mm_cbm_part_get_channel (part), ==, 4370);
++    g_assert_cmpuint (mm_cbm_part_get_serial (part), ==, 0x4001);
++    g_assert_cmpstr (mm_cbm_part_get_text (part), ==, "[위급재난문자] 수능 시험 안내 시험 발송");
++    mm_cbm_part_free (part);
++}
++
+ int main (int argc, char **argv)
+ {
+     setlocale (LC_ALL, "");
+@@ -380,5 +399,7 @@
+     g_test_add_func ("/MM/CBM/PDU-Parser/8bit/error", test_cbm_unhandled_data_coding_group_general_charset_8bit);
+     g_test_add_func ("/MM/CBM/PDU-Parser/reserved/error", test_cbm_unhandled_data_coding_group_general_charset_reserved);
+ 
++    g_test_add_func ("/MM/CBM/PDU-Parser/korean-presidential", test_cbm_korean_presidential);
++
+     return g_test_run ();
+ }

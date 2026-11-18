@@ -1,0 +1,57 @@
+From fb841838b35a19eb142a74624d895d91c72e3bbe Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Wed, 18 Nov 2026 13:44:11 +0900
+Subject: [PATCH] Korea: cell broadcast channels
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The Korean Public Alert System's channels, as Android's CellBroadcastReceiver
+configures them for MCC 450 (res/values-mcc450/config.xml): 4370 (위급재난문자,
+presidential), 4371 (긴급재난문자, extreme), 4372-4378 (안전안내문자, public
+safety) and 4379 (AMBER), each with its English-language channel (4383, 4384,
+4385, 4392).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01L5scTQJJDo2PTt6GBeDFah
+---
+ serviceproviders.xml | 23 +++++++++++++++++++++++
+ 1 file changed, 23 insertions(+)
+
+diff --git a/serviceproviders.xml b/serviceproviders.xml
+index 15edccd..3cdec8f 100644
+--- a/serviceproviders.xml
++++ b/serviceproviders.xml
+@@ -8433,6 +8433,29 @@ conceived.
+ 
+ <country code="kr">
+ 	<name>Korea, Republic of</name>
++	<cbs>
++		<!-- Korean Public Alert System, as Android's CellBroadcastReceiver has it for MCC 450:
++		     each Korean-language channel with its English one (4383-4392) -->
++		<level type="presidential">
++			<!-- 위급재난문자 -->
++			<channels start="4370" end="4370" />
++			<channels start="4383" end="4383" />
++		</level>
++		<level type="extreme">
++			<!-- 긴급재난문자 -->
++			<channels start="4371" end="4371" />
++			<channels start="4384" end="4384" />
++		</level>
++		<level type="public-safety">
++			<!-- 안전안내문자 -->
++			<channels start="4372" end="4378" />
++			<channels start="4385" end="4385" />
++		</level>
++		<level type="amber">
++			<channels start="4379" end="4379" />
++			<channels start="4392" end="4392" />
++		</level>
++	</cbs>
+ 	<provider>
+ 		<name>KT</name>
+ 		<gsm>
+-- 
+2.56.0
+

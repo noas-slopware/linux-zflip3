@@ -1,0 +1,81 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Guido=20G=C3=BCnther?= <agx@sigxcpu.org>
+Date: Mon, 19 May 2025 23:18:15 +0200
+Subject: [PATCH 08/14] cbm-part: Use automatic cleanup
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Safer than freeing the the struct in multiple places
+
+Signed-off-by: Guido Günther <agx@sigxcpu.org>
+(cherry picked from commit cdc6bf9529c37bff7197b479d3caa986bb9fc36b)
+---
+ src/mm-cbm-part.c | 8 ++------
+ src/mm-cbm-part.h | 2 ++
+ 2 files changed, 4 insertions(+), 6 deletions(-)
+
+diff --git a/src/mm-cbm-part.c b/src/mm-cbm-part.c
+index 8ac92759..ef7a7807 100644
+--- a/src/mm-cbm-part.c
++++ b/src/mm-cbm-part.c
+@@ -74,7 +74,7 @@ mm_cbm_part_new_from_binary_pdu (const guint8  *pdu,
+                                  gpointer       log_object,
+                                  GError       **error)
+ {
+-    MMCbmPart *cbm_part;
++    g_autoptr (MMCbmPart) cbm_part = NULL;
+     MMCbmGeoScope scope;
+     guint offset = 0;
+     guint16 serial, group;
+@@ -94,7 +94,6 @@ mm_cbm_part_new_from_binary_pdu (const guint8  *pdu,
+                      check_descr_str,                                  \
+                      pdu_len,                                          \
+                      required_size);                                   \
+-        mm_cbm_part_free (cbm_part);                                   \
+         return NULL;                                                   \
+     }
+ 
+@@ -116,7 +115,6 @@ mm_cbm_part_new_from_binary_pdu (const guint8  *pdu,
+         mm_obj_dbg (log_object, "  immediate cell cbm scope");
+         break;
+     default:
+-        mm_cbm_part_free (cbm_part);
+         g_set_error (error,
+                      MM_CORE_ERROR,
+                      MM_CORE_ERROR_FAILED,
+@@ -155,7 +153,6 @@ mm_cbm_part_new_from_binary_pdu (const guint8  *pdu,
+         else if (charset == CBS_DATA_CODING_GENERAL_UCS2)
+             cbm_part->encoding = MM_SMS_ENCODING_UCS2;
+     } else {
+-        mm_cbm_part_free (cbm_part);
+         g_set_error (error,
+                      MM_CORE_ERROR,
+                      MM_CORE_ERROR_FAILED,
+@@ -190,12 +187,11 @@ mm_cbm_part_new_from_binary_pdu (const guint8  *pdu,
+                                log_object,
+                                error);
+     if (!text) {
+-        mm_cbm_part_free (cbm_part);
+         return NULL;
+     }
+     cbm_part->text = g_steal_pointer (&text);
+ 
+-    return cbm_part;
++    return g_steal_pointer (&cbm_part);
+ }
+ 
+ MMCbmPart *
+diff --git a/src/mm-cbm-part.h b/src/mm-cbm-part.h
+index f942ab0c..0cb9d108 100644
+--- a/src/mm-cbm-part.h
++++ b/src/mm-cbm-part.h
+@@ -59,6 +59,8 @@ MMCbmPart *mm_cbm_part_new_from_binary_pdu (const guint8  *pdu,
+ MMCbmPart  *mm_cbm_part_new (void);
+ void        mm_cbm_part_free (MMCbmPart *part);
+ 
++G_DEFINE_AUTOPTR_CLEANUP_FUNC (MMCbmPart, mm_cbm_part_free)
++
+ guint       mm_cbm_part_get_part_num (MMCbmPart *part);
+ guint       mm_cbm_part_get_num_parts (MMCbmPart *part);
+ const char *mm_cbm_part_get_text (MMCbmPart *part);

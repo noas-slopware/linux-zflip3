@@ -1,0 +1,46 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Guido=20G=C3=BCnther?= <agx@sigxcpu.org>
+Date: Tue, 20 May 2025 08:55:36 +0200
+Subject: [PATCH 11/14] base-cbm: Export the lang property on DBus
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Signed-off-by: Guido Günther <agx@sigxcpu.org>
+(cherry picked from commit 95d65ecd8dabcfb6c2432217c2393447b593a163)
+---
+ introspection/org.freedesktop.ModemManager1.Cbm.xml | 9 +++++++++
+ src/mm-base-cbm.c                                   | 1 +
+ 2 files changed, 10 insertions(+)
+
+diff --git a/introspection/org.freedesktop.ModemManager1.Cbm.xml b/introspection/org.freedesktop.ModemManager1.Cbm.xml
+index 107bbd77..4fdfd4d8 100644
+--- a/introspection/org.freedesktop.ModemManager1.Cbm.xml
++++ b/introspection/org.freedesktop.ModemManager1.Cbm.xml
+@@ -65,5 +65,14 @@
+     -->
+     <property name="Update" type="u" access="read" />
+ 
++    <!--
++        Language:
++
++        The language of the CBM as ISO639 two letter code
++
++        Since: 1.26
++    -->
++    <property name="Language" type="s" access="read" />
++
+   </interface>
+ </node>
+diff --git a/src/mm-base-cbm.c b/src/mm-base-cbm.c
+index 89571a48..675e4425 100644
+--- a/src/mm-base-cbm.c
++++ b/src/mm-base-cbm.c
+@@ -174,6 +174,7 @@ initialize_cbm (MMBaseCbm *self)
+                   "channel",              mm_cbm_part_get_channel (part),
+                   "update",               CBM_SERIAL_MESSAGE_CODE_UPDATE (serial),
+                   "message-code",         CBM_SERIAL_MESSAGE_CODE (serial),
++                  "language",             mm_cbm_part_get_language (part),
+                   NULL);
+ }
+ 
