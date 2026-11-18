@@ -1,0 +1,5 @@
+# Cell broadcast alerts (cellbroadcastd): Plasma shows them as desktop notifications, which
+# cellbroadcastd only sends when told to; and AMBER alerts too, which Korea sends.
+[org.freedesktop.cbd]
+send-notifications=true
+levels=['presidential', 'extreme', 'severe', 'public-safety', 'amber']
