@@ -4,7 +4,7 @@
 
 pkgname=cellbroadcastd
 pkgver=0.0.3
-pkgrel=3
+pkgrel=4
 pkgdesc='A Cell broadcast dameon'
 arch=(aarch64)
 url='https://gitlab.freedesktop.org/devrtz/cellbroadcastd'
@@ -16,6 +16,7 @@ depends=(
   glibc
   libgmobile
   libmm-glib
+  libpulse
   mobile-broadband-provider-info
 )
 makedepends=(
@@ -29,15 +30,19 @@ source=(
   "git+https://gitlab.freedesktop.org/devrtz/cellbroadcastd.git#tag=v$pkgver"
   git+https://gitlab.gnome.org/GNOME/gvdb.git
   0001-manager-send-presidential-and-extreme-alerts-as-urge.patch
+  # the alert tone: full volume for 4370/4383, half or more for 4371/4384, a chime otherwise
+  0002-manager-sound-the-alert-tone-at-full-volume-for-presidential.patch
 )
 b2sums=('56651fb96131283c01392b4edcaf6755fbce0ff913b0e34cd36d6aa8ce3bd072fe757ecc7a16256b324da993386a153c62fed785bbb3d10cc27ec1dd43bc5f1c'
         'SKIP'
-        'c11e586d1e18cd783dfb436b72f83cc2250968b64add2231af6814d1770720e635a4822a9e46121d912aa4e9cea5627cfb1f95ff0327777d0e0d7bd29eee9637')
+        'c11e586d1e18cd783dfb436b72f83cc2250968b64add2231af6814d1770720e635a4822a9e46121d912aa4e9cea5627cfb1f95ff0327777d0e0d7bd29eee9637'
+        '1c32ac13d5112a1dbc874936002377eed89d111dc2587ed158b4a4d9454aa18fd0697626a672fdf8700489a715fea78d1e07fc9fde5610b864acc2821fcd9d0b')
 
 prepare() {
   ln -s "$srcdir/gvdb" "$pkgname/subprojects/gvdb"
   meson subprojects checkout --sourcedir $pkgname
   git -C $pkgname apply ../0001-manager-send-presidential-and-extreme-alerts-as-urge.patch
+  git -C $pkgname apply ../0002-manager-sound-the-alert-tone-at-full-volume-for-presidential.patch
 }
 
 build() {

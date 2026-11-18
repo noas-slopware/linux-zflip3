@@ -13,7 +13,7 @@
 
 pkgname=modemmanager
 pkgver=1.24.2
-pkgrel=17
+pkgrel=18
 pkgdesc="Mobile broadband modem management service with IMSroha (userspace IMS) support"
 url="https://www.freedesktop.org/wiki/Software/ModemManager/"
 arch=(aarch64 x86_64)
@@ -44,7 +44,7 @@ makedepends=(
   meson
   systemd
 )
-_imsrohacommit=6b0bf8d620faba77e83dd7ca5423f47a0e01c6c0
+_imsrohacommit=6f8f9ffaea6e27b41580ab1bd76c4b55e52bb0e7
 source=(
   "git+https://gitlab.freedesktop.org/mobile-broadband/ModemManager.git#tag=${pkgver}"
   "imsroha-$_imsrohacommit.tar.gz::https://github.com/noas-slopware/imsroha/archive/$_imsrohacommit.tar.gz"
@@ -68,7 +68,7 @@ source=(
   cbs-0015-tests-a-Korean-presidential-alert-UCS-2-channel-4370.patch
 )
 sha256sums=('SKIP'
-            'd82aa4e5056224fe800ef4a1ddffd5cd3fc820cc309cd879873f46b413818942'
+            '65846cde8a785b2edd6d9178cfb9dd4337df837585e7de455daf10168e2818fa'
             '5d98c7c212d88e1fd2f2d819bcbd07227e1f041a470a5f01313eb7fb94c84603'
             'a4065e5c9296b66edb36dffe1ce7b133907a077d81752359c2e49306c20db796'
             '428382d5c8dc9c7cadc6e7ab027c136754995ca4addc5f0bfd32b1cc545fc515'

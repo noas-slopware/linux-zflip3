@@ -1,0 +1,820 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Thu, 19 Nov 2026 03:55:25 +0900
+Subject: [PATCH] manager: sound the alert tone, at full volume for
+ presidential alerts
+
+Notifications alone make no sound on every desktop: an alert on a muted
+phone was only a popup. Sound the EAS attention signal (853 Hz and 960 Hz
+together, which Korea's alerts use too) through the PulseAudio API, as
+the alert's channel asks:
+
+- alert-sound-full-channels (default 4370, 4383, presidential): on the
+  speakers at full volume, unmuted, and on every connected device
+  (Bluetooth, USB, headphones) at that device's own volume
+- alert-sound-raised-channels (default 4371, 4384): on the connected
+  devices only, at their own volume, when there are any; otherwise on the
+  speakers at half volume or the user's volume, whichever is higher
+- any other channel shown as a notification: a short chime on the
+  default output at the user's volume
+
+A connected device keeps its own volume, for the ears it is on. The
+speakers' volume and mute are put back when the tone is over, unless the
+user changed them meanwhile. With no speaker or connected device known,
+the tone goes to the default output rather than nowhere.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ data/org.freedesktop.cbd.gschema.xml |  23 ++
+ src/cbd-alert-sound.c                | 580 +++++++++++++++++++++++++++
+ src/cbd-alert-sound.h                |  51 +++
+ src/cbd-manager.c                    |  36 +-
+ src/meson.build                      |   7 +-
+ 5 files changed, 695 insertions(+), 2 deletions(-)
+ create mode 100644 src/cbd-alert-sound.c
+ create mode 100644 src/cbd-alert-sound.h
+
+diff --git a/data/org.freedesktop.cbd.gschema.xml b/data/org.freedesktop.cbd.gschema.xml
+index f56e7f6..fea2fee 100644
+--- a/data/org.freedesktop.cbd.gschema.xml
++++ b/data/org.freedesktop.cbd.gschema.xml
+@@ -25,6 +25,29 @@
+       </description>
+     </key>
+ 
++    <key name="alert-sound-full-channels" type="aq">
++      <default>[4370, 4383]</default>
++      <summary>Channels whose alerts sound at full volume</summary>
++      <description>
++        Alerts on these channels play the alert tone on the speakers at full
++        volume, unmuted, and on every connected device (Bluetooth, USB,
++        headphones) at that device's own volume. The defaults are the
++        presidential alert channels (3GPP TS 23.041).
++      </description>
++    </key>
++
++    <key name="alert-sound-raised-channels" type="aq">
++      <default>[4371, 4384]</default>
++      <summary>Channels whose alerts sound at half volume or more</summary>
++      <description>
++        Alerts on these channels play the alert tone on the connected devices
++        only, at their own volume, when there are any, and otherwise on the
++        speakers at half volume or the user's volume, whichever is higher.
++        Alerts on other channels play a short chime at the user's volume when
++        they are shown as notifications.
++      </description>
++    </key>
++
+     <key name="send-notifications-filter" flags="org.freedesktop.cbd.LcbSeverityLevel">
+       <default>[]</default>
+       <summary>Which notifications to send</summary>
+diff --git a/src/cbd-alert-sound.c b/src/cbd-alert-sound.c
+new file mode 100644
+index 0000000..9dc50d0
+--- /dev/null
++++ b/src/cbd-alert-sound.c
+@@ -0,0 +1,580 @@
++/*
++ * Copyright (C) 2026 Noa Himesaka
++ *
++ * SPDX-License-Identifier: GPL-3.0+
++ */
++
++#define G_LOG_DOMAIN "cbd-alert-sound"
++
++#include "cbd-alert-sound.h"
++
++#include <math.h>
++#include <string.h>
++#include <pulse/pulseaudio.h>
++#include <pulse/glib-mainloop.h>
++
++/*
++ * The alert tone is the EAS attention signal, which Korea's alerts use too:
++ * 853 Hz and 960 Hz together (47 CFR 11.31), held for the whole tone. The
++ * chime is two short bursts of it. Played through the PulseAudio API, which
++ * PipeWire serves too.
++ */
++#define RATE            48000
++#define TONE_MS_DEFAULT 10500
++#define CHIME_BURST_MS  250
++#define CHIME_CYCLE_MS  400
++#define CHIME_MS        650
++#define FADE_SAMPLES    (RATE / 100)
++
++typedef enum {
++  OUTPUT_OTHER,
++  OUTPUT_SPEAKER,
++  OUTPUT_CONNECTED,
++} OutputKind;
++
++typedef struct {
++  guint32    index;
++  char      *name;
++  OutputKind kind;
++  pa_cvolume volume;
++  int        mute;
++} Output;
++
++typedef struct {
++  guint32    index;
++  pa_cvolume saved;
++  int        saved_mute;
++  pa_cvolume set;
++} Raised;
++
++typedef struct _Play Play;
++
++typedef struct {
++  Play      *play;
++  pa_stream *stream;
++  gsize      pos;     /* samples written */
++  gboolean   done;
++} Tone;
++
++struct _Play {
++  CbdAlertSound      *self;
++  CbdAlertSoundLevel  level;
++  GArray             *outputs;  /* Output */
++  GArray             *raised;   /* Raised: speakers whose volume was raised */
++  GPtrArray          *tones;    /* Tone */
++  gsize               samples;
++  guint               chime : 1;
++  guint               started : 1;
++  guint               stopped : 1;
++  int                 pending;  /* volume and mute operations in flight */
++};
++
++struct _CbdAlertSound {
++  pa_glib_mainloop   *ml;
++  pa_context         *ctx;
++  gboolean            ready;
++  CbdAlertSoundLevel  queued;   /* asked for before the server was there */
++  Play               *current;
++  guint               tone_ms;
++  CbdAlertSoundHook   hook;
++  gpointer            hook_data;
++};
++
++
++static gint16
++tone_sample (Play *play, gsize n)
++{
++  gsize cycle = play->chime ? (gsize) RATE * CHIME_CYCLE_MS / 1000 : play->samples;
++  gsize burst = play->chime ? (gsize) RATE * CHIME_BURST_MS / 1000 : play->samples;
++  gsize in = n % cycle;
++  double t = (double) n / RATE, env;
++
++  if (in >= burst)
++    return 0;
++  env = 1.0;
++  if (in < FADE_SAMPLES)
++    env = (double) in / FADE_SAMPLES;
++  else if (burst - in < FADE_SAMPLES)
++    env = (double) (burst - in) / FADE_SAMPLES;
++
++  return (gint16) (32767.0 * env * (0.45 * sin (2 * G_PI * 853 * t) + 0.45 * sin (2 * G_PI * 960 * t)));
++}
++
++
++static OutputKind
++classify (const pa_sink_info *i)
++{
++  const char *api = pa_proplist_gets (i->proplist, "device.api");
++  const char *bus = pa_proplist_gets (i->proplist, "device.bus");
++  const char *ff = pa_proplist_gets (i->proplist, "device.form_factor");
++  guint32 type = i->active_port ? i->active_port->type : PA_DEVICE_PORT_TYPE_UNKNOWN;
++
++  /* virtual sinks (null, combine, loopbacks) have no device behind them */
++  if (!api)
++    return OUTPUT_OTHER;
++
++  if (g_strcmp0 (api, "bluez5") == 0 || g_strcmp0 (bus, "usb") == 0 || g_strcmp0 (bus, "bluetooth") == 0)
++    return OUTPUT_CONNECTED;
++  switch (type) {
++  case PA_DEVICE_PORT_TYPE_HEADPHONES:
++  case PA_DEVICE_PORT_TYPE_HEADSET:
++  case PA_DEVICE_PORT_TYPE_HANDSFREE:
++  case PA_DEVICE_PORT_TYPE_BLUETOOTH:
++  case PA_DEVICE_PORT_TYPE_USB:
++    return OUTPUT_CONNECTED;
++  case PA_DEVICE_PORT_TYPE_EARPIECE:
++  case PA_DEVICE_PORT_TYPE_HANDSET:
++    return OUTPUT_OTHER;
++  case PA_DEVICE_PORT_TYPE_SPEAKER:
++    return OUTPUT_SPEAKER;
++  default:
++    break;
++  }
++  if (g_strcmp0 (ff, "headphone") == 0 || g_strcmp0 (ff, "headset") == 0 || g_strcmp0 (ff, "hands-free") == 0)
++    return OUTPUT_CONNECTED;
++  if (g_strcmp0 (ff, "internal") == 0 || g_strcmp0 (ff, "speaker") == 0)
++    return OUTPUT_SPEAKER;
++
++  return OUTPUT_OTHER;
++}
++
++
++static void play_finish (Play *play);
++static void start_tones (Play *play);
++
++static void
++play_free (Play *play)
++{
++  for (guint i = 0; i < play->outputs->len; i++)
++    g_free (g_array_index (play->outputs, Output, i).name);
++  g_array_unref (play->outputs);
++  g_array_unref (play->raised);
++  g_ptr_array_unref (play->tones);
++  g_free (play);
++}
++
++
++static void
++op_done (pa_context *c, int success, void *user_data)
++{
++  Play *play = user_data;
++
++  if (!success)
++    g_warning ("Changing an output's volume failed: %s", pa_strerror (pa_context_errno (c)));
++  if (--play->pending == 0 && !play->started && !play->stopped)
++    start_tones (play);
++  else if (play->pending == 0 && play->stopped)
++    play_free (play);
++}
++
++
++/* PipeWire keeps volumes as floats: what comes back may be off by a step or two. */
++static gboolean
++volume_still (const pa_cvolume *now, const pa_cvolume *set)
++{
++  if (now->channels != set->channels)
++    return FALSE;
++  for (guint c = 0; c < now->channels; c++) {
++    pa_volume_t a = now->values[c], b = set->values[c];
++
++    if ((a > b ? a - b : b - a) > PA_VOLUME_NORM / 100)
++      return FALSE;
++  }
++  return TRUE;
++}
++
++
++static void
++restore_info (pa_context *c, const pa_sink_info *i, int eol, void *user_data)
++{
++  Play *play = user_data;
++
++  if (eol) {
++    if (--play->pending == 0)
++      play_free (play);
++    return;
++  }
++
++  for (guint k = 0; k < play->raised->len; k++) {
++    Raised *r = &g_array_index (play->raised, Raised, k);
++
++    if (r->index != i->index)
++      continue;
++    /* the user changed it while the tone played: theirs stays */
++    if (i->mute || !volume_still (&i->volume, &r->set)) {
++      g_debug ("Output %s changed during the alert, leaving it", i->name);
++      break;
++    }
++    play->pending += 2;
++    pa_operation_unref (pa_context_set_sink_volume_by_index (c, r->index, &r->saved, op_done, play));
++    pa_operation_unref (pa_context_set_sink_mute_by_index (c, r->index, r->saved_mute, op_done, play));
++    break;
++  }
++}
++
++
++/* Puts the raised speakers back and frees the play. */
++static void
++play_finish (Play *play)
++{
++  CbdAlertSound *self = play->self;
++
++  if (play->stopped)
++    return;
++  play->stopped = TRUE;
++
++  for (guint i = 0; i < play->tones->len; i++) {
++    Tone *t = g_ptr_array_index (play->tones, i);
++
++    if (t->stream) {
++      pa_stream_set_write_callback (t->stream, NULL, NULL);
++      pa_stream_set_state_callback (t->stream, NULL, NULL);
++      pa_stream_disconnect (t->stream);
++      pa_stream_unref (t->stream);
++      t->stream = NULL;
++    }
++  }
++
++  if (self->current == play)
++    self->current = NULL;
++  if (self->hook)
++    self->hook (self, FALSE, self->hook_data);
++
++  if (!play->raised->len || !self->ready) {
++    if (play->pending == 0)
++      play_free (play);
++    return;
++  }
++  for (guint k = 0; k < play->raised->len; k++) {
++    play->pending++;
++    pa_operation_unref (pa_context_get_sink_info_by_index (self->ctx,
++                                                           g_array_index (play->raised, Raised, k).index,
++                                                           restore_info, play));
++  }
++}
++
++
++static void
++tone_check_all_done (Play *play)
++{
++  for (guint i = 0; i < play->tones->len; i++) {
++    if (!((Tone *) g_ptr_array_index (play->tones, i))->done)
++      return;
++  }
++  play_finish (play);
++}
++
++
++static void
++tone_drained (pa_stream *s, int success, void *user_data)
++{
++  Tone *t = user_data;
++
++  t->done = TRUE;
++  tone_check_all_done (t->play);
++}
++
++
++static void
++tone_write (pa_stream *s, size_t nbytes, void *user_data)
++{
++  Tone *t = user_data;
++  Play *play = t->play;
++  gsize n = MIN (nbytes / sizeof (gint16), play->samples - t->pos);
++  gint16 *buf;
++
++  if (n == 0)
++    return;
++  buf = g_new (gint16, n);
++  for (gsize k = 0; k < n; k++)
++    buf[k] = tone_sample (play, t->pos + k);
++  pa_stream_write (s, buf, n * sizeof (gint16), g_free, 0, PA_SEEK_RELATIVE);
++  t->pos += n;
++  if (t->pos >= play->samples) {
++    pa_stream_set_write_callback (s, NULL, NULL);
++    pa_operation_unref (pa_stream_drain (s, tone_drained, t));
++  }
++}
++
++
++static void
++tone_state (pa_stream *s, void *user_data)
++{
++  Tone *t = user_data;
++  Play *play = t->play;
++
++  switch (pa_stream_get_state (s)) {
++  case PA_STREAM_READY:
++    if (!play->started) {
++      for (guint i = 0; i < play->tones->len; i++) {
++        Tone *o = g_ptr_array_index (play->tones, i);
++        if (!o->stream || pa_stream_get_state (o->stream) != PA_STREAM_READY)
++          return;
++      }
++      play->started = TRUE;
++      if (play->self->hook)
++        play->self->hook (play->self, TRUE, play->self->hook_data);
++    }
++    break;
++  case PA_STREAM_FAILED:
++    g_warning ("Alert tone stream failed: %s", pa_strerror (pa_context_errno (pa_stream_get_context (s))));
++    t->done = TRUE;
++    tone_check_all_done (play);
++    break;
++  default:
++    break;
++  }
++}
++
++
++static void
++add_tone (Play *play, const char *sink)
++{
++  CbdAlertSound *self = play->self;
++  pa_sample_spec ss = { .format = PA_SAMPLE_S16LE, .rate = RATE, .channels = 1 };
++  pa_proplist *pl = pa_proplist_new ();
++  pa_cvolume vol;
++  Tone *t = g_new0 (Tone, 1);
++
++  pa_proplist_sets (pl, PA_PROP_MEDIA_ROLE, "alarm");
++  pa_proplist_sets (pl, PA_PROP_MEDIA_NAME, play->chime ? "Cell broadcast" : "Emergency alert");
++  pa_proplist_sets (pl, PA_PROP_APPLICATION_ID, "org.freedesktop.cbd");
++  t->play = play;
++  t->stream = pa_stream_new_with_proplist (self->ctx, "Emergency alert", &ss, NULL, pl);
++  pa_proplist_free (pl);
++  g_ptr_array_add (play->tones, t);
++  if (!t->stream) {
++    g_warning ("Can't create the alert tone stream: %s", pa_strerror (pa_context_errno (self->ctx)));
++    t->done = TRUE;
++    return;
++  }
++  pa_stream_set_state_callback (t->stream, tone_state, t);
++  pa_stream_set_write_callback (t->stream, tone_write, t);
++  /* the stream at 100%: the output's own volume decides, or the raised one */
++  pa_cvolume_set (&vol, 1, PA_VOLUME_NORM);
++  if (pa_stream_connect_playback (t->stream, sink, NULL,
++                                  (sink ? PA_STREAM_DONT_MOVE : 0) | PA_STREAM_START_UNMUTED,
++                                  &vol, NULL) < 0) {
++    g_warning ("Can't play the alert tone on %s: %s", sink ? sink : "the default output",
++               pa_strerror (pa_context_errno (self->ctx)));
++    t->done = TRUE;
++  }
++}
++
++
++static void
++start_tones (Play *play)
++{
++  gboolean connected = FALSE;
++
++  for (guint i = 0; i < play->outputs->len; i++)
++    connected |= g_array_index (play->outputs, Output, i).kind == OUTPUT_CONNECTED;
++
++  if (play->chime) {
++    add_tone (play, NULL);
++  } else {
++    for (guint i = 0; i < play->outputs->len; i++) {
++      Output *o = &g_array_index (play->outputs, Output, i);
++
++      if (o->kind == OUTPUT_CONNECTED ||
++          (o->kind == OUTPUT_SPEAKER && (play->level == CBD_ALERT_SOUND_FULL || !connected)))
++        add_tone (play, o->name);
++    }
++  }
++  if (!play->tones->len) {
++    /* nothing known as a speaker or a connected device: never no tone at all */
++    g_warning ("No speaker or connected device found, the alert tone goes to the default output");
++    add_tone (play, NULL);
++  }
++  /* nothing could start */
++  tone_check_all_done (play);
++}
++
++
++/* What the speakers are raised to for this alert, if at all. */
++static gboolean
++raised_volume (Play *play, const Output *o, gboolean connected, pa_cvolume *out)
++{
++  *out = o->volume;
++  if (o->kind != OUTPUT_SPEAKER)
++    return FALSE;
++  if (play->level == CBD_ALERT_SOUND_FULL) {
++    pa_cvolume_set (out, o->volume.channels, PA_VOLUME_NORM);
++    return TRUE;
++  }
++  if (play->level == CBD_ALERT_SOUND_RAISED && !connected) {
++    for (guint c = 0; c < out->channels; c++) {
++      pa_volume_t v = o->mute ? PA_VOLUME_MUTED : o->volume.values[c];
++      out->values[c] = MAX (v, PA_VOLUME_NORM / 2);
++    }
++    return TRUE;
++  }
++  return FALSE;
++}
++
++
++static void
++outputs_listed (pa_context *c, const pa_sink_info *i, int eol, void *user_data)
++{
++  Play *play = user_data;
++  gboolean connected = FALSE;
++
++  if (eol)
++    play->pending--;	/* the listing itself */
++  if (play->stopped) {
++    if (eol && play->pending == 0)
++      play_free (play);
++    return;
++  }
++
++  if (!eol) {
++    Output o = {
++      .index = i->index,
++      .name = g_strdup (i->name),
++      .kind = classify (i),
++      .volume = i->volume,
++      .mute = i->mute,
++    };
++    g_debug ("Output %s: %s", i->name,
++             o.kind == OUTPUT_SPEAKER ? "speaker" : o.kind == OUTPUT_CONNECTED ? "connected" : "other");
++    g_array_append_val (play->outputs, o);
++    return;
++  }
++
++  if (play->chime) {
++    start_tones (play);
++    return;
++  }
++
++  for (guint k = 0; k < play->outputs->len; k++)
++    connected |= g_array_index (play->outputs, Output, k).kind == OUTPUT_CONNECTED;
++
++  for (guint k = 0; k < play->outputs->len; k++) {
++    Output *o = &g_array_index (play->outputs, Output, k);
++    Raised r = { .index = o->index, .saved = o->volume, .saved_mute = o->mute };
++
++    if (!raised_volume (play, o, connected, &r.set))
++      continue;
++    g_array_append_val (play->raised, r);
++    play->pending += 2;
++    pa_operation_unref (pa_context_set_sink_volume_by_index (c, o->index, &r.set, op_done, play));
++    pa_operation_unref (pa_context_set_sink_mute_by_index (c, o->index, 0, op_done, play));
++  }
++  if (!play->pending)
++    start_tones (play);
++}
++
++
++static void
++play_start (CbdAlertSound *self, CbdAlertSoundLevel level)
++{
++  Play *play = g_new0 (Play, 1);
++
++  if (self->current)
++    play_finish (self->current);
++
++  play->self = self;
++  play->level = level;
++  play->chime = level == CBD_ALERT_SOUND_NORMAL;
++  play->samples = (gsize) RATE * (play->chime ? CHIME_MS : self->tone_ms) / 1000;
++  play->outputs = g_array_new (FALSE, TRUE, sizeof (Output));
++  play->raised = g_array_new (FALSE, TRUE, sizeof (Raised));
++  play->tones = g_ptr_array_new_with_free_func (g_free);
++  self->current = play;
++
++  play->pending = 1;	/* the listing, until its end */
++  pa_operation_unref (pa_context_get_sink_info_list (self->ctx, outputs_listed, play));
++}
++
++
++static void
++context_state (pa_context *c, void *user_data)
++{
++  CbdAlertSound *self = user_data;
++
++  switch (pa_context_get_state (c)) {
++  case PA_CONTEXT_READY:
++    g_debug ("Connected to the sound server");
++    self->ready = TRUE;
++    if (self->queued != CBD_ALERT_SOUND_NONE) {
++      CbdAlertSoundLevel level = self->queued;
++
++      self->queued = CBD_ALERT_SOUND_NONE;
++      play_start (self, level);
++    }
++    break;
++  case PA_CONTEXT_FAILED:
++  case PA_CONTEXT_TERMINATED:
++    /* PA_CONTEXT_NOFAIL: it reconnects when the server is back */
++    self->ready = FALSE;
++    break;
++  default:
++    break;
++  }
++}
++
++
++CbdAlertSound *
++cbd_alert_sound_new (void)
++{
++  CbdAlertSound *self = g_new0 (CbdAlertSound, 1);
++  pa_proplist *pl = pa_proplist_new ();
++
++  self->tone_ms = TONE_MS_DEFAULT;
++  self->ml = pa_glib_mainloop_new (NULL);
++  pa_proplist_sets (pl, PA_PROP_APPLICATION_NAME, "Cell broadcast daemon");
++  pa_proplist_sets (pl, PA_PROP_APPLICATION_ID, "org.freedesktop.cbd");
++  self->ctx = pa_context_new_with_proplist (pa_glib_mainloop_get_api (self->ml), "cellbroadcastd", pl);
++  pa_proplist_free (pl);
++  pa_context_set_state_callback (self->ctx, context_state, self);
++  if (pa_context_connect (self->ctx, NULL, PA_CONTEXT_NOFAIL, NULL) < 0)
++    g_warning ("Can't connect to the sound server: %s", pa_strerror (pa_context_errno (self->ctx)));
++
++  return self;
++}
++
++
++void
++cbd_alert_sound_free (CbdAlertSound *self)
++{
++  if (!self)
++    return;
++  if (self->current)
++    play_finish (self->current);
++  pa_context_disconnect (self->ctx);
++  pa_context_unref (self->ctx);
++  pa_glib_mainloop_free (self->ml);
++  g_free (self);
++}
++
++
++void
++cbd_alert_sound_play (CbdAlertSound *self, CbdAlertSoundLevel level)
++{
++  g_return_if_fail (self);
++
++  if (level == CBD_ALERT_SOUND_NONE)
++    return;
++  if (!self->ready) {
++    g_message ("Sound server not there yet, the alert tone waits for it");
++    if (level > self->queued)
++      self->queued = level;
++    return;
++  }
++  play_start (self, level);
++}
++
++
++void
++cbd_alert_sound_set_hook (CbdAlertSound *self, CbdAlertSoundHook hook, gpointer user_data)
++{
++  self->hook = hook;
++  self->hook_data = user_data;
++}
++
++
++void
++cbd_alert_sound_set_tone_ms (CbdAlertSound *self, guint ms)
++{
++  self->tone_ms = ms;
++}
+diff --git a/src/cbd-alert-sound.h b/src/cbd-alert-sound.h
+new file mode 100644
+index 0000000..1d78c07
+--- /dev/null
++++ b/src/cbd-alert-sound.h
+@@ -0,0 +1,51 @@
++/*
++ * Copyright (C) 2026 Noa Himesaka
++ *
++ * SPDX-License-Identifier: GPL-3.0+
++ */
++
++#pragma once
++
++#include <glib.h>
++
++G_BEGIN_DECLS
++
++/*
++ * How an alert sounds, by its channel:
++ *
++ * FULL:   the alert tone on the phone's speakers at full volume, unmuted, and on
++ *         every connected device (Bluetooth, USB, headphones) at that device's
++ *         own volume.
++ * RAISED: the alert tone on the connected devices only, at their own volume,
++ *         when there are any; otherwise on the speakers at half volume or the
++ *         user's volume, whichever is higher, unmuted.
++ * NORMAL: a short chime on the default output at the user's volume (silent when
++ *         that is muted).
++ *
++ * A connected device always keeps its own volume, for the ears it is on. The
++ * speakers' volume and mute are put back when the tone is over, unless the user
++ * changed them meanwhile.
++ */
++typedef enum {
++  CBD_ALERT_SOUND_NONE,
++  CBD_ALERT_SOUND_NORMAL,
++  CBD_ALERT_SOUND_RAISED,
++  CBD_ALERT_SOUND_FULL,
++} CbdAlertSoundLevel;
++
++typedef struct _CbdAlertSound CbdAlertSound;
++
++CbdAlertSound *cbd_alert_sound_new  (void);
++void           cbd_alert_sound_free (CbdAlertSound *self);
++/* A new alert replaces one still playing. */
++void           cbd_alert_sound_play (CbdAlertSound *self, CbdAlertSoundLevel level);
++
++/* For tests: called when the tone has started on every output, and when it is over. */
++typedef void (*CbdAlertSoundHook) (CbdAlertSound *self, gboolean started, gpointer user_data);
++void           cbd_alert_sound_set_hook (CbdAlertSound *self, CbdAlertSoundHook hook, gpointer user_data);
++/* For tests: the length of the alert tone in ms (default 10500). */
++void           cbd_alert_sound_set_tone_ms (CbdAlertSound *self, guint ms);
++
++G_DEFINE_AUTOPTR_CLEANUP_FUNC (CbdAlertSound, cbd_alert_sound_free)
++
++G_END_DECLS
+diff --git a/src/cbd-manager.c b/src/cbd-manager.c
+index c6381ed..3fb4082 100644
+--- a/src/cbd-manager.c
++++ b/src/cbd-manager.c
+@@ -12,6 +12,7 @@
+ #include "cbd-channel-manager.h"
+ #include "cbd-mm-manager.h"
+ #include "cbd-message.h"
++#include "cbd-alert-sound.h"
+ #include "lcb-util-priv.h"
+ 
+ #include <errno.h>
+@@ -31,6 +32,7 @@ typedef struct _CbdManager {
+ 
+   GSettings            *settings;
+   char                 *db_path;
++  CbdAlertSound        *alert_sound;
+ } CbdManager;
+ 
+ 
+@@ -432,6 +434,34 @@ check_send_notification (CbdManager *self, CbdMessage *msg)
+ }
+ 
+ 
++static gboolean
++channel_in (GSettings *settings, const char *key, guint channel)
++{
++  g_autoptr (GVariant) v = g_settings_get_value (settings, key);
++  gsize n = 0;
++  const guint16 *ch = g_variant_get_fixed_array (v, &n, sizeof (guint16));
++
++  for (gsize i = 0; i < n; i++) {
++    if (ch[i] == channel)
++      return TRUE;
++  }
++  return FALSE;
++}
++
++/* The alert tone for these channels sounds whether or not notifications are sent. */
++static CbdAlertSoundLevel
++alert_sound_level (CbdManager *self, CbdMessage *msg, guint channel)
++{
++  if (channel_in (self->settings, "alert-sound-full-channels", channel))
++    return CBD_ALERT_SOUND_FULL;
++  if (channel_in (self->settings, "alert-sound-raised-channels", channel))
++    return CBD_ALERT_SOUND_RAISED;
++  if (check_send_notification (self, msg))
++    return CBD_ALERT_SOUND_NORMAL;
++  return CBD_ALERT_SOUND_NONE;
++}
++
++
+ static void
+ send_notification (CbdManager *self, CbdMessage *msg)
+ {
+@@ -511,8 +541,10 @@ on_new_cbm (CbdMmManager *mm_manager,
+                          operator_code);
+   recent = cbd_manager_add_message (self, msg);
+ 
+-  if (recent)
++  if (recent) {
++    cbd_alert_sound_play (self->alert_sound, alert_sound_level (self, msg, channel));
+     send_notification (self, msg);
++  }
+ }
+ 
+ static void
+@@ -526,6 +558,7 @@ cbd_manager_dispose (GObject *object)
+   g_clear_object (&self->cancellable);
+   g_clear_object (&self->mm_manager);
+   g_clear_object (&self->settings);
++  g_clear_pointer (&self->alert_sound, cbd_alert_sound_free);
+ 
+   G_OBJECT_CLASS (cbd_manager_parent_class)->dispose (object);
+ }
+@@ -545,6 +578,7 @@ cbd_manager_init (CbdManager *self)
+   int err;
+ 
+   self->settings = g_settings_new ("org.freedesktop.cbd");
++  self->alert_sound = cbd_alert_sound_new ();
+   self->messages = g_list_store_new (CBD_TYPE_MESSAGE);
+   self->mm_manager = cbd_mm_manager_new ();
+   g_signal_connect (self->mm_manager,
+diff --git a/src/meson.build b/src/meson.build
+index 09904da..6fc15bb 100644
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -12,9 +12,14 @@ sources = [
+   'cbd-mm-manager.c',
+   'cbd-channel-manager.c',
+   'cbd-service-providers.c',
++  'cbd-alert-sound.c',
+ ]
+ 
+-cbd_deps = [gio, gio_unix, glib, gmobile, mm_glib, libcellbroadcast_static_dep]
++libpulse = dependency('libpulse')
++libpulse_glib = dependency('libpulse-mainloop-glib')
++libm = meson.get_compiler('c').find_library('m', required: false)
++
++cbd_deps = [gio, gio_unix, glib, gmobile, mm_glib, libcellbroadcast_static_dep, libpulse, libpulse_glib, libm]
+ 
+ cbd_inc = [cbd_root_inc, include_directories('.'), libcellbroadcast_inc, dbus_inc]
+ 
+-- 
+2.56.0
+

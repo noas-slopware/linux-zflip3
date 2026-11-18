@@ -10,7 +10,7 @@
 
 pkgname=imsroha
 pkgver=0.2.0
-pkgrel=20
+pkgrel=28
 pkgdesc="Userspace IMS: VoLTE calls and SMS over IMS on Qualcomm QMI modems, behind ModemManager"
 arch=('aarch64' 'x86_64')
 url="https://github.com/noas-slopware/imsroha"
@@ -23,9 +23,9 @@ optdepends=('modemmanager: with the IMSroha backend from modemmanager/, for dial
             'pipewire-alsa: call audio in the user session')
 backup=('etc/imsroha/imsroha.conf')
 install=imsroha.install
-_imsrohacommit=6b0bf8d620faba77e83dd7ca5423f47a0e01c6c0
+_imsrohacommit=6f8f9ffaea6e27b41580ab1bd76c4b55e52bb0e7
 source=("imsroha-$_imsrohacommit.tar.gz::https://github.com/noas-slopware/imsroha/archive/$_imsrohacommit.tar.gz")
-sha256sums=('d82aa4e5056224fe800ef4a1ddffd5cd3fc820cc309cd879873f46b413818942')
+sha256sums=('65846cde8a785b2edd6d9178cfb9dd4337df837585e7de455daf10168e2818fa')
 
 _src=imsroha-$_imsrohacommit
 
