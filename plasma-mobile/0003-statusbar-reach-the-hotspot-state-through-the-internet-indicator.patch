@@ -1,0 +1,26 @@
+From: Noa Himesaka <himesaka@noa.codes>
+Subject: [PATCH] statusbar: reach the hotspot state through the internet indicator
+
+SignalStrengthIndicator asks wirelessStatus.hotspotSSID whether the
+internet indicator's mobile data icon stands in for it, but wirelessStatus
+is an id inside InternetIndicator.qml and does not exist here. On mobile
+data the binding throws ("ReferenceError: wirelessStatus is not
+defined"), visible keeps its default, and the status bar shows the
+signal strength icon next to the internet indicator's mobile data icon:
+two antennas. Use the internet indicator's wirelessStatus property.
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+diff --color -ru a/components/mobileshell/qml/statusbar/indicators/SignalStrengthIndicator.qml b/components/mobileshell/qml/statusbar/indicators/SignalStrengthIndicator.qml
+--- a/components/mobileshell/qml/statusbar/indicators/SignalStrengthIndicator.qml	2026-11-19 13:11:24.184230238 +0900
++++ b/components/mobileshell/qml/statusbar/indicators/SignalStrengthIndicator.qml	2026-11-19 13:11:24.193292829 +0900
+@@ -35,7 +35,7 @@
+         source: MobileShell.SignalStrengthInfo.icon
+ 
+         // don't show mobile indicator icon if the networkmanager one is already showing
+-        visible: (!isInternetIndicatorMobileData || wirelessStatus.hotspotSSID.length !== 0) && MobileShell.SignalStrengthInfo.showIndicator
++        visible: (!isInternetIndicatorMobileData || internetIndicator.wirelessStatus.hotspotSSID.length !== 0) && MobileShell.SignalStrengthInfo.showIndicator
+     }
+ 
+     PlasmaComponents.Label {
