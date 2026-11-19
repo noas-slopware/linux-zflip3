@@ -32,7 +32,7 @@ and keep libinput off the touchscreen. The daemon runs as the session user, not
 root. The autostart file starts it with the Plasma session.
 
 The cover sleeps by default: backlight 0 and connector DPMS Off after the
-modeset. It wakes for 8 seconds on a notification, an incoming call, an SMS
+modeset. It wakes for 8 seconds (30 for an emergency alert) on a notification, an incoming call, an SMS
 (`PduReceived`), the power key (the first input device advertising
 `KEY_POWER`, `pmic_pwrkey` on this phone) or a swipe on the cover touchscreen
 (a touch that moves 40 units or more). A tap never wakes it. A tap while awake
@@ -51,6 +51,30 @@ fold or unfold during a run is applied when it exits. A folded power-key press r
 off helper before waking the cover. PowerDevil's profiles use `LidAction=0`
 and `PowerButtonAction=32` (LockScreen); the mobile default
 `ToggleScreenOnOff` would wake the inside.
+
+## Emergency alerts
+
+A notification whose category is a cell broadcast one (cellbroadcastd's
+`x-phosh-cellbroadcast.<level>`, or `cellbroadcast.<level>`) takes the whole cover:
+red for presidential and extreme alerts (위급재난문자, 긴급재난문자), orange for severe and
+public safety ones (안전안내문자), yellow for AMBER (실종경보문자), grey for tests. The newest
+alert stays on the cover, over the clock and the cards, until a tap dismisses it or 10
+minutes pass, and it keeps the cover lit for 30 seconds instead of 8. Its sound is
+cellbroadcastd's, not kita's.
+
+## Power key
+
+Folded, the power key wakes the cover when it is dark and turns it off when it is lit.
+Turning it off releases kita's inhibition and then asks PowerDevil whether anything else
+holds the phone awake (`HasInhibit`: Caffeine, a call, playing media); if nothing does,
+it suspends (`org.freedesktop.PowerManagement.Suspend`). The cards stay for the next wake.
+
+## Tests
+
+`kita --no-display --dump frame.png --power-key FIFO` takes no lease and touches no
+backlight, DRM or main panel: it draws into memory and writes each frame to the PNG, and
+reads `struct input_event`s from the FIFO. With fake logind and PowerDevil on private
+buses this runs the alert screen and the power key logic on any machine.
 
 ## Keeping the phone awake
 

@@ -46,6 +46,9 @@
 #define MAX_NOTIFICATIONS 3
 #define NOTIFICATION_LIFETIME 90
 #define WAKE_SECONDS 8
+/* An emergency alert keeps the cover lit longer and stays longer. */
+#define EMERGENCY_WAKE_SECONDS 30
+#define EMERGENCY_LIFETIME 600
 
 /* Why kita holds its org.freedesktop.PowerManagement inhibition. */
 #define INHIBIT_COVER (1u << 0) /* the cover is lit */
@@ -54,6 +57,21 @@
 #define PM_NAME "org.freedesktop.PowerManagement"
 #define PM_INHIBIT_PATH "/org/freedesktop/PowerManagement/Inhibit"
 #define PM_INHIBIT_IFACE "org.freedesktop.PowerManagement.Inhibit"
+#define PM_PATH "/org/freedesktop/PowerManagement"
+#define PM_IFACE "org.freedesktop.PowerManagement"
+
+/*
+ * Cell broadcast alerts, by the notification's category hint: cellbroadcastd
+ * sends x-phosh-cellbroadcast.<level> (the cellbroadcast.* categories proposed
+ * for the xdg spec are taken too).
+ */
+enum emergency {
+	EMERGENCY_NONE = 0,
+	EMERGENCY_EXTREME,	/* presidential and extreme alerts */
+	EMERGENCY_SEVERE,	/* severe, public safety */
+	EMERGENCY_AMBER,
+	EMERGENCY_TEST,
+};
 
 #define MM_NAME "org.freedesktop.ModemManager1"
 #define MM_PATH "/org/freedesktop/ModemManager1"
@@ -70,6 +88,7 @@ struct notification {
 	char *app;
 	char *summary;
 	char *body;
+	int emergency;		/* enum emergency */
 	double top;
 	double height;
 };
@@ -176,6 +195,11 @@ struct daemon {
 	guint mm_sub_call;
 
 	char *dump_path;
+
+	/* --no-display: no lease, no backlight, frames only to --dump (tests) */
+	gboolean no_display;
+	/* the power key turned the cover off: suspend once nothing holds the phone */
+	gboolean suspend_requested;
 };
 
 static void draw_ui(struct daemon *d);
@@ -255,6 +279,27 @@ static void free_notification(struct notification *n)
 	g_free(n->body);
 }
 
+static gint64 notification_lifetime(const struct notification *n)
+{
+	return (n->emergency ? EMERGENCY_LIFETIME : NOTIFICATION_LIFETIME) *
+	       G_TIME_SPAN_SECOND;
+}
+
+/* The newest emergency alert still shown, or NULL. */
+static struct notification *current_emergency(struct daemon *d)
+{
+	guint i;
+
+	for (i = 0; i < d->notifications->len; i++) {
+		struct notification *n = &g_array_index(d->notifications,
+							struct notification, i);
+
+		if (n->emergency)
+			return n;
+	}
+	return NULL;
+}
+
 static void prune_notifications(struct daemon *d)
 {
 	gint64 now = g_get_monotonic_time();
@@ -264,7 +309,7 @@ static void prune_notifications(struct daemon *d)
 		struct notification *n = &g_array_index(d->notifications,
 							struct notification, i);
 
-		if (now - n->created >= NOTIFICATION_LIFETIME * G_TIME_SPAN_SECOND) {
+		if (now - n->created >= notification_lifetime(n)) {
 			free_notification(n);
 			g_array_remove_index(d->notifications, i);
 		} else {
@@ -329,8 +374,7 @@ static void arm_awake_timers(struct daemon *d)
 	for (i = 0; i < d->notifications->len; i++) {
 		struct notification *n = &g_array_index(d->notifications,
 							struct notification, i);
-		gint64 expires = n->created +
-				 NOTIFICATION_LIFETIME * G_TIME_SPAN_SECOND;
+		gint64 expires = n->created + notification_lifetime(n);
 
 		if (expires < earliest)
 			earliest = expires;
@@ -417,6 +461,50 @@ static void draw_notification(cairo_t *cr, struct notification *n, double *y)
 	}
 }
 
+/*
+ * An emergency alert takes the whole cover: red for presidential and extreme
+ * alerts, orange for severe and public safety ones, yellow for AMBER, grey
+ * for tests. A tap anywhere dismisses it.
+ */
+static void draw_emergency(cairo_t *cr, struct daemon *d, struct notification *n)
+{
+	const double pad = 16;
+	double r = 0.72, g = 0.11, b = 0.11, fr = 1, fg = 1, fb = 1;
+	int title_h;
+
+	switch (n->emergency) {
+	case EMERGENCY_SEVERE:
+		r = 0.85; g = 0.38; b = 0.02;
+		break;
+	case EMERGENCY_AMBER:
+		r = 0.98; g = 0.75; b = 0.14;
+		fr = fg = fb = 0.08;
+		break;
+	case EMERGENCY_TEST:
+		r = g = b = 0.25;
+		break;
+	default:
+		break;
+	}
+	cairo_set_source_rgb(cr, r, g, b);
+	cairo_paint(cr);
+
+	draw_text(cr, d->clock_text, "Sans 11", pad, 12, 512 - 2 * pad,
+		  PANGO_ALIGN_RIGHT, fr, fg, fb, 0.85, FALSE, 0);
+	title_h = draw_text(cr, n->summary && n->summary[0] ? n->summary :
+			    "Emergency alert", "Sans Bold 15", pad, 12,
+			    512 - 2 * pad - 60, PANGO_ALIGN_LEFT, fr, fg, fb, 1,
+			    TRUE, 24);
+	draw_text(cr, n->body, "Sans 12", pad, 12 + title_h + 8, 512 - 2 * pad,
+		  PANGO_ALIGN_LEFT, fr, fg, fb, 1, TRUE,
+		  260 - (12 + title_h + 8) - 30);
+	draw_text(cr, "Tap to dismiss", "Sans 8", pad, 260 - 22, 512 - 2 * pad,
+		  PANGO_ALIGN_CENTER, fr, fg, fb, 0.7, FALSE, 0);
+
+	n->top = 0;
+	n->height = 260;
+}
+
 static void draw_ui(struct daemon *d)
 {
 	cairo_surface_t *logical;
@@ -439,7 +527,14 @@ static void draw_ui(struct daemon *d)
 	cairo_set_source_rgb(cr, 0, 0, 0);
 	cairo_paint(cr);
 
-	if (d->call_active) {
+	for (i = 0; i < d->notifications->len; i++) {
+		/* only cards drawn this frame take taps */
+		g_array_index(d->notifications, struct notification, i).height = 0;
+	}
+
+	if (!d->call_active && current_emergency(d)) {
+		draw_emergency(cr, d, current_emergency(d));
+	} else if (d->call_active) {
 		draw_call_banner(cr, d, &y);
 		clock_h = draw_text(cr, d->clock_text, "Sans 44", 22, y, 260,
 				    PANGO_ALIGN_LEFT, 1, 1, 1, 1, FALSE, 0);
@@ -500,6 +595,11 @@ static void set_backlight(struct daemon *d, int value)
 	int fd, len;
 	ssize_t wr;
 
+	if (d->no_display) {
+		g_message("backlight %d: (no display)", value);
+		d->backlight = value;
+		return;
+	}
 	fd = open(BACKLIGHT_PATH, O_WRONLY);
 	if (fd < 0) {
 		g_message("backlight %d: %s", value, strerror(errno));
@@ -565,7 +665,7 @@ static void handle_tap(struct daemon *d, int x, int y)
 	if (!d->awake)
 		return;
 
-	if (!d->call_active && x >= 280) {
+	if (!d->call_active && (x >= 280 || current_emergency(d))) {
 		for (i = 0; i < d->notifications->len; i++) {
 			struct notification *n = &g_array_index(d->notifications,
 						struct notification, i);
@@ -655,6 +755,7 @@ static void setup_touch(struct daemon *d)
 }
 
 static void update_inhibit(struct daemon *d);
+static void maybe_suspend(struct daemon *d);
 
 struct inhibit_request {
 	struct daemon *d;
@@ -685,6 +786,7 @@ static void inhibit_reply(GObject *source, GAsyncResult *res,
 		/* Not retried here: the next change of reason tries again. */
 		g_message("inhibit: %s", err->message);
 		g_error_free(err);
+		maybe_suspend(d);
 		return;
 	}
 	if (g_variant_is_of_type(ret, G_VARIANT_TYPE("(u)")) ||
@@ -700,6 +802,7 @@ static void inhibit_reply(GObject *source, GAsyncResult *res,
 	}
 	/* The reasons may have gone while the call was in flight. */
 	update_inhibit(d);
+	maybe_suspend(d);
 }
 
 static void update_inhibit(struct daemon *d)
@@ -739,6 +842,72 @@ static void update_inhibit(struct daemon *d)
 		d->inhibit_held = FALSE;
 		g_message("inhibit: released");
 	}
+}
+
+/*
+ * After the power key turned the cover off: suspend, as the power key does
+ * with the screen on, unless something holds the phone awake (Caffeine, a
+ * call, playing media: any PowerManagement inhibition). Asked once kita's
+ * own inhibition is gone; the bus keeps UnInhibit before HasInhibit.
+ */
+static void suspend_reply(GObject *source, GAsyncResult *res, gpointer user_data)
+{
+	GError *err = NULL;
+	GVariant *ret = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source),
+						      res, &err);
+
+	(void)user_data;
+	if (ret) {
+		g_variant_unref(ret);
+	} else {
+		g_message("power key: suspend: %s", err->message);
+		g_error_free(err);
+	}
+}
+
+static void has_inhibit_reply(GObject *source, GAsyncResult *res,
+			      gpointer user_data)
+{
+	struct daemon *d = user_data;
+	GError *err = NULL;
+	GVariant *ret = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source),
+						      res, &err);
+	gboolean held = TRUE;
+
+	if (!ret) {
+		g_message("power key: HasInhibit: %s", err->message);
+		g_error_free(err);
+		return;
+	}
+	g_variant_get(ret, "(b)", &held);
+	g_variant_unref(ret);
+	if (d->awake) {
+		g_message("power key: the cover woke again, not suspending");
+		return;
+	}
+	if (held) {
+		g_message("power key: something holds the phone awake, not suspending");
+		return;
+	}
+	g_message("power key: nothing holds the phone awake, suspending");
+	g_dbus_connection_call(d->session_bus, PM_NAME, PM_PATH, PM_IFACE,
+			       "Suspend", NULL, NULL, G_DBUS_CALL_FLAGS_NONE,
+			       -1, NULL, suspend_reply, d);
+}
+
+static void maybe_suspend(struct daemon *d)
+{
+	if (!d->suspend_requested || d->inhibit_in_flight)
+		return;
+	d->suspend_requested = FALSE;
+	if (!d->session_bus || !d->pm_present) {
+		g_message("power key: no PowerManagement, not suspending");
+		return;
+	}
+	g_dbus_connection_call(d->session_bus, PM_NAME, PM_INHIBIT_PATH,
+			       PM_INHIBIT_IFACE, "HasInhibit", NULL,
+			       G_VARIANT_TYPE("(b)"), G_DBUS_CALL_FLAGS_NONE,
+			       -1, NULL, has_inhibit_reply, d);
 }
 
 static void set_inhibit_reason(struct daemon *d, guint reason, gboolean on)
@@ -826,7 +995,9 @@ static void wake_display(struct daemon *d)
 	set_backlight(d, BACKLIGHT_ON);
 	draw_ui(d);
 	if (!d->call_active)
-		d->sleep_source = g_timeout_add_seconds(WAKE_SECONDS,
+		d->sleep_source = g_timeout_add_seconds(current_emergency(d) ?
+							EMERGENCY_WAKE_SECONDS :
+							WAKE_SECONDS,
 							sleep_display_cb, d);
 }
 
@@ -878,6 +1049,11 @@ static void spawn_main_dpms(struct daemon *d, gboolean on)
  */
 static void set_main_dpms(struct daemon *d, gboolean on)
 {
+	if (d->no_display) {
+		/* tests: never touch the screens of the machine running them */
+		g_message("main panel DPMS %s: (no display)", on ? "on" : "off");
+		return;
+	}
 	if (d->dpms_child) {
 		d->dpms_pending = TRUE;
 		d->dpms_pending_state = on;
@@ -949,7 +1125,8 @@ static void setup_logind(struct daemon *d)
 }
 
 static void add_notification(struct daemon *d, guint32 id, const char *app,
-			     const char *summary, const char *body)
+			     const char *summary, const char *body,
+			     int emergency)
 {
 	struct notification n;
 	guint i;
@@ -973,16 +1150,28 @@ static void add_notification(struct daemon *d, guint32 id, const char *app,
 	n.app = g_strdup(app ? app : "");
 	n.summary = g_strdup(summary ? summary : "");
 	n.body = g_strdup(body ? body : "");
+	n.emergency = emergency;
+	n.top = 0;
+	n.height = 0;
+	if (emergency)
+		g_message("emergency alert %u (level %d)", id, emergency);
 	g_array_prepend_val(d->notifications, n);
 
 	while (d->notifications->len > MAX_NOTIFICATIONS) {
-		struct notification *old = &g_array_index(d->notifications,
-							 struct notification,
-							 d->notifications->len - 1);
+		/* the oldest card goes, an emergency alert only if nothing else is left */
+		guint drop = d->notifications->len - 1;
+		guint k;
 
-		free_notification(old);
-		g_array_remove_index(d->notifications,
-				     d->notifications->len - 1);
+		for (k = d->notifications->len; k-- > 0;) {
+			if (!g_array_index(d->notifications, struct notification,
+					   k).emergency) {
+				drop = k;
+				break;
+			}
+		}
+		free_notification(&g_array_index(d->notifications,
+						 struct notification, drop));
+		g_array_remove_index(d->notifications, drop);
 	}
 
 	wake_display(d);
@@ -1002,6 +1191,7 @@ struct pending_notification {
 	char *app;
 	char *summary;
 	char *body;
+	int emergency;
 };
 
 static void pending_notification_free(gpointer data)
@@ -1018,7 +1208,8 @@ static gboolean deliver_notification(gpointer data)
 {
 	struct pending_notification *p = data;
 
-	add_notification(p->d, p->id, p->app, p->summary, p->body);
+	add_notification(p->d, p->id, p->app, p->summary, p->body,
+			 p->emergency);
 	return G_SOURCE_REMOVE;
 }
 
@@ -1031,6 +1222,40 @@ static char *child_string(GVariant *body, gsize index)
 		s = g_variant_dup_string(v, NULL);
 	g_variant_unref(v);
 	return s;
+}
+
+/* The emergency level from the hints (child 7, a{sv}): see enum emergency. */
+static int emergency_from_hints(GVariant *body)
+{
+	GVariant *hints;
+	const char *category = NULL;
+	const char *level;
+	int ret = EMERGENCY_NONE;
+
+	if (g_variant_n_children(body) < 8)
+		return EMERGENCY_NONE;
+	hints = g_variant_get_child_value(body, 7);
+	if (g_variant_is_of_type(hints, G_VARIANT_TYPE_VARDICT) &&
+	    g_variant_lookup(hints, "category", "&s", &category)) {
+		if (g_str_has_prefix(category, "x-phosh-cellbroadcast."))
+			level = category + strlen("x-phosh-cellbroadcast.");
+		else if (g_str_has_prefix(category, "cellbroadcast."))
+			level = category + strlen("cellbroadcast.");
+		else
+			level = NULL;
+		if (!level)
+			ret = EMERGENCY_NONE;
+		else if (!strcmp(level, "extreme") || !strcmp(level, "presidential"))
+			ret = EMERGENCY_EXTREME;
+		else if (!strcmp(level, "amber-alert") || !strcmp(level, "amber"))
+			ret = EMERGENCY_AMBER;
+		else if (!strcmp(level, "test"))
+			ret = EMERGENCY_TEST;
+		else
+			ret = EMERGENCY_SEVERE;
+	}
+	g_variant_unref(hints);
+	return ret;
 }
 
 static GDBusMessage *monitor_filter(GDBusConnection *connection,
@@ -1062,6 +1287,7 @@ static GDBusMessage *monitor_filter(GDBusConnection *connection,
 				p->app = child_string(body, 1);
 				p->summary = child_string(body, 4);
 				p->body = child_string(body, 5);
+				p->emergency = emergency_from_hints(body);
 				g_idle_add_full(G_PRIORITY_DEFAULT,
 						deliver_notification, p,
 						pending_notification_free);
@@ -2012,6 +2238,23 @@ static void cleanup(struct daemon *d)
 	g_free(d);
 }
 
+/*
+ * The power key while the cover is lit: it goes dark at once, and the phone
+ * sleeps unless something holds it awake. Notifications stay for the next
+ * wake.
+ */
+static void power_off_cover(struct daemon *d)
+{
+	g_message("power key: cover off");
+	if (d->sleep_source) {
+		g_source_remove(d->sleep_source);
+		d->sleep_source = 0;
+	}
+	d->suspend_requested = TRUE;
+	sleep_display_cb(d);
+	maybe_suspend(d);
+}
+
 static gboolean power_key_event(gint fd, GIOCondition condition,
 				gpointer user_data)
 {
@@ -2022,9 +2265,12 @@ static gboolean power_key_event(gint fd, GIOCondition condition,
 	while ((n = read(fd, &ev, sizeof(ev))) == sizeof(ev)) {
 		if (ev.type == EV_KEY && ev.code == KEY_POWER && ev.value == 1 &&
 		    d->folded) {
-			/* Keep the inside off; only the cover wakes. */
+			/* Keep the inside off; only the cover wakes or sleeps. */
 			set_main_dpms(d, FALSE);
-			wake_display(d);
+			if (d->awake)
+				power_off_cover(d);
+			else
+				wake_display(d);
 		}
 	}
 	if ((condition & (G_IO_HUP | G_IO_ERR | G_IO_NVAL)) ||
@@ -2038,10 +2284,24 @@ static gboolean power_key_event(gint fd, GIOCondition condition,
 	return G_SOURCE_CONTINUE;
 }
 
-static void setup_power_key(struct daemon *d)
+static void setup_power_key(struct daemon *d, const char *path)
 {
 	GDir *dir;
 	const char *name;
+
+	if (path) {
+		/* --power-key: an evdev node or a FIFO of struct input_event (tests) */
+		d->power_fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+		if (d->power_fd < 0) {
+			g_message("power key %s: %s", path, strerror(errno));
+			return;
+		}
+		d->power_source = g_unix_fd_add(d->power_fd,
+						G_IO_IN | G_IO_HUP | G_IO_ERR,
+						power_key_event, d);
+		g_message("power key on %s", path);
+		return;
+	}
 
 	dir = g_dir_open("/dev/input", 0, NULL);
 	if (!dir)
@@ -2075,9 +2335,15 @@ int main(int argc, char **argv)
 {
 	struct daemon *d;
 	const char *dump = NULL;
+	const char *power_key = NULL;
+	gboolean no_display = FALSE;
 	GOptionEntry options[] = {
 		{ "dump", 'd', 0, G_OPTION_ARG_FILENAME, &dump,
 		  "write each rendered frame to PATH (debug)", "PATH" },
+		{ "no-display", 0, 0, G_OPTION_ARG_NONE, &no_display,
+		  "no Wayland lease, backlight or DRM: draw only to --dump (tests)", NULL },
+		{ "power-key", 0, 0, G_OPTION_ARG_FILENAME, &power_key,
+		  "read the power key from PATH instead of finding it (tests)", "PATH" },
 		{ NULL }
 	};
 	GError *err = NULL;
@@ -2104,25 +2370,35 @@ int main(int argc, char **argv)
 	d->mm_calls = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
 					    NULL);
 
-	d->wl = wl_display_connect(NULL);
-	if (!d->wl) {
-		g_printerr("cannot connect to Wayland\n");
-		return 1;
-	}
-	d->registry = wl_display_get_registry(d->wl);
-	wl_registry_add_listener(d->registry, &registry_listener, d);
-	wl_display_roundtrip(d->wl);
-	/* Flush the lease-device bind and collect the initial connectors. */
-	wl_display_roundtrip(d->wl);
+	d->no_display = no_display;
+	if (no_display) {
+		/* the cover's mode and a framebuffer in memory, nothing scanned out */
+		d->mode.hdisplay = 260;
+		d->mode.vdisplay = 512;
+		d->buf.pitch = 260 * 4;
+		d->buf.map = g_malloc0((gsize)d->buf.pitch * 512);
+		d->have_mode = TRUE;
+	} else {
+		d->wl = wl_display_connect(NULL);
+		if (!d->wl) {
+			g_printerr("cannot connect to Wayland\n");
+			return 1;
+		}
+		d->registry = wl_display_get_registry(d->wl);
+		wl_registry_add_listener(d->registry, &registry_listener, d);
+		wl_display_roundtrip(d->wl);
+		/* Flush the lease-device bind and collect the initial connectors. */
+		wl_display_roundtrip(d->wl);
 
-	wl_fd = wl_display_get_fd(d->wl);
-	g_unix_fd_add(wl_fd, G_IO_IN, on_wayland, d);
+		wl_fd = wl_display_get_fd(d->wl);
+		g_unix_fd_add(wl_fd, G_IO_IN, on_wayland, d);
+	}
 
 	d->session_bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, NULL);
 	setup_inhibit(d);
 	setup_system_bus(d);
 	setup_logind(d);
-	setup_power_key(d);
+	setup_power_key(d, power_key);
 	setup_touch(d);
 	update_clock(d);
 	start_notification_monitor(d);
