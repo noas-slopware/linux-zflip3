@@ -8,6 +8,7 @@ Files that run on the phone, as opposed to `tools/` which runs on the host.
 | `installer/install-rootfs.sh` | M3.5: format `super`/`userdata` and unpack the Arch rootfs |
 | `rootfs/` | the phone's configuration: units, udev rules, NetworkManager, UCM, IMSroha's drop-in (`zflip3-device` on `arch`; `tools/build-rootfs.sh` copies it over `/`) |
 | `kita/` | `kita`, the cover display (leased DRM connector, clock, notifications, calls) |
+| `hinata/` | Hinata, every cell broadcast alert received (Kirigami, reads cellbroadcastd) |
 
 Our own programs are here: `claire/` (fingerprint secure-world glue), `mihari/` (stock's skin
 temperature estimate and SIOP limits) and `kita/`; `rootfs/` is the phone's configuration.

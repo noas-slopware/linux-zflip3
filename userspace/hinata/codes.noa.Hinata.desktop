@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Hinata
+GenericName=Emergency Alerts
+Comment=Every cell broadcast alert this phone has received
+Exec=hinata
+Icon=dialog-warning
+Categories=Utility;
+Keywords=cell broadcast;emergency;alert;재난문자;
+X-KDE-FormFactor=handset;tablet;desktop;
