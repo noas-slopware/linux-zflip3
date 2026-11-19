@@ -1,0 +1,44 @@
+# Maintainer: Noa Himesaka
+#
+# mobile-config-firefox, from the AUR's PKGBUILD (which packages 4.6.0), at upstream 5.5.0 with:
+# - 0001-0004: the Fenix-parity branch made for the HiBy RS6 (~/linux-rs6-pmos/mobile-config-firefox,
+#   fenix-parity), the toolbar, URL editing, home page and extension popups of Firefox for Android
+# - 0005: Firefox for Android's user agent by default, following the running Firefox version
+# - 0006: the Galaxy Z Flip3's scale factor
+# This is what the phone had installed by hand since 2026-11-07 (plus 0005).
+
+pkgname=mobile-config-firefox
+pkgver=5.5.0
+pkgrel=1
+pkgdesc="Mobile and privacy friendly configuration for Firefox"
+arch=('any')
+url="https://gitlab.postmarketos.org/postmarketOS/mobile-config-firefox"
+license=('MPL-2.0')
+depends=('firefox')
+source=("$url/-/archive/$pkgver/$pkgname-$pkgver.tar.gz"
+        0001-popups-Fit-extension-popups-that-are-wider-than-the-.patch
+        0002-Match-Firefox-for-Android-Fenix-on-narrow-windows.patch
+        0003-popups-Measure-extension-popups-with-the-mobile-view.patch
+        0004-Match-Fenix-s-toolbar-URL-editing-and-home-page-on-F.patch
+        0005-UserAgentManager-Firefox-for-Android-s-by-default.patch
+        0006-prefs-the-Galaxy-Z-Flip3-s-scale-factor-2.25-on-its-.patch)
+sha256sums=('de1f3ad27947b0466a20fd3cd48486ea121f3ab5969835eaa844ba49e54b84e8'
+            '394d14227a336c6cdf3c2dc332ce368f119f368fcc322c8881a9bcd76eabc852'
+            'c47a3cd7ab890a9d3f237c1dc97fe3db3a293c0a2acc1502e724c57627ec3ed7'
+            '4761ed4e291496579b82747d97655e624d9762e58e29d253887d705884aca4de'
+            'ee4f6b9b37200b707ec49fe51509dcd5cd190d06311cbade1915bcf88ef4fa3c'
+            '63ca346f3d4aab9a9201802b221614def6b83ec4809d59cc85c66fa6b9660b72'
+            'f929f21e04fcf044b39baa700e83626b39cddb0d05e8297f6fc6267331326f6e')
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  local p
+  for p in "$srcdir"/0*.patch; do
+    patch -p1 < "$p"
+  done
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  make DESTDIR="$pkgdir" install
+}

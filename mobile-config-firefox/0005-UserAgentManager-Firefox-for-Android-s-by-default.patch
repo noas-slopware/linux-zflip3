@@ -1,0 +1,36 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Thu, 19 Nov 2026 15:09:52 +0900
+Subject: [PATCH] UserAgentManager: Firefox for Android's by default
+
+The desktop string with "Mobile;" added still gets the desktop layout
+from many sites; Firefox for Android's gets the mobile one. As the
+default it follows the running Firefox version, where a user.js pin
+(Firefox/159 on Firefox 160 on the Galaxy Z Flip3) goes stale. The
+per-site rules are unchanged.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ src/modules/UserAgentManager.sys.mjs | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/src/modules/UserAgentManager.sys.mjs b/src/modules/UserAgentManager.sys.mjs
+index 81f0bd9..064a7e1 100644
+--- a/src/modules/UserAgentManager.sys.mjs
++++ b/src/modules/UserAgentManager.sys.mjs
+@@ -19,8 +19,10 @@ export class UserAgentManager {
+           "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.8037.59 Mobile Safari/537.36";
+     const UA_CHROME_CHROMEOS =
+           "Mozilla/5.0 (X11; CrOS aarch64 16765.51.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.7977.132 Safari/537.36";
+-    // Set default user agent
+-    PrefManager.defaultPref('general.useragent.override', UA_FIREFOX_MOBILE);
++    // Set default user agent: Firefox for Android's, so sites serve their mobile
++    // layout; "X11; Linux x86_64; Mobile" gets the desktop one from many of them.
++    // It follows the running Firefox version, unlike a pinned user pref.
++    PrefManager.defaultPref('general.useragent.override', UA_FIREFOX_ANDROID);
+ 
+     const userAgentRules = {
+         // Google
+-- 
+2.56.0
+

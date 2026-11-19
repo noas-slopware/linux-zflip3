@@ -1,0 +1,32 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Thu, 19 Nov 2026 15:09:59 +0900
+Subject: [PATCH] prefs: the Galaxy Z Flip3's scale factor (2.25 on its
+ 1080x2640 panel)
+
+As the phone has had it by hand since 2026-11-08.
+
+Assisted-by: Claude:claude-opus-5-5
+---
+ src/mobile-config-prefs.js | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/src/mobile-config-prefs.js b/src/mobile-config-prefs.js
+index ec5d378..3a7e745 100644
+--- a/src/mobile-config-prefs.js
++++ b/src/mobile-config-prefs.js
+@@ -6,7 +6,10 @@ pref('general.config.filename', "mobile-config-autoconfig.js");
+ pref('general.config.obscure_value', 0);
+ pref('general.config.sandbox_enabled', false);
+ 
+-// Enable touch density
++// Scale factor for 1080x2640 display (480 CSS px wide at 2.25 dppx)
++pref('layout.css.devPixelsPerPx', '2.25');
++
++// Touch density
+ pref('browser.uidensity', 2);
+ 
+ // Enable Pipewire cameras
+-- 
+2.56.0
+
