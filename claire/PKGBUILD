@@ -17,9 +17,9 @@ arch=(aarch64)
 license=(MIT)
 depends=(glibc systemd-libs)
 # senpai branch (default) of noas-slopware/linux-zflip3
-_zf3commit=70150c2ad105c529253a26f7c46b2be6980b7527
+_zf3commit=ce0353f99c7f264353d2824126b19539b9687f1d
 source=("linux-zflip3-$_zf3commit.tar.gz::https://github.com/noas-slopware/linux-zflip3/archive/$_zf3commit.tar.gz")
-sha256sums=('2dd68cd7b77d6d666691d996d183322b72fe68bc589f7e3135dc0031ca1ab5ea')
+sha256sums=('8142183e365753a5fe57f87b61c9e00b862dee28a0b8be9d74f8ae72e49d059e')
 
 _s() { echo "$srcdir/linux-zflip3-$_zf3commit/userspace/claire"; }
 
