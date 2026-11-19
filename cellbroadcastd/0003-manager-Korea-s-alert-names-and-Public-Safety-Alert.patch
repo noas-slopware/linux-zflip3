@@ -1,0 +1,73 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Thu, 19 Nov 2026 13:03:33 +0900
+Subject: [PATCH] manager: Korea's alert names, and "Public Safety Alert"
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Korean alerts came titled "Public Savety Alert". Fix the spelling, and
+with a Korean network name the alerts as Android does there
+(CellBroadcastReceiver res/values-mcc450): Extreme Emergency Alert
+(위급재난문자), Emergency Alert (긴급재난문자), Public Safety Alert
+(안전안내문자), Amber Alert (실종경보문자).
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ src/cbd-manager.c | 24 +++++++++++++++++++++---
+ 1 file changed, 21 insertions(+), 3 deletions(-)
+
+diff --git a/src/cbd-manager.c b/src/cbd-manager.c
+index 3fb4082..e865b6f 100644
+--- a/src/cbd-manager.c
++++ b/src/cbd-manager.c
+@@ -351,8 +351,26 @@ load_from_db (CbdManager *self)
+ 
+ 
+ static const char *
+-severity_to_string (LcbSeverityLevel level)
++severity_to_string (LcbSeverityLevel level, const char *country)
+ {
++  /* Korea names its alerts by its own scheme (위급재난문자, 긴급재난문자, 안전안내문자,
++   * 실종경보문자); these are the English names Android uses there
++   * (CellBroadcastReceiver res/values-mcc450/strings.xml). */
++  if (country && !g_ascii_strcasecmp (country, "kr")) {
++    switch (level) {
++    case LCB_SEVERITY_LEVEL_PRESIDENTIAL:
++      return "Extreme Emergency Alert";
++    case LCB_SEVERITY_LEVEL_EXTREME:
++      return "Emergency Alert";
++    case LCB_SEVERITY_LEVEL_PUBLIC_SAFETY:
++      return "Public Safety Alert";
++    case LCB_SEVERITY_LEVEL_AMBER:
++      return "Amber Alert";
++    default:
++      break;
++    }
++  }
++
+   switch (level) {
+   case LCB_SEVERITY_LEVEL_PRESIDENTIAL:
+     return "Nation Wide Alert";
+@@ -361,7 +379,7 @@ severity_to_string (LcbSeverityLevel level)
+   case LCB_SEVERITY_LEVEL_SEVERE:
+     return "Severe Danger Alert";
+   case LCB_SEVERITY_LEVEL_PUBLIC_SAFETY:
+-    return "Public Savety Alert";
++    return "Public Safety Alert";
+   case LCB_SEVERITY_LEVEL_AMBER:
+     return "Amber Alert";
+   case LCB_SEVERITY_LEVEL_TEST:
+@@ -530,7 +548,7 @@ on_new_cbm (CbdMmManager *mm_manager,
+   channel_manager = cbd_mm_manager_get_channel_manager (mm_manager);
+   severity = cbd_channel_manager_lookup_level (channel_manager, channel);
+ 
+-  severity_subject = severity_to_string (severity);
++  severity_subject = severity_to_string (severity, cbd_channel_manager_get_country (channel_manager));
+   msg = cbd_message_new (text,
+                          channel,
+                          msg_code,
+-- 
+2.56.0
+
