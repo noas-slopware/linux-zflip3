@@ -156,11 +156,9 @@ struct daemon {
 	guint clock_source;
 	guint expiry_source;
 
-	/* Session-bus monitor connection for NotificationWatcher.Notify. */
-	GDBusConnection *monitor;
-	guint monitor_filter;
-	gulong monitor_closed_handler;
-	gint64 monitor_started;
+	/* org.kde.NotificationWatcher at /NotificationWatcher, registered with Plasma */
+	guint watcher_object;
+	guint notifications_watch;
 
 	/* The qml6 DPMS helper for the main panel: one child at a time. */
 	GPid dpms_child;
@@ -1177,42 +1175,6 @@ static void add_notification(struct daemon *d, guint32 id, const char *app,
 	wake_display(d);
 }
 
-/*
- * Plasma delivers each notification to its watchers as a method call,
- * org.kde.NotificationWatcher.Notify(u id, s app_name, u replaces_id,
- * s app_icon, s summary, s body, as actions, a{sv} hints, i timeout).
- * A monitor connection on the session bus sees those calls without
- * registering as a watcher. The filter runs in the GDBus worker thread, so
- * it only copies the fields out and hands them to the main loop.
- */
-struct pending_notification {
-	struct daemon *d;
-	guint32 id;
-	char *app;
-	char *summary;
-	char *body;
-	int emergency;
-};
-
-static void pending_notification_free(gpointer data)
-{
-	struct pending_notification *p = data;
-
-	g_free(p->app);
-	g_free(p->summary);
-	g_free(p->body);
-	g_free(p);
-}
-
-static gboolean deliver_notification(gpointer data)
-{
-	struct pending_notification *p = data;
-
-	add_notification(p->d, p->id, p->app, p->summary, p->body,
-			 p->emergency);
-	return G_SOURCE_REMOVE;
-}
-
 static char *child_string(GVariant *body, gsize index)
 {
 	GVariant *v = g_variant_get_child_value(body, index);
@@ -1258,146 +1220,133 @@ static int emergency_from_hints(GVariant *body)
 	return ret;
 }
 
-static GDBusMessage *monitor_filter(GDBusConnection *connection,
-				    GDBusMessage *message, gboolean incoming,
-				    gpointer user_data)
+/*
+ * Plasma hands each notification to the services registered as watchers
+ * (org.kde.NotificationManager.RegisterWatcher): it calls
+ * org.kde.NotificationWatcher.Notify(u id, s app_name, u replaces_id,
+ * s app_icon, s summary, s body, as actions, a{sv} hints, i timeout) on their
+ * /NotificationWatcher, and CloseNotification(u id) when one goes. kita
+ * registers itself; it used to watch these calls to other watchers with a
+ * monitor connection, which saw nothing while no other watcher was
+ * registered (KDE Connect only is, while a device is connected), and missed
+ * the 2026-11-19 14:57 presidential alert that way.
+ */
+static const char watcher_xml[] =
+	"<node><interface name='org.kde.NotificationWatcher'>"
+	"<method name='Notify'>"
+	"<arg type='u' direction='in'/><arg type='s' direction='in'/>"
+	"<arg type='u' direction='in'/><arg type='s' direction='in'/>"
+	"<arg type='s' direction='in'/><arg type='s' direction='in'/>"
+	"<arg type='as' direction='in'/><arg type='a{sv}' direction='in'/>"
+	"<arg type='i' direction='in'/></method>"
+	"<method name='CloseNotification'><arg type='u' direction='in'/></method>"
+	"</interface></node>";
+
+static void remove_notification_id(struct daemon *d, guint32 id)
 {
-	struct daemon *d = user_data;
-	struct pending_notification *p;
-	GVariant *body;
-	GVariant *idv;
+	guint i;
 
-	(void)connection;
-	if (!incoming)
-		return message;
+	for (i = 0; i < d->notifications->len; i++) {
+		struct notification *n = &g_array_index(d->notifications,
+							struct notification, i);
 
-	if (g_dbus_message_get_message_type(message) ==
-		    G_DBUS_MESSAGE_TYPE_METHOD_CALL &&
-	    !g_strcmp0(g_dbus_message_get_interface(message),
-		       "org.kde.NotificationWatcher") &&
-	    !g_strcmp0(g_dbus_message_get_member(message), "Notify")) {
-		body = g_dbus_message_get_body(message);
-		if (body && g_variant_is_of_type(body, G_VARIANT_TYPE_TUPLE) &&
-		    g_variant_n_children(body) >= 6) {
-			idv = g_variant_get_child_value(body, 0);
-			if (g_variant_is_of_type(idv, G_VARIANT_TYPE_UINT32)) {
-				p = g_new0(struct pending_notification, 1);
-				p->d = d;
-				p->id = g_variant_get_uint32(idv);
-				p->app = child_string(body, 1);
-				p->summary = child_string(body, 4);
-				p->body = child_string(body, 5);
-				p->emergency = emergency_from_hints(body);
-				g_idle_add_full(G_PRIORITY_DEFAULT,
-						deliver_notification, p,
-						pending_notification_free);
-			}
-			g_variant_unref(idv);
+		if (n->id == id) {
+			free_notification(n);
+			g_array_remove_index(d->notifications, i);
+			if (d->awake)
+				draw_ui(d);
+			return;
 		}
 	}
-
-	/*
-	 * Replies and signals addressed to this connection (the BecomeMonitor
-	 * reply, NameLost) go on to GDBus. Monitored traffic is addressed to
-	 * someone else, and no method call may reach GDBus's dispatch, which
-	 * would answer it: a monitor that sends anything is disconnected.
-	 */
-	if (g_dbus_message_get_message_type(message) !=
-		    G_DBUS_MESSAGE_TYPE_METHOD_CALL &&
-	    !g_strcmp0(g_dbus_message_get_destination(message),
-		       g_dbus_connection_get_unique_name(connection)))
-		return message;
-	g_object_unref(message);
-	return NULL;
 }
 
-static void start_notification_monitor(struct daemon *d);
-
-static void monitor_closed(GDBusConnection *connection,
-			   gboolean remote_peer_vanished, GError *error,
-			   gpointer user_data)
+static void watcher_method(GDBusConnection *connection, const gchar *sender,
+			   const gchar *path, const gchar *interface,
+			   const gchar *method, GVariant *params,
+			   GDBusMethodInvocation *invocation, gpointer user_data)
 {
 	struct daemon *d = user_data;
-	gboolean was_long_lived;
 
-	(void)remote_peer_vanished;
-	g_message("notification monitor closed: %s",
-		  error ? error->message : "no error");
-	if (connection != d->monitor)
-		return;
-	g_dbus_connection_remove_filter(d->monitor, d->monitor_filter);
-	g_signal_handler_disconnect(d->monitor, d->monitor_closed_handler);
-	g_clear_object(&d->monitor);
-	d->monitor_filter = 0;
-	d->monitor_closed_handler = 0;
+	(void)connection;
+	(void)sender;
+	(void)path;
+	(void)interface;
+	if (!strcmp(method, "Notify") &&
+	    g_variant_is_of_type(params, G_VARIANT_TYPE("(ususssasa{sv}i)"))) {
+		guint32 id;
+		char *app = child_string(params, 1);
+		char *summary = child_string(params, 4);
+		char *body = child_string(params, 5);
 
-	/*
-	 * Reconnect once per close. A connection that dies right after it was
-	 * made would only die again, so give up then instead of looping.
-	 */
-	was_long_lived = g_get_monotonic_time() - d->monitor_started >
-			 10 * G_TIME_SPAN_SECOND;
-	if (was_long_lived)
-		start_notification_monitor(d);
-	else
-		g_message("notification monitor: not reconnecting");
+		g_variant_get_child(params, 0, "u", &id);
+		add_notification(d, id, app, summary, body,
+				 emergency_from_hints(params));
+		g_free(app);
+		g_free(summary);
+		g_free(body);
+	} else if (!strcmp(method, "CloseNotification") &&
+		   g_variant_is_of_type(params, G_VARIANT_TYPE("(u)"))) {
+		guint32 id;
+
+		g_variant_get(params, "(u)", &id);
+		remove_notification_id(d, id);
+	}
+	g_dbus_method_invocation_return_value(invocation, NULL);
 }
 
-static void start_notification_monitor(struct daemon *d)
+static void register_watcher_reply(GObject *source, GAsyncResult *res,
+				   gpointer user_data)
 {
-	static const char *rules[] = {
-		"type='method_call',interface='org.kde.NotificationWatcher',member='Notify'",
-		NULL
-	};
 	GError *err = NULL;
-	GVariant *ret;
-	gchar *address;
+	GVariant *ret = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source),
+						      res, &err);
 
-	address = g_dbus_address_get_for_bus_sync(G_BUS_TYPE_SESSION, NULL, &err);
-	if (!address) {
-		g_message("notification monitor: %s", err->message);
+	(void)user_data;
+	if (ret) {
+		g_message("notifications: registered as a watcher");
+		g_variant_unref(ret);
+	} else {
+		g_message("notifications: RegisterWatcher: %s", err->message);
 		g_error_free(err);
-		return;
 	}
-	d->monitor = g_dbus_connection_new_for_address_sync(address,
-		G_DBUS_CONNECTION_FLAGS_AUTHENTICATION_CLIENT |
-		G_DBUS_CONNECTION_FLAGS_MESSAGE_BUS_CONNECTION,
-		NULL, NULL, &err);
-	g_free(address);
-	if (!d->monitor) {
-		g_message("notification monitor: %s", err->message);
-		g_error_free(err);
-		return;
-	}
-	g_dbus_connection_set_exit_on_close(d->monitor, FALSE);
+}
 
-	/* Install the filter first so nothing arriving after BecomeMonitor
-	 * reaches GDBus's own dispatch. */
-	d->monitor_filter = g_dbus_connection_add_filter(d->monitor,
-							 monitor_filter, d,
-							 NULL);
-	ret = g_dbus_connection_call_sync(d->monitor, "org.freedesktop.DBus",
-					  "/org/freedesktop/DBus",
-					  "org.freedesktop.DBus.Monitoring",
-					  "BecomeMonitor",
-					  g_variant_new("(^asu)", rules, 0u),
-					  NULL, G_DBUS_CALL_FLAGS_NONE, -1,
-					  NULL, &err);
-	if (!ret) {
-		g_message("BecomeMonitor: %s", err->message);
+/* Plasma's notification server (re)appeared: it knows no watchers yet. */
+static void notifications_appeared(GDBusConnection *connection,
+				   const gchar *name, const gchar *owner,
+				   gpointer user_data)
+{
+	(void)name;
+	(void)owner;
+	g_dbus_connection_call(connection, "org.freedesktop.Notifications",
+			       "/org/freedesktop/Notifications",
+			       "org.kde.NotificationManager", "RegisterWatcher",
+			       NULL, NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL,
+			       register_watcher_reply, user_data);
+}
+
+static void setup_notification_watcher(struct daemon *d)
+{
+	static const GDBusInterfaceVTable vtable = { watcher_method, NULL, NULL, { 0 } };
+	GDBusNodeInfo *info;
+	GError *err = NULL;
+
+	if (!d->session_bus)
+		return;
+	info = g_dbus_node_info_new_for_xml(watcher_xml, NULL);
+	d->watcher_object = g_dbus_connection_register_object(
+		d->session_bus, "/NotificationWatcher", info->interfaces[0],
+		&vtable, d, NULL, &err);
+	g_dbus_node_info_unref(info);
+	if (!d->watcher_object) {
+		g_message("notifications: no /NotificationWatcher: %s", err->message);
 		g_error_free(err);
-		g_dbus_connection_remove_filter(d->monitor, d->monitor_filter);
-		d->monitor_filter = 0;
-		g_dbus_connection_close_sync(d->monitor, NULL, NULL);
-		g_clear_object(&d->monitor);
 		return;
 	}
-	g_variant_unref(ret);
-	d->monitor_started = g_get_monotonic_time();
-	d->monitor_closed_handler = g_signal_connect(d->monitor, "closed",
-						     G_CALLBACK(monitor_closed),
-						     d);
-	g_message("notification monitor on the session bus");
+	d->notifications_watch = g_bus_watch_name_on_connection(
+		d->session_bus, "org.freedesktop.Notifications",
+		G_BUS_NAME_WATCHER_FLAGS_NONE, notifications_appeared, NULL, d,
+		NULL);
 }
 
 static void on_imsd_signal(GDBusConnection *connection, const gchar *sender,
@@ -2170,16 +2119,11 @@ static void cleanup(struct daemon *d)
 {
 	guint i;
 
-	if (d->monitor) {
-		if (d->monitor_closed_handler)
-			g_signal_handler_disconnect(d->monitor,
-						    d->monitor_closed_handler);
-		if (d->monitor_filter)
-			g_dbus_connection_remove_filter(d->monitor,
-							d->monitor_filter);
-		g_dbus_connection_close_sync(d->monitor, NULL, NULL);
-		g_object_unref(d->monitor);
-	}
+	if (d->notifications_watch)
+		g_bus_unwatch_name(d->notifications_watch);
+	if (d->watcher_object && d->session_bus)
+		g_dbus_connection_unregister_object(d->session_bus,
+						    d->watcher_object);
 	stop_awake_timers(d);
 	if (d->power_source)
 		g_source_remove(d->power_source);
@@ -2401,7 +2345,7 @@ int main(int argc, char **argv)
 	setup_power_key(d, power_key);
 	setup_touch(d);
 	update_clock(d);
-	start_notification_monitor(d);
+	setup_notification_watcher(d);
 
 	d->loop = g_main_loop_new(NULL, FALSE);
 	g_unix_signal_add(SIGINT, on_signal, d);

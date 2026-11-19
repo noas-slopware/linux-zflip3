@@ -40,9 +40,12 @@ dismisses the notification card it lands on and restarts the 8 seconds; it
 never turns the main panel on. A call holds the display on until imsd reports
 it idle or terminated (imsd's states 0, 6 or 7). Opening the lid sleeps it
 again. Backlight is 160/255 while awake. It reads `LidClosed` from logind,
-calls from IMSroha (`codes.noa.IMSroha`) on the system bus, and notifications from Plasma's
-`org.kde.NotificationWatcher.Notify` calls through a GDBus monitor connection
-on the session bus (`BecomeMonitor`), parsed from the message body.
+calls from IMSroha (`codes.noa.IMSroha`) on the system bus, and notifications as a
+registered Plasma notification watcher: it serves `org.kde.NotificationWatcher` at
+`/NotificationWatcher` and calls `org.kde.NotificationManager.RegisterWatcher` whenever
+`org.freedesktop.Notifications` appears; Plasma then calls its `Notify` for every
+notification and `CloseNotification` when one goes. (It used to watch Plasma's calls to
+other watchers with a monitor connection, which saw nothing while none was registered.)
 
 While folded the main panel is DPMS Off, not just backlight 0: `apply_lid`
 runs `qml6 /usr/share/kita/dpms-main-off.qml` on close and `...-on.qml`
