@@ -13,7 +13,7 @@
 
 pkgname=modemmanager
 pkgver=1.24.2
-pkgrel=19
+pkgrel=20
 pkgdesc="Mobile broadband modem management service with IMSroha (userspace IMS) support"
 url="https://www.freedesktop.org/wiki/Software/ModemManager/"
 arch=(aarch64 x86_64)
@@ -69,6 +69,8 @@ source=(
   # upstream 5a3b810b, 857efa1f: the bus let no user call the CellBroadcast interface
   cbs-0016-polkit-conf-Add-missing-Cell-Broadcast-methods.patch
   cbs-0017-polkit-conf-Add-missing-Cell-Broadcast-SetChannel-method.patch
+  # an LTE-only SIM on an EN-DC cell was reported as 5GNR (DCNR restriction ignored)
+  nr-0001-modem-helpers-qmi-no-5GNR-while-DCNR-is-restricted.patch
 )
 sha256sums=('SKIP'
             '65846cde8a785b2edd6d9178cfb9dd4337df837585e7de455daf10168e2818fa'
@@ -88,7 +90,8 @@ sha256sums=('SKIP'
             '447376c11423444004b454bb417564eb6c97acafc7bdf9bf05da4fc6476b7ff5'
             '6bd922d81e21d2042aa898c514656f59c5064e70c70b58db615860184cf0d52b'
             '22c085860812fe871af6a47baf18baaae56caef84a24c62bb32586edd544bfed'
-            '6d07d4bcfafd7f0aaa86c1a3c6cf3d54847087177638a213f4024ac5504e2a5b')
+            '6d07d4bcfafd7f0aaa86c1a3c6cf3d54847087177638a213f4024ac5504e2a5b'
+            '3dfa4f5585eede56d47a647d0afc3cc9aa3920d2b254bc9a04e81e8bbded8c45')
 
 prepare() {
   cd ModemManager
@@ -102,7 +105,7 @@ prepare() {
   # RCS OTP where SMS stays with the modem (SKT): port SMS go to imsroha
   git apply "$srcdir/imsroha-$_imsrohacommit/modemmanager/0008-broadband-modem-qmi-hand-port-addressed-SMS-to-imsroha.patch"
   local p
-  for p in "$srcdir"/cbs-*.patch; do
+  for p in "$srcdir"/cbs-*.patch "$srcdir"/nr-*.patch; do
     git apply "$p"
   done
 }
@@ -121,8 +124,9 @@ build() {
 }
 
 check() {
-  # the Cell Broadcast parser (cbs-*.patch, a Korean presidential alert among the cases)
-  meson test -C build --print-errorlogs test-cbm-part
+  # the Cell Broadcast parser (cbs-*.patch, a Korean presidential alert among the cases) and
+  # the QMI helpers (nr-*.patch: EN-DC with DCNR restricted is LTE only)
+  meson test -C build --print-errorlogs test-cbm-part test-modem-helpers-qmi
 }
 
 package() {

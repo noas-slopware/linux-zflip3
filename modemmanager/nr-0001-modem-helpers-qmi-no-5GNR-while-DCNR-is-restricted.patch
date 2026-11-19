@@ -1,0 +1,178 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Noa Himesaka <himesaka@noa.codes>
+Date: Thu, 19 Nov 2026 14:02:50 +0900
+Subject: [PATCH] modem-helpers-qmi: no 5GNR on an LTE cell whose EN-DC the
+ subscription may not use
+
+NAS System Info says whether the LTE cell offers EN-DC (EUTRA with NR5G
+availability, TLV 0x4E) and, separately, whether this subscription may
+use it (DCNR restriction info, 0x4F). Only the first was read, so an
+LTE-only SIM on a cell that offers 5G NSA was reported as LTE and 5GNR,
+and the status bar showed 5G (Galaxy Z Flip3 on LG U+, which reports the
+restriction). Leave 5GNR out while DCNR is restricted, as Android does
+(NR_STATE_RESTRICTED).
+
+Signed-off-by: Noa Himesaka <himesaka@noa.codes>
+Assisted-by: Claude:claude-opus-5-5
+---
+ src/mm-modem-helpers-qmi.c         | 16 ++++++
+ src/tests/test-modem-helpers-qmi.c | 92 ++++++++++++++++++++++++++++++
+ 2 files changed, 108 insertions(+)
+
+diff --git a/src/mm-modem-helpers-qmi.c b/src/mm-modem-helpers-qmi.c
+index ea09b9d8..4b7dbb90 100644
+--- a/src/mm-modem-helpers-qmi.c
++++ b/src/mm-modem-helpers-qmi.c
+@@ -1839,6 +1839,7 @@ process_lte_info (QmiMessageNasGetSystemInfoOutput *response_output,
+     gboolean                    network_id_valid = FALSE;
+     const gchar                *mcc = NULL;
+     const gchar                *mnc = NULL;
++    gboolean                    dcnr_restricted = FALSE;
+ 
+     if (response_output) {
+         /* if service status info not given, ACT is unsupported */
+@@ -1867,6 +1868,10 @@ process_lte_info (QmiMessageNasGetSystemInfoOutput *response_output,
+             response_output,
+             out_endc_available,
+             NULL);
++        qmi_message_nas_get_system_info_output_get_dcnr_restriction_info (
++            response_output,
++            &dcnr_restricted,
++            NULL);
+     } else if (indication_output) {
+         /* if service status info not given, ACT is unsupported */
+         if (!qmi_indication_nas_system_info_output_get_lte_service_status (
+@@ -1894,9 +1899,20 @@ process_lte_info (QmiMessageNasGetSystemInfoOutput *response_output,
+             indication_output,
+             out_endc_available,
+             NULL);
++        qmi_indication_nas_system_info_output_get_dcnr_restriction_info (
++            indication_output,
++            &dcnr_restricted,
++            NULL);
+     } else
+         g_assert_not_reached ();
+ 
++    /* The cell offers EN-DC, but the subscription may not use NR with it (an
++     * LTE-only SIM): that is LTE, not 5GNR (Android's NR_STATE_RESTRICTED). */
++    if (dcnr_restricted && *out_endc_available) {
++        mm_obj_dbg (log_object, "EN-DC available but DCNR restricted: no 5GNR");
++        *out_endc_available = FALSE;
++    }
++
+     process_common_info ("LTE",
+                          service_status,
+                          domain_valid,         domain,
+diff --git a/src/tests/test-modem-helpers-qmi.c b/src/tests/test-modem-helpers-qmi.c
+index 576beb68..549bea0f 100644
+--- a/src/tests/test-modem-helpers-qmi.c
++++ b/src/tests/test-modem-helpers-qmi.c
+@@ -1884,6 +1884,96 @@ test_registration_state_from_qmi_system_info_4g_eps_home (void)
+                                                          MM_MODEM_ACCESS_TECHNOLOGY_LTE);
+ }
+ 
++static void
++test_registration_state_from_qmi_system_info_4g_endc_dcnr_restricted (void)
++{
++    /* the 4g/eps-home cell, offering EN-DC, which the subscription may not use (an LTE-only SIM) */
++    static const guint8 data[] = {
++        0x01, 0x41, 0x00, 0x80, /* marker (1 byte), qmux length (2 bytes), qmux flags (1 byte) */
++        0x03, /* service: NAS */
++        0x02, /* client id */
++        0x02, /* service flags */
++        0x01, 0x00, /* transaction */
++        0x4D, 0x00, /* message id */
++        0x35, 0x00, /* all tlvs length */
++        /* TLV 0x02: Result */
++        0x02, /* tlv type */
++        0x04, 0x00, /* tlv size */
++        0x00, 0x00, 0x00, 0x00,
++        /* TLV 0x14: LTE Service Status */
++        0x14, /* tlv type */
++        0x03, 0x00, /* tlv size */
++        0x02, 0x00, 0x00,
++        /* TLV 0x19: LTE System Info */
++        0x19, /* tlv type */
++        0x1D, 0x00, /* tlv size: 29 bytes */
++        0x01, 0x02, 0x01, 0x02, 0x01, 0x00, 0x01, 0x00,
++        0x00, 0xFF, 0xFF, 0x01, 0x01, 0x9B, 0x01, 0x00,
++        0x00, 0x00, 0x00, 0x01, 0x39, 0x30, 0x31, 0x37,
++        0x30, 0xFF, 0x01, 0x07, 0x00,
++        /* TLV 0x4E: EUTRA with NR5G availability */
++        0x4E, 0x01, 0x00, 0x01,
++        /* TLV 0x4F: DCNR restriction info */
++        0x4F, 0x01, 0x00, 0x01,
++    };
++
++    common_test_registration_state_from_qmi_system_info (data, G_N_ELEMENTS (data),
++                                                         MM_MODEM_3GPP_REGISTRATION_STATE_UNKNOWN, /* cs */
++                                                         MM_MODEM_3GPP_REGISTRATION_STATE_UNKNOWN, /* ps */
++                                                         MM_MODEM_3GPP_REGISTRATION_STATE_HOME,    /* eps */
++                                                         MM_MODEM_3GPP_REGISTRATION_STATE_UNKNOWN, /* 5gs */
++                                                         0, /* lac */
++                                                         7, /* tac */
++                                                         0x019B01, /* cid */
++                                                         "90170", /* operator id */
++                                                         MM_MODEM_ACCESS_TECHNOLOGY_LTE);
++}
++
++static void
++test_registration_state_from_qmi_system_info_4g_endc_dcnr_allowed (void)
++{
++    /* the 4g/eps-home cell, offering EN-DC, which the subscription may use */
++    static const guint8 data[] = {
++        0x01, 0x41, 0x00, 0x80, /* marker (1 byte), qmux length (2 bytes), qmux flags (1 byte) */
++        0x03, /* service: NAS */
++        0x02, /* client id */
++        0x02, /* service flags */
++        0x01, 0x00, /* transaction */
++        0x4D, 0x00, /* message id */
++        0x35, 0x00, /* all tlvs length */
++        /* TLV 0x02: Result */
++        0x02, /* tlv type */
++        0x04, 0x00, /* tlv size */
++        0x00, 0x00, 0x00, 0x00,
++        /* TLV 0x14: LTE Service Status */
++        0x14, /* tlv type */
++        0x03, 0x00, /* tlv size */
++        0x02, 0x00, 0x00,
++        /* TLV 0x19: LTE System Info */
++        0x19, /* tlv type */
++        0x1D, 0x00, /* tlv size: 29 bytes */
++        0x01, 0x02, 0x01, 0x02, 0x01, 0x00, 0x01, 0x00,
++        0x00, 0xFF, 0xFF, 0x01, 0x01, 0x9B, 0x01, 0x00,
++        0x00, 0x00, 0x00, 0x01, 0x39, 0x30, 0x31, 0x37,
++        0x30, 0xFF, 0x01, 0x07, 0x00,
++        /* TLV 0x4E: EUTRA with NR5G availability */
++        0x4E, 0x01, 0x00, 0x01,
++        /* TLV 0x4F: DCNR restriction info */
++        0x4F, 0x01, 0x00, 0x00,
++    };
++
++    common_test_registration_state_from_qmi_system_info (data, G_N_ELEMENTS (data),
++                                                         MM_MODEM_3GPP_REGISTRATION_STATE_UNKNOWN, /* cs */
++                                                         MM_MODEM_3GPP_REGISTRATION_STATE_UNKNOWN, /* ps */
++                                                         MM_MODEM_3GPP_REGISTRATION_STATE_HOME,    /* eps */
++                                                         MM_MODEM_3GPP_REGISTRATION_STATE_UNKNOWN, /* 5gs */
++                                                         0, /* lac */
++                                                         7, /* tac */
++                                                         0x019B01, /* cid */
++                                                         "90170", /* operator id */
++                                                         (MM_MODEM_ACCESS_TECHNOLOGY_LTE | MM_MODEM_ACCESS_TECHNOLOGY_5GNR));
++}
++
+ static void
+ test_registration_state_from_qmi_system_info_5g_5gs_home (void)
+ {
+@@ -2005,6 +2095,8 @@ int main (int argc, char **argv)
+     g_test_add_func ("/MM/qmi/registration-state-from-system-info/2g3g4g/idle",      test_registration_state_from_qmi_system_info_2g3g4g_idle);
+     g_test_add_func ("/MM/qmi/registration-state-from-system-info/2g3g4g/eps-home",  test_registration_state_from_qmi_system_info_2g3g4g_eps_home);
+     g_test_add_func ("/MM/qmi/registration-state-from-system-info/4g/eps-home",      test_registration_state_from_qmi_system_info_4g_eps_home);
++    g_test_add_func ("/MM/qmi/registration-state-from-system-info/4g/endc-dcnr-restricted", test_registration_state_from_qmi_system_info_4g_endc_dcnr_restricted);
++    g_test_add_func ("/MM/qmi/registration-state-from-system-info/4g/endc-dcnr-allowed",    test_registration_state_from_qmi_system_info_4g_endc_dcnr_allowed);
+     g_test_add_func ("/MM/qmi/registration-state-from-system-info/5g/5gs-home",      test_registration_state_from_qmi_system_info_5g_5gs_home);
+ 
+     return g_test_run ();
+-- 
+2.56.0
+
